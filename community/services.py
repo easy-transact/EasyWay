@@ -1,0 +1,111 @@
+"""
+ServiceIncident : couche entre la vue et le modele pour POST /api/incidents/.
+Ordre volontaire (cf. discussion) : quota d'abord (rejette vite, pas de
+verrou pose pour rien), puis doublon + creation dans la meme transaction
+verrouillee.
+"""
+
+import h3
+from django.contrib.gis.db.models.functions import Distance
+from django.contrib.gis.measure import D
+from django.db import transaction
+from django.utils import timezone
+
+from places.services.client_nominatim import ClientNominatim
+
+from .cache_incidents import invalider_cache_cellule
+from .models import (
+    DUREE_VIE_BASE_PAR_TYPE,
+    RESOLUTION_H3_FIN,
+    Incident,
+    SensVote,
+    StatutIncident,
+    Vote,
+)
+
+QUOTA_SIGNALEMENTS_PAR_HEURE = 10
+RAYON_DOUBLON_M = 150
+SECTEUR_DOUBLON_DEGRES = 45
+SEUIL_REPUTATION_AUTO_ACTIF = 30
+
+
+class QuotaDepasse(Exception):
+    """Leve quand l'utilisateur a atteint QUOTA_SIGNALEMENTS_PAR_HEURE."""
+
+
+class ServiceIncident:
+    def signaler(self, utilisateur, type_incident, position, cap=None, sous_type=''):
+        """Retourne (incident, est_doublon). est_doublon=True signifie qu'aucun
+        nouvel Incident n'a ete cree -- le signalement a corrobore un existant."""
+        self._verifier_quota(utilisateur)
+
+        with transaction.atomic():
+            doublon = self._chercher_doublon(type_incident, position, cap)
+            if doublon is not None:
+                self._corroborer(doublon, utilisateur)
+                incident, est_doublon = doublon, True
+            else:
+                incident = Incident.objects.create(
+                    auteur=utilisateur,
+                    type=type_incident,
+                    sous_type=sous_type,
+                    position=position,
+                    cap=cap,
+                    nom_voie=self._nom_voie(position),
+                    statut=(
+                        StatutIncident.EN_ATTENTE if utilisateur.score_reputation < SEUIL_REPUTATION_AUTO_ACTIF
+                        else StatutIncident.ACTIF
+                    ),
+                    expire_le=timezone.now() + timezone.timedelta(
+                        minutes=DUREE_VIE_BASE_PAR_TYPE.get(type_incident, 60)
+                    ),
+                )
+                est_doublon = False
+
+        invalider_cache_cellule(incident.cellule_h3_res7)
+        return incident, est_doublon
+
+    def _verifier_quota(self, utilisateur):
+        depuis = timezone.now() - timezone.timedelta(hours=1)
+        recents = Incident.objects.filter(auteur=utilisateur, cree_le__gte=depuis).count()
+        if recents >= QUOTA_SIGNALEMENTS_PAR_HEURE:
+            raise QuotaDepasse()
+
+    def _chercher_doublon(self, type_incident, position, cap):
+        # select_for_update() verrouille les candidats pour la duree de la
+        # transaction : sans ca, deux signalements du meme evenement arrivant
+        # dans la meme seconde peuvent chacun voir "aucun doublon" et creer
+        # deux Incident distincts pour la meme chose.
+        cellule = h3.latlng_to_cell(position.y, position.x, RESOLUTION_H3_FIN)
+        cellules_voisines = [h3.str_to_int(c) for c in h3.grid_disk(cellule, 1)]
+
+        candidats = Incident.objects.select_for_update().filter(
+            type=type_incident,
+            statut__in=[StatutIncident.ACTIF, StatutIncident.EN_ATTENTE],
+            cellule_h3_res8__in=cellules_voisines,
+        ).annotate(distance=Distance('position', position)).filter(distance__lte=D(m=RAYON_DOUBLON_M))
+
+        for candidat in candidats:
+            if cap is not None and candidat.cap is not None:
+                ecart = abs(cap - candidat.cap) % 360
+                ecart = min(ecart, 360 - ecart)
+                if ecart > SECTEUR_DOUBLON_DEGRES:
+                    continue
+            return candidat
+        return None
+
+    def _corroborer(self, incident, utilisateur):
+        if Vote.objects.filter(incident=incident, votant=utilisateur).exists():
+            return  # deja signale/vote sur cet incident -- ne compte pas deux fois
+        vote = Vote.objects.create(
+            incident=incident, votant=utilisateur,
+            sens=SensVote.CONFIRMATION, poids=utilisateur.poids_de_vote(),
+        )
+        incident.confirmer(vote)
+
+    def _nom_voie(self, position):
+        # Circuit breaker deja dans ClientNominatim (P2b) : un Nominatim en
+        # panne renvoie None ici, jamais une exception -- la creation de
+        # l'incident ne doit jamais bloquer sur un champ secondaire.
+        resultat = ClientNominatim().inverser(position.y, position.x)
+        return resultat['libelle'] if resultat else ''

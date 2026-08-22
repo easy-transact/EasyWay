@@ -4,20 +4,29 @@ from django.utils import timezone
 from django.utils.encoding import force_str
 from django.utils.http import urlsafe_base64_decode
 from rest_framework import status
+from rest_framework.generics import get_object_or_404
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 
+from community.models import TypeIncident
+
+from .config_data import VERSION_MINIMALE_APP, VILLES_DISPONIBLES
 from .emails import envoyer_email_reinitialisation, envoyer_email_verification
-from .models import Droits, Parametres, Utilisateur
+from .models import Appareil, Parametres, TypeVehicule, Utilisateur
 from .serializers import (
+    AppareilSerializer,
+    AvatarSerializer,
     ConfirmationReinitialisationSerializer,
     ConnexionGoogleSerializer,
     ConnexionSerializer,
     DemandeReinitialisationSerializer,
     InscriptionSerializer,
+    ParametresSerializer,
+    UtilisateurMiseAJourSerializer,
     UtilisateurSerializer,
     VerifierExistenceSerializer,
 )
@@ -51,11 +60,14 @@ class VerifierExistenceView(APIView):
 
 
 class InscriptionView(APIView):
-    """UC-01 : cree le compte, ses Parametres/Droits par defaut, envoie le lien
+    """UC-01 : cree le compte et ses Parametres par defaut (Droits est resolu
+    dynamiquement depuis la formule, cf. Utilisateur.droits), envoie le lien
     de verification et retourne directement les jetons (acces complet des la
     creation, cf. postconditions de UC-01)."""
 
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'inscription'
 
     def post(self, request):
         serializer = InscriptionSerializer(data=request.data)
@@ -63,20 +75,28 @@ class InscriptionView(APIView):
         utilisateur = serializer.save()
         envoyer_email_verification(utilisateur)
         return Response(
-            {'utilisateur': UtilisateurSerializer(utilisateur).data, 'jetons': _jetons_pour(utilisateur)},
+            {
+                'utilisateur': UtilisateurSerializer(utilisateur, context={'request': request}).data,
+                'jetons': _jetons_pour(utilisateur),
+            },
             status=status.HTTP_201_CREATED,
         )
 
 
 class ConnexionView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'connexion'
 
     def post(self, request):
         serializer = ConnexionSerializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
         utilisateur = serializer.validated_data['utilisateur']
         return Response(
-            {'utilisateur': UtilisateurSerializer(utilisateur).data, 'jetons': _jetons_pour(utilisateur)}
+            {
+                'utilisateur': UtilisateurSerializer(utilisateur, context={'request': request}).data,
+                'jetons': _jetons_pour(utilisateur),
+            }
         )
 
 
@@ -85,6 +105,8 @@ class ConnexionGoogleView(APIView):
     email verifiee est deja connue, sinon en cree un nouveau."""
 
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'connexion'
 
     def post(self, request):
         serializer = ConnexionGoogleSerializer(data=request.data)
@@ -112,13 +134,15 @@ class ConnexionGoogleView(APIView):
                 cgu_acceptee_le=timezone.now(),
             )
             Parametres.objects.create(utilisateur=utilisateur)
-            Droits.objects.create(utilisateur=utilisateur)
 
         if utilisateur.est_banni:
             return Response({'detail': 'Ce compte est banni.'}, status=status.HTTP_403_FORBIDDEN)
 
         return Response(
-            {'utilisateur': UtilisateurSerializer(utilisateur).data, 'jetons': _jetons_pour(utilisateur)}
+            {
+                'utilisateur': UtilisateurSerializer(utilisateur, context={'request': request}).data,
+                'jetons': _jetons_pour(utilisateur),
+            }
         )
 
 
@@ -155,6 +179,8 @@ class VerifierEmailView(APIView):
 
 class DemandeReinitialisationView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'mot-de-passe'
 
     def post(self, request):
         serializer = DemandeReinitialisationSerializer(data=request.data)
@@ -182,3 +208,92 @@ class ConfirmationReinitialisationView(APIView):
         utilisateur.set_password(donnees['nouveau_mot_de_passe'])
         utilisateur.save(update_fields=['password'])
         return Response({'detail': 'Mot de passe reinitialise.'})
+
+
+class MoiView(APIView):
+    """Profil du compte connecte : lecture, mise a jour partielle, suppression
+    logique (grace de 30 jours avant purge par une tache planifiee future)."""
+
+    def get(self, request):
+        return Response(UtilisateurSerializer(request.user, context={'request': request}).data)
+
+    def patch(self, request):
+        serializer = UtilisateurMiseAJourSerializer(request.user, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(UtilisateurSerializer(request.user, context={'request': request}).data)
+
+    def delete(self, request):
+        request.user.suppression_demandee_le = timezone.now()
+        request.user.save(update_fields=['suppression_demandee_le'])
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class AvatarView(APIView):
+    def post(self, request):
+        serializer = AvatarSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        request.user.avatar = serializer.validated_data['avatar']
+        request.user.save(update_fields=['avatar'])
+        return Response(UtilisateurSerializer(request.user, context={'request': request}).data)
+
+
+class ParametresView(APIView):
+    def get(self, request):
+        return Response(ParametresSerializer(request.user.parametres).data)
+
+    def patch(self, request):
+        serializer = ParametresSerializer(request.user.parametres, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
+
+
+class StatistiquesView(APIView):
+    """Stub : le module trajets n'est pas encore branche, retourne des zeros
+    pour que l'ecran Statistiques du mobile ait deja une forme stable a consommer."""
+
+    def get(self, request):
+        return Response({
+            'trajets_completes': 0,
+            'distance_totale_km': 0,
+            'incidents_signales': 0,
+            'temps_gagne_minutes': 0,
+        })
+
+
+class AppareilCreationView(APIView):
+    """Upsert sur jeton_push : un meme appareil qui se reenregistre (ex. apres
+    reinstallation) met a jour sa ligne plutot que d'en creer une en double."""
+
+    def post(self, request):
+        serializer = AppareilSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        appareil, _ = Appareil.objects.update_or_create(
+            utilisateur=request.user,
+            jeton_push=serializer.validated_data['jeton_push'],
+            defaults={**serializer.validated_data, 'est_actif': True},
+        )
+        return Response(AppareilSerializer(appareil).data, status=status.HTTP_201_CREATED)
+
+
+class AppareilSuppressionView(APIView):
+    def delete(self, request, id):
+        appareil = get_object_or_404(Appareil, id=id, utilisateur=request.user)
+        appareil.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class ConfigView(APIView):
+    """Configuration publique lue par le mobile a chaque lancement : permet de
+    faire evoluer villes/types/version minimale sans publication sur les stores."""
+
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        return Response({
+            'villes': VILLES_DISPONIBLES,
+            'types_vehicule': dict(TypeVehicule.choices),
+            'types_incident': dict(TypeIncident.choices),
+            'version_minimale_app': VERSION_MINIMALE_APP,
+        })

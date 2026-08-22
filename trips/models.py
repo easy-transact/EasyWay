@@ -7,6 +7,8 @@ from django.utils import timezone
 
 from places.models import Lieu
 
+from .exceptions import TransitionInvalide
+
 # PositionGps est un objet «transitoire» (section 3.3) : il ne franchit jamais la
 # couche de persistance durable. Les positions brutes vivent uniquement dans
 # Redis/le flux de traitement (Fig. 14) ; seul leur agregat de 5 minutes,
@@ -58,6 +60,16 @@ class Trajet(models.Model):
     demarre_le = models.DateTimeField(null=True, blank=True)
     termine_le = models.DateTimeField(null=True, blank=True)
 
+    # Machine a etats (diagramme d'etats du document UML) : source de verite
+    # unique pour les transitions autorisees, appliquee par changer_statut()
+    # -- ni le PATCH ni les methodes demarrer/terminer/annuler ne l'esquivent.
+    TRANSITIONS_AUTORISEES = {
+        StatutTrajet.PLANIFIE: {StatutTrajet.ACTIF, StatutTrajet.ANNULE},
+        StatutTrajet.ACTIF: {StatutTrajet.TERMINE, StatutTrajet.ANNULE},
+        StatutTrajet.TERMINE: set(),
+        StatutTrajet.ANNULE: set(),
+    }
+
     class Meta:
         db_table = 'trajet'
         indexes = [
@@ -73,19 +85,30 @@ class Trajet(models.Model):
     def __str__(self):
         return f"{self.libelle_origine} -> {self.libelle_destination}"
 
+    def changer_statut(self, nouveau_statut: str):
+        if nouveau_statut == self.statut:
+            return
+        if nouveau_statut not in self.TRANSITIONS_AUTORISEES.get(self.statut, set()):
+            raise TransitionInvalide(f"{self.statut} -> {nouveau_statut} n'est pas une transition autorisee.")
+
+        champs = ['statut']
+        self.statut = nouveau_statut
+        if nouveau_statut == StatutTrajet.ACTIF:
+            self.demarre_le = timezone.now()
+            champs.append('demarre_le')
+        elif nouveau_statut == StatutTrajet.TERMINE:
+            self.termine_le = timezone.now()
+            champs.append('termine_le')
+        self.save(update_fields=champs)
+
     def demarrer(self):
-        self.statut = StatutTrajet.ACTIF
-        self.demarre_le = timezone.now()
-        self.save(update_fields=['statut', 'demarre_le'])
+        self.changer_statut(StatutTrajet.ACTIF)
 
     def terminer(self):
-        self.statut = StatutTrajet.TERMINE
-        self.termine_le = timezone.now()
-        self.save(update_fields=['statut', 'termine_le'])
+        self.changer_statut(StatutTrajet.TERMINE)
 
     def annuler(self):
-        self.statut = StatutTrajet.ANNULE
-        self.save(update_fields=['statut'])
+        self.changer_statut(StatutTrajet.ANNULE)
 
     def noter(self, note: int, commentaire: str = ''):
         self.note = note

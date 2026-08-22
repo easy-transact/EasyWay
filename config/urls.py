@@ -14,6 +14,8 @@ Including another URLconf
     1. Import the include() function: from django.urls import include, path
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
+from django.conf import settings
+from django.conf.urls.static import static
 from django.contrib import admin
 from django.urls import include, path
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, SpectacularRedocView
@@ -25,5 +27,17 @@ urlpatterns = [
     path('api/docs/', SpectacularSwaggerView.as_view(url_name='schema'), name='swagger-ui'),
     path('api/redoc/', SpectacularRedocView.as_view(url_name='schema'), name='redoc'),
 
-    path('api/auth/', include('accounts.urls')),
+    path('api/', include('accounts.urls')),
+    path('api/', include('places.urls')),
+    path('api/', include('trips.urls')),
+    path('api/', include('community.urls')),
 ]
+
+if settings.DEBUG:
+    from . import dev_views
+
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+    urlpatterns += [
+        path('api/dev/valhalla/status/', dev_views.valhalla_status, name='dev-valhalla-status'),
+        path('api/dev/valhalla/route/', dev_views.valhalla_route, name='dev-valhalla-route'),
+    ]

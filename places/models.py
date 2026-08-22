@@ -3,6 +3,7 @@ import uuid
 from django.conf import settings
 from django.contrib.gis.db import models as gis_models
 from django.contrib.gis.geos import Point
+from django.contrib.postgres.indexes import GinIndex
 from django.db import models
 
 
@@ -64,11 +65,19 @@ class Lieu(models.Model):
         'self', on_delete=models.SET_NULL, null=True, blank=True, related_name='lieux_fusionnes'
     )
 
+    # Trace du signalement UTILISATEUR (UC "Proposer un lieu manquant") pour la
+    # file de moderation ; absent des imports OPENSTREETMAP.
+    propose_par = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='lieux_proposes',
+    )
+
     class Meta:
         db_table = 'lieu'
         indexes = [
             models.Index(fields=['ville', 'categorie']),
             gis_models.Index(fields=['position']),
+            GinIndex(fields=['nom_normalise'], name='lieu_nom_normalise_trgm', opclasses=['gin_trgm_ops']),
         ]
         constraints = [
             models.UniqueConstraint(

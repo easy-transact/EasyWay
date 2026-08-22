@@ -5,18 +5,71 @@ from django.utils import timezone
 from rest_framework import serializers
 
 from .google_oauth import JetonGoogleInvalide, verifier_jeton_google
-from .models import Droits, Parametres, Utilisateur
+from .models import Appareil, Droits, Parametres, Utilisateur
+
+
+class DroitsSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Droits
+        fields = [
+            'formule', 'max_adresses_enregistrees', 'publicite_active',
+            'routage_avance', 'packs_hors_ligne', 'retention_historique_jours',
+        ]
+        read_only_fields = fields
 
 
 class UtilisateurSerializer(serializers.ModelSerializer):
+    url_avatar = serializers.SerializerMethodField()
+    droits = DroitsSerializer(read_only=True)
+
     class Meta:
         model = Utilisateur
         fields = [
             'id', 'email', 'nom_complet', 'telephone', 'ville', 'type_vehicule',
             'url_avatar', 'email_verifie', 'formule', 'score_reputation', 'points',
-            'mode_invisible',
+            'mode_invisible', 'droits',
         ]
         read_only_fields = fields
+
+    def get_url_avatar(self, utilisateur):
+        if utilisateur.avatar:
+            url = utilisateur.avatar.url
+            request = self.context.get('request')
+            return request.build_absolute_uri(url) if request else url
+        return utilisateur.url_avatar
+
+
+class UtilisateurMiseAJourSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Utilisateur
+        fields = ['nom_complet', 'ville', 'type_vehicule', 'mode_invisible']
+        extra_kwargs = {field: {'required': False} for field in fields}
+
+
+class AvatarSerializer(serializers.Serializer):
+    avatar = serializers.ImageField(write_only=True)
+
+    def validate_avatar(self, fichier):
+        limite = 5 * 1024 * 1024
+        if fichier.size > limite:
+            raise serializers.ValidationError("L'image ne doit pas depasser 5 Mo.")
+        return fichier
+
+
+class ParametresSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Parametres
+        exclude = ['id', 'utilisateur']
+
+
+class AppareilSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Appareil
+        fields = [
+            'id', 'jeton_push', 'plateforme', 'version_application',
+            'version_systeme', 'langue',
+        ]
+        read_only_fields = ['id']
 
 
 class VerifierExistenceSerializer(serializers.Serializer):
@@ -70,7 +123,6 @@ class InscriptionSerializer(serializers.ModelSerializer):
             **validated_data,
         )
         Parametres.objects.create(utilisateur=utilisateur)
-        Droits.objects.create(utilisateur=utilisateur)
         return utilisateur
 
 

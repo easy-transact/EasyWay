@@ -6,3 +6,8 @@ db.sqlite3
 *.sqlite3
 staticfiles/
 media/
+
+# Routing spike: OSM extracts and built Valhalla tiles are large binaries,
+# regenerated locally from docker-compose.yml, never committed.
+valhalla/custom_files/*
+!valhalla/custom_files/.gitkeep

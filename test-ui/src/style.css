@@ -1,0 +1,87 @@
+:root { color-scheme: light; }
+
+* { box-sizing: border-box; }
+
+body {
+  font-family: system-ui, sans-serif;
+  margin: 0;
+  color: #1a1a1a;
+  background: #f5f5f5;
+}
+
+#app {
+  display: grid;
+  grid-template-columns: 380px 1fr;
+  height: 100vh;
+}
+
+#panneau {
+  padding: 1rem;
+  overflow-y: auto;
+  border-right: 1px solid #ddd;
+  background: #fff;
+}
+
+#carte {
+  height: 100%;
+}
+
+h1 { font-size: 1.15rem; margin: 0 0 .3rem; }
+h2 { font-size: .95rem; margin: 1.3rem 0 .4rem; border-bottom: 1px solid #eee; padding-bottom: .3rem; }
+p.sous-titre { color: #777; font-size: .8rem; margin: 0 0 1rem; }
+
+input[type=text] {
+  width: 100%;
+  padding: .5rem;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  font-size: .9rem;
+}
+
+button {
+  padding: .4rem .8rem;
+  border: 1px solid #222;
+  background: #222;
+  color: #fff;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: .82rem;
+}
+button.secondaire { background: #fff; color: #222; }
+button:disabled { opacity: .4; cursor: default; }
+button.btn-route.choisi { background: #2255dd; color: #fff; border-color: #2255dd; }
+
+ul.resultats { list-style: none; padding: 0; margin: .5rem 0; }
+li.lieu {
+  padding: .5rem;
+  border: 1px solid #eee;
+  border-radius: 6px;
+  margin-bottom: .4rem;
+}
+li.lieu .nom { font-weight: 600; }
+.badge-source {
+  display: inline-block; padding: .05rem .4rem; border-radius: 8px;
+  font-size: .68rem; font-weight: 700; text-transform: uppercase;
+  background: #e8edff; color: #3355cc;
+}
+.badge-source.externe { background: #fff1de; color: #b8631a; }
+li.lieu .meta { color: #888; font-size: .78rem; }
+li.lieu .actions { display: flex; gap: .4rem; margin-top: .4rem; }
+
+.slot {
+  border: 1px dashed #bbb;
+  border-radius: 6px;
+  padding: .5rem;
+  margin-bottom: .4rem;
+  font-size: .85rem;
+}
+.slot.rempli { border-style: solid; border-color: #2a8f2a; background: #f2fbf2; }
+.slot .label { font-size: .72rem; color: #999; text-transform: uppercase; letter-spacing: .04em; }
+
+.badge { display: inline-block; padding: .1rem .5rem; border-radius: 10px; font-size: .72rem; font-weight: 700; }
+.badge.ok { background: #d7f5d7; color: #14611f; }
+.badge.err { background: #ffd9d9; color: #7a1010; }
+
+#resume-itineraire { margin: .6rem 0; font-size: .88rem; }
+.maneuver { padding: .35rem 0; border-bottom: 1px solid #f2f2f2; font-size: .82rem; }
+.maneuver .distance { color: #999; font-size: .74rem; }

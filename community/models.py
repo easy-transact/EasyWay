@@ -1,9 +1,13 @@
 import uuid
 
+import h3
 from django.conf import settings
 from django.contrib.gis.db import models as gis_models
 from django.db import models
 from django.utils import timezone
+
+RESOLUTION_H3_FIN = 8  # ~460m de cote -- rayon de recherche des doublons (150m)
+RESOLUTION_H3_LARGE = 7  # ~1.2km de cote -- fenetre de requete pour /proches/
 
 
 class TypeIncident(models.TextChoices):
@@ -56,8 +60,9 @@ class Incident(models.Model):
     type = models.CharField(max_length=20, choices=TypeIncident.choices)
     sous_type = models.CharField(max_length=100, null=True, blank=True)
     position = gis_models.PointField(srid=4326, geography=True)
-    cellule_h3_res8 = models.BigIntegerField()
-    cellule_h3_res7 = models.BigIntegerField()
+    # Calcules dans save() depuis `position` -- jamais fournis par l'appelant.
+    cellule_h3_res8 = models.BigIntegerField(editable=False)
+    cellule_h3_res7 = models.BigIntegerField(editable=False)
     cap = models.IntegerField(null=True, blank=True, help_text='degres, 0-359')
     nom_voie = models.CharField(max_length=255, blank=True)
 
@@ -87,23 +92,54 @@ class Incident(models.Model):
     def __str__(self):
         return f"{self.type} - {self.nom_voie}"
 
+    def save(self, *args, **kwargs):
+        # H3 calcule en Python (pas h3-pg) : evite de compiler l'extension
+        # dans l'image Postgres pour un calcul qui est une ligne ici.
+        # Position immuable une fois l'incident cree -- calcule une seule fois.
+        if self.cellule_h3_res8 is None:
+            self.cellule_h3_res8 = h3.str_to_int(
+                h3.latlng_to_cell(self.position.y, self.position.x, RESOLUTION_H3_FIN)
+            )
+            self.cellule_h3_res7 = h3.str_to_int(
+                h3.latlng_to_cell(self.position.y, self.position.x, RESOLUTION_H3_LARGE)
+            )
+        super().save(*args, **kwargs)
+
     def duree_de_base(self):
         return DUREE_VIE_BASE_PAR_TYPE.get(self.type, 60)
 
     def est_actif(self) -> bool:
         return self.statut == StatutIncident.ACTIF
 
+    # confirmer()/infirmer() font une lecture-modification-ecriture en Python
+    # (pas de F()) : l'appelant doit recuperer l'incident avec
+    # select_for_update() dans une transaction, comme pour la detection de
+    # doublon. C'est ce qui permet a confirmer() de lire self.confirmations a
+    # jour pour la promotion EN_ATTENTE -> ACTIF juste en dessous -- un F()
+    # laisserait l'objet avec une expression non resolue apres save().
+
     def confirmer(self, vote: 'Vote'):
-        self.confirmations = models.F('confirmations') + 1
+        self.confirmations += 1
+        self.score_confiance += vote.poids
         # Prolongation plafonnee au triple de la duree de base (section 4.5).
         duree_max = timezone.timedelta(minutes=self.duree_de_base() * 3)
         self.expire_le = min(self.expire_le + timezone.timedelta(minutes=10), timezone.now() + duree_max)
-        self.save(update_fields=['confirmations', 'expire_le'])
+
+        champs = ['confirmations', 'score_confiance', 'expire_le']
+        # Deux confirmations independantes suffisent a faire sortir un
+        # signalement a faible reputation de EN_ATTENTE (cf. discussion :
+        # EN_ATTENTE reste visible dans /proches/, sinon personne ne peut le
+        # confirmer). L'unicite (incident, votant) garantit l'independance.
+        if self.statut == StatutIncident.EN_ATTENTE and self.confirmations >= 2:
+            self.statut = StatutIncident.ACTIF
+            champs.append('statut')
+        self.save(update_fields=champs)
 
     def infirmer(self, vote: 'Vote'):
-        self.infirmations = models.F('infirmations') + 1
+        self.infirmations += 1
+        self.score_confiance -= vote.poids
         self.expire_le = self.expire_le - timezone.timedelta(minutes=10)
-        self.save(update_fields=['infirmations', 'expire_le'])
+        self.save(update_fields=['infirmations', 'score_confiance', 'expire_le'])
 
     def prolonger(self, duree: timezone.timedelta):
         self.expire_le = self.expire_le + duree
