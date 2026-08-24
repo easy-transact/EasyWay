@@ -1,0 +1,164 @@
+EASYWAY API — AUTH MODULE — FRONTEND INTEGRATION REFERENCE
+Generated for the auth integration phase. Verify against the live Swagger UI
+(/api/docs/) if this drifts from the code over time.
+
+Base path: /api/  (all paths below are relative to that)
+Content-Type: application/json for every request below
+Auth header (only where marked "Auth: required"): Authorization: Bearer <acces>
+
+------------------------------------------------------------
+1. POST auth/verifier-existence/          Auth: none
+Body:
+  { "email": "user@example.com" }
+Success 200:
+  { "existe": true }
+Errors:
+  400  { "email": ["This field is required."] }   (or invalid email format message)
+
+------------------------------------------------------------
+2. POST auth/inscription/                 Auth: none   (throttled: 10/hour)
+Body:
+  {
+    "email": "user@example.com",
+    "nom_complet": "Jean Dupont",
+    "mot_de_passe": "...",
+    "confirmation_mot_de_passe": "...",
+    "telephone": "...",          // optional
+    "ville": "...",              // optional
+    "type_vehicule": "VOITURE",  // optional — see TypeVehicule enum below
+    "accepte_cgu": true
+  }
+Success 201:
+  {
+    "utilisateur": { ...see UTILISATEUR OBJECT below... },
+    "jetons": { "acces": "...", "rafraichissement": "..." }
+  }
+Errors (400, field-keyed):
+  "email": ["Adresse deja utilisee."]
+  "confirmation_mot_de_passe": ["Les mots de passe ne correspondent pas."]
+  "accepte_cgu": ["L'acceptation des CGU est obligatoire."]
+  "mot_de_passe": [Django password-validator messages, e.g. "Ce mot de passe est trop court."]
+  429 if throttled: { "detail": "Request was throttled. Expected available in N seconds." }
+
+------------------------------------------------------------
+3. POST auth/connexion/                   Auth: none   (throttled: 20/hour)
+Body:
+  { "email": "user@example.com", "mot_de_passe": "..." }
+Success 200:
+  { "utilisateur": {...}, "jetons": { "acces": "...", "rafraichissement": "..." } }
+Errors:
+  400  { "non_field_errors": ["Identifiants incorrects."] }
+  400  { "non_field_errors": ["Ce compte est banni."] }
+
+------------------------------------------------------------
+4. POST auth/connexion-google/            Auth: none   (throttled: 20/hour)
+Body:
+  { "jeton_identite": "<Google ID token from the mobile SDK>" }
+Success 200:
+  { "utilisateur": {...}, "jetons": {...} }
+  (Links to an existing account if the verified Google email matches one;
+  otherwise creates a new account.)
+Errors:
+  400  { "non_field_errors": ["<message from Google token verification failure>"] }
+  403  { "detail": "Ce compte est banni." }
+
+------------------------------------------------------------
+5. POST auth/rafraichir/                  Auth: none
+   *** DIFFERENT FIELD NAMES *** — this is SimpleJWT's stock TokenRefreshView,
+   NOT the app's own "acces"/"rafraichissement" convention.
+Body:
+  { "refresh": "<rafraichissement token from login/signup>" }
+Success 200:
+  { "access": "<new access token>" }
+Errors:
+  401  { "detail": "Token is invalid or expired", "code": "token_not_valid" }
+
+------------------------------------------------------------
+6. POST auth/deconnexion/                 Auth: required
+Body:
+  { "rafraichissement": "<refresh token>" }
+Success 204: (empty body)
+Errors:
+  400  { "detail": "Le jeton de rafraichissement est requis." }
+  400  { "detail": "Jeton invalide." }
+
+------------------------------------------------------------
+7. GET auth/verifier-email/<uidb64>/<jeton>/    Auth: none
+   No body — uidb64 and jeton are path segments taken from the link in the
+   verification email (not query params, not a JSON body).
+Success 200:
+  { "detail": "Adresse email verifiee." }
+Errors:
+  400  { "detail": "Lien invalide ou expire." }
+
+------------------------------------------------------------
+8. POST auth/mot-de-passe/reinitialiser/   Auth: none   (throttled: 5/hour)
+Body:
+  { "email": "user@example.com" }
+Success 200 (ALWAYS 200, whether or not the account exists — do not treat
+this as confirmation the email is registered; it's deliberate to avoid
+leaking account existence):
+  { "detail": "Si ce compte existe, un email a ete envoye." }
+
+------------------------------------------------------------
+9. POST auth/mot-de-passe/confirmer/       Auth: none
+Body:
+  {
+    "uid": "<from reset-password email link>",
+    "jeton": "<from reset-password email link>",
+    "nouveau_mot_de_passe": "..."
+  }
+Success 200:
+  { "detail": "Mot de passe reinitialise." }
+Errors:
+  400  { "detail": "Lien invalide ou expire." }
+  400  { "nouveau_mot_de_passe": [Django password-validator messages] }
+
+------------------------------------------------------------
+UTILISATEUR OBJECT (returned inside "utilisateur" in endpoints 2, 3, 4):
+{
+  "id": "<uuid>",
+  "email": "...",
+  "nom_complet": "...",
+  "telephone": "...",
+  "ville": "...",
+  "type_vehicule": "VOITURE" | "MOTO" | "TAXI" | "CAMION" | "BUS" | "UTILITAIRE",
+  "url_avatar": "..." or null,
+  "email_verifie": true | false,
+  "formule": "GRATUITE" | "PREMIUM",
+  "score_reputation": 0,
+  "points": 0,
+  "mode_invisible": false,
+  "droits": {
+    "formule": "GRATUITE" | "PREMIUM",
+    "max_adresses_enregistrees": <int or null>,
+    "publicite_active": true | false,
+    "routage_avance": true | false,
+    "packs_hors_ligne": true | false,
+    "retention_historique_jours": <int or null>
+  }
+}
+All fields in "utilisateur" and "droits" are read-only from the client's
+perspective (this endpoint never accepts them back as input).
+
+------------------------------------------------------------
+GENERAL ERROR-SHAPE RULES
+- A plain "field required / invalid format" DRF validation error always
+  comes back as: { "<field_name>": ["message", ...] }
+- A validation error NOT tied to one specific field (raised from a
+  serializer's validate() method — e.g. wrong password, CGU not accepted)
+  comes back as: { "non_field_errors": ["message"] }
+- Endpoints that build their own Response() directly instead of relying on
+  serializer validation (deconnexion, verifier-email, mot-de-passe/confirmer
+  link errors) return: { "detail": "message" } — no non_field_errors wrapper.
+- Every 429 (throttled) response looks like:
+  { "detail": "Request was throttled. Expected available in N seconds." }
+- Every 401 from a missing/expired/invalid access token on an
+  "Auth: required" endpoint looks like:
+  { "detail": "...", "code": "..." }  (standard SimpleJWT/DRF shape)
+
+------------------------------------------------------------
+NOT INCLUDED HERE (separate from auth, ask if you need these next):
+- GET/PATCH/DELETE utilisateurs/moi/, avatar, parametres, statistiques
+- appareils/ (push token registration)
+- config/ (public app config: villes, types, version minimale)

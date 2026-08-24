@@ -1,4 +1,5 @@
 import uuid
+from zoneinfo import ZoneInfo
 
 from django.conf import settings
 from django.contrib.gis.db import models as gis_models
@@ -180,6 +181,11 @@ class Manoeuvre(models.Model):
         return f"{self.ordre}. {self.instruction}"
 
 
+FUSEAU_TRAFIC = ZoneInfo('Africa/Douala')  # toutes les VILLES_DISPONIBLES sont dans ce fuseau unique, sans heure d'ete --
+# jour_semaine/heure_jour doivent etre derives en heure locale, pas UTC (TIME_ZONE du
+# projet), sans quoi l'heure de pointe serait systematiquement decalee d'une heure.
+
+
 class EchantillonVitesse(models.Model):
     """Agregat persistant de trafic (5 minutes) ; seule trace durable des positions
     GPS transitoires consommees par ConsommateurPositions (Fig. 11 et 14)."""
@@ -207,9 +213,7 @@ class EchantillonVitesse(models.Model):
     def __str__(self):
         return f"Arete {self.identifiant_arete} @ {self.debut_intervalle}"
 
-    def niveau_congestion(self) -> str:
-        if self.vitesse_moyenne >= 50:
-            return NiveauTrafic.NORMAL
-        if self.vitesse_moyenne >= 20:
-            return NiveauTrafic.MODERE
-        return NiveauTrafic.DENSE
+    # Pas de niveau_congestion() ici base sur un seuil absolu (ex. >=50km/h) --
+    # 25 km/h est rapide en centre-ville et lent sur une penetrante. Le niveau
+    # se calcule en comparant une arete a son propre historique au meme jour/
+    # heure (cf. services/service_trafic.py:niveau_relatif), jamais dans l'absolu.

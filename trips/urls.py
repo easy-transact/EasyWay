@@ -9,4 +9,5 @@ urlpatterns = [
     path('trajets/', views.TrajetListeCreationView.as_view(), name='trajets'),
     path('trajets/<uuid:id>/', views.TrajetDetailView.as_view(), name='trajet-detail'),
     path('trajets/<uuid:id>/note/', views.NoterTrajetView.as_view(), name='trajet-note'),
+    path('telemetrie/positions/', views.TelemetriePositionsView.as_view(), name='telemetrie-positions'),
 ]

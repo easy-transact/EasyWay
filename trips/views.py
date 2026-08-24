@@ -1,10 +1,15 @@
 from datetime import timedelta
 
 from django.utils import timezone
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view, inline_serializer
+from rest_framework import serializers as drf_serializers
 from rest_framework import status
 from rest_framework.generics import get_object_or_404
 from rest_framework.response import Response
 from rest_framework.views import APIView
+
+from accounts.serializers import MessageSerializer
 
 from .exceptions import TransitionInvalide
 from .models import StatutTrajet, Trajet
@@ -12,10 +17,12 @@ from .serializers import (
     CalculItineraireSerializer,
     ItineraireCandidatSerializer,
     NoterTrajetSerializer,
+    TelemetriePositionsSerializer,
     TrajetCreationSerializer,
     TrajetMiseAJourSerializer,
     TrajetSerializer,
 )
+from .services.producteur_evenements import FLUX_POSITIONS, ProducteurRedisStreams
 from .services.service_itineraire import ServiceItineraire
 
 DUREE_PERIODE = {
@@ -24,6 +31,16 @@ DUREE_PERIODE = {
 }
 
 
+@extend_schema(
+    tags=['Itineraires'],
+    summary="Calculer des candidats d'itineraire",
+    description=(
+        'view -> ServiceItineraire -> ClientValhalla. Ne persiste rien -- le client '
+        "renvoie l'itineraire choisi tel quel a POST /api/trajets/ pour le faire persister."
+    ),
+    request=CalculItineraireSerializer,
+    responses={200: ItineraireCandidatSerializer(many=True)},
+)
 class CalculItineraireView(APIView):
     """POST /api/itineraires/calculer/ : view -> ServiceItineraire -> ClientValhalla.
     Ne persiste rien -- le client renvoie l'itineraire choisi a POST /api/trajets/."""
@@ -41,6 +58,40 @@ class CalculItineraireView(APIView):
         return Response(ItineraireCandidatSerializer(candidats, many=True).data)
 
 
+@extend_schema_view(
+    get=extend_schema(
+        operation_id='trajets_lister',
+        tags=['Trajets'],
+        summary="Lister les trajets de l'utilisateur connecte",
+        description=(
+            "periode=semaine|mois|tout respecte la retention du plan (Droits."
+            "retention_historique_jours) -- tronque toujours 'tout', jamais l'inverse. "
+            "'tronque_le' est non-null quand la retention du plan a effectivement exclu des trajets."
+        ),
+        parameters=[
+            OpenApiParameter(
+                'periode', OpenApiTypes.STR, enum=['semaine', 'mois', 'tout'], default='tout',
+            ),
+        ],
+        responses={
+            200: inline_serializer(
+                name='TrajetListeReponse',
+                fields={
+                    'resultats': TrajetSerializer(many=True),
+                    'tronque_le': drf_serializers.DateTimeField(allow_null=True),
+                },
+            ),
+            400: MessageSerializer,
+        },
+    ),
+    post=extend_schema(
+        tags=['Trajets'],
+        summary='Creer un trajet a partir d\'un itineraire choisi',
+        description="Demarre immediatement le trajet (PLANIFIE -> ACTIF via la machine a etats).",
+        request=TrajetCreationSerializer,
+        responses={201: TrajetSerializer},
+    ),
+)
 class TrajetListeCreationView(APIView):
     """GET ?periode=semaine|mois|tout respecte la retention du plan (Droits.
     retention_historique_jours) -- tronque toujours 'tout', jamais l'inverse."""
@@ -80,6 +131,20 @@ class TrajetListeCreationView(APIView):
         return Response(TrajetSerializer(trajet).data, status=status.HTTP_201_CREATED)
 
 
+@extend_schema_view(
+    get=extend_schema(
+        operation_id='trajets_detail', tags=['Trajets'], summary="Detail d'un trajet",
+        responses={200: TrajetSerializer},
+    ),
+    patch=extend_schema(
+        tags=['Trajets'],
+        summary="Mettre a jour un trajet (statut, mesures reelles)",
+        description='changer_statut() applique la machine a etats du trajet ; une transition illegale renvoie 400.',
+        request=TrajetMiseAJourSerializer,
+        responses={200: TrajetSerializer, 400: MessageSerializer},
+    ),
+    delete=extend_schema(tags=['Trajets'], summary='Supprimer un trajet', responses={204: None}),
+)
 class TrajetDetailView(APIView):
     def _objet(self, request, id):
         return get_object_or_404(Trajet, id=id, utilisateur=request.user)
@@ -102,6 +167,13 @@ class TrajetDetailView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+@extend_schema(
+    tags=['Trajets'],
+    summary='Noter un trajet termine',
+    description='Refuse avec 400 si le trajet n\'est pas au statut TERMINE.',
+    request=NoterTrajetSerializer,
+    responses={200: TrajetSerializer, 400: MessageSerializer},
+)
 class NoterTrajetView(APIView):
     def post(self, request, id):
         trajet = get_object_or_404(Trajet, id=id, utilisateur=request.user)
@@ -113,3 +185,41 @@ class NoterTrajetView(APIView):
         serializer.is_valid(raise_exception=True)
         trajet.noter(**serializer.validated_data)
         return Response(TrajetSerializer(trajet).data)
+
+
+@extend_schema(
+    tags=['Telemetrie'],
+    summary='Ingerer un lot de positions GPS',
+    description=(
+        'Valide et publie sur le flux Redis Streams (ProducteurEvenements), '
+        "retourne 202 immediatement -- aucune ecriture en base sur ce chemin de "
+        "requete : les positions brutes ne sont jamais persistees, seul leur "
+        "agregat 5 minutes (EchantillonVitesse) l'est plus tard, cote consommateur. "
+        "Suppression silencieuse (202, rien publie) si l'utilisateur a active "
+        'mode_invisible. Le trajet doit appartenir a l\'appelant et etre ACTIF.'
+    ),
+    request=TelemetriePositionsSerializer,
+    responses={202: None, 400: MessageSerializer},
+)
+class TelemetriePositionsView(APIView):
+    def post(self, request):
+        if request.user.mode_invisible:
+            return Response(status=status.HTTP_202_ACCEPTED)
+
+        serializer = TelemetriePositionsSerializer(data=request.data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        trajet = serializer.validated_data['trajet']
+
+        producteur = ProducteurRedisStreams()
+        for position in serializer.validated_data['positions']:
+            producteur.publier(FLUX_POSITIONS, {
+                'trajet_id': str(trajet.id),
+                'lat': position['lat'],
+                'lon': position['lon'],
+                'vitesse_kmh': position.get('vitesse_kmh'),
+                'cap': position.get('cap'),
+                'horodatage': position['horodatage'].isoformat(),
+            })  # jamais d'identifiant utilisateur publie -- trajet_id suffit au
+            # regroupement cote consommateur (cf. cahier des charges, confidentialite)
+
+        return Response(status=status.HTTP_202_ACCEPTED)

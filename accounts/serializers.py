@@ -2,7 +2,9 @@ from django.contrib.auth import authenticate
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils import timezone
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
+from rest_framework_simplejwt.serializers import TokenRefreshSerializer
 
 from .google_oauth import JetonGoogleInvalide, verifier_jeton_google
 from .models import Appareil, Droits, Parametres, Utilisateur
@@ -31,6 +33,7 @@ class UtilisateurSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
+    @extend_schema_field(serializers.URLField(allow_null=True))
     def get_url_avatar(self, utilisateur):
         if utilisateur.avatar:
             url = utilisateur.avatar.url
@@ -70,6 +73,59 @@ class AppareilSerializer(serializers.ModelSerializer):
             'version_systeme', 'langue',
         ]
         read_only_fields = ['id']
+
+
+class JetonsSerializer(serializers.Serializer):
+    """Documentation only: forme des jetons JWT retournes par les vues d'authentification."""
+
+    acces = serializers.CharField(help_text='Jeton JWT court (15 min) a joindre en Authorization: Bearer <acces>.')
+    rafraichissement = serializers.CharField(help_text='Jeton JWT long (30 jours) utilise sur /auth/rafraichir/.')
+
+
+class RafraichirSerializer(TokenRefreshSerializer):
+    """SimpleJWT nomme ses champs access/refresh (anglais) par defaut -- seule
+    incoherence face au reste du module, qui utilise acces/rafraichissement
+    partout ailleurs (cf. JetonsSerializer). Repere par l'integration
+    frontend : deux conventions dans le meme module produisent des bugs.
+
+    Renomme la requete et la reponse sans toucher a la logique de rotation/
+    blacklist heritee de TokenRefreshSerializer.validate() : le renommage du
+    champ d'entree passe par `source` (le wire-name change, la cle lue par
+    validate() reste 'refresh') ; la reponse, elle-meme une simple recopie du
+    dict retourne par validate() (TokenViewBase.post ne passe jamais par
+    to_representation()), est reconstruite explicitement ici."""
+
+    def get_fields(self):
+        fields = super().get_fields()
+
+        champ_entree = fields.pop('refresh')
+        champ_entree.source = 'refresh'
+        fields['rafraichissement'] = champ_entree
+
+        champ_sortie = fields.pop('access')
+        champ_sortie.source = 'access'
+        fields['acces'] = champ_sortie
+
+        return fields
+
+    def validate(self, attrs):
+        resultat = super().validate(attrs)
+        reponse = {'acces': resultat['access']}
+        if 'refresh' in resultat:  # present seulement si ROTATE_REFRESH_TOKENS (cf. SIMPLE_JWT)
+            reponse['rafraichissement'] = resultat['refresh']
+        return reponse
+
+
+class MessageSerializer(serializers.Serializer):
+    """Documentation only: reponse generique {"detail": "..."} utilisee par plusieurs vues."""
+
+    detail = serializers.CharField()
+
+
+class ExisteSerializer(serializers.Serializer):
+    """Documentation only: reponse de VerifierExistenceView."""
+
+    existe = serializers.BooleanField()
 
 
 class VerifierExistenceSerializer(serializers.Serializer):

@@ -1,3 +1,4 @@
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from .models import AdresseEnregistree, Lieu, RechercheRecente
@@ -18,18 +19,23 @@ class LieuRechercheSerializer(serializers.ModelSerializer):
         model = Lieu
         fields = ['id', 'libelle', 'sous_libelle', 'categorie', 'lat', 'lon', 'distance_m', 'source']
 
+    @extend_schema_field(serializers.CharField())
     def get_sous_libelle(self, lieu):
         return lieu.quartier or lieu.adresse or lieu.ville
 
+    @extend_schema_field(serializers.CharField())
     def get_source(self, lieu):
         return 'local'
 
+    @extend_schema_field(serializers.FloatField())
     def get_lat(self, lieu):
         return lieu.position.y
 
+    @extend_schema_field(serializers.FloatField())
     def get_lon(self, lieu):
         return lieu.position.x
 
+    @extend_schema_field(serializers.IntegerField(allow_null=True))
     def get_distance_m(self, lieu):
         distance = getattr(lieu, 'distance', None)
         return round(distance.m) if distance is not None else None
@@ -47,9 +53,11 @@ class LieuDetailSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
+    @extend_schema_field(serializers.FloatField())
     def get_lat(self, lieu):
         return lieu.position.y
 
+    @extend_schema_field(serializers.FloatField())
     def get_lon(self, lieu):
         return lieu.position.x
 
@@ -98,9 +106,11 @@ class AdresseEnregistreeSerializer(serializers.ModelSerializer):
         ]
         extra_kwargs = {'lieu': {'required': False, 'allow_null': True}}
 
+    @extend_schema_field(serializers.FloatField())
     def get_position_lat(self, adresse):
         return adresse.position.y
 
+    @extend_schema_field(serializers.FloatField())
     def get_position_lon(self, adresse):
         return adresse.position.x
 

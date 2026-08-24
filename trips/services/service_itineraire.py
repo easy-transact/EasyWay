@@ -11,6 +11,9 @@ import json
 from django.core.cache import cache
 
 from accounts.models import TypeVehicule
+
+from ..models import NiveauTrafic
+from . import service_trafic
 from .client_valhalla import ClientValhalla
 
 DUREE_CACHE_S = 180
@@ -75,16 +78,23 @@ class ServiceItineraire:
         ]
         geometrie = ''.join(leg['shape'] for leg in trip['legs'])
 
+        if trip.get('degrade'):
+            # Ligne droite haversine (repli du disjoncteur Valhalla, cf.
+            # client_valhalla.replier) : pas une geometrie routiere, evaluer
+            # son trafic n'aurait aucun sens (et le disjoncteur, deja ouvert
+            # puisqu'on est dans ce repli, ferait de toute facon echouer
+            # evaluer_route immediatement).
+            trafic = {'niveau_trafic': NiveauTrafic.NORMAL, 'duree_avec_trafic': None}
+        else:
+            trafic = service_trafic.evaluer_route(geometrie)
+
         return {
             'identifiant': hashlib.sha1(f"{geometrie}{index}".encode()).hexdigest()[:16],
             'libelle': f"Itineraire {index + 1}" if index else 'Itineraire recommande',
             'distance': round(trip['summary']['length'] * 1000),  # km -> m
             'duree': round(trip['summary']['time']),
-            # Pas de flux trafic temps reel branche (EchantillonVitesse existe
-            # en base mais rien ne l'alimente ni ne le consulte encore) --
-            # rester honnete plutot que d'inventer une duree "avec trafic".
-            'duree_avec_trafic': None,
-            'niveau_trafic': 'NORMAL',
+            'duree_avec_trafic': trafic['duree_avec_trafic'],
+            'niveau_trafic': trafic['niveau_trafic'],
             'geometrie': geometrie,
             'est_recommande': index == 0,
             'manoeuvres': [

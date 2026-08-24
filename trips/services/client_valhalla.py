@@ -1,25 +1,19 @@
 """
 ClientValhalla : view -> ServiceItineraire -> ClientValhalla (jamais d'appel
-direct a Valhalla depuis une vue). Le disjoncteur vit dans le cache Django
-(Redis) plutot qu'en memoire de process, pour que son etat soit partage entre
-workers/process.
+direct a Valhalla depuis une vue). Le disjoncteur (partage avec client_meili.py,
+cf. disjoncteur.py) vit dans le cache Django (Redis) plutot qu'en memoire de
+process, pour que son etat soit partage entre workers/process.
 """
 
 import copy
 import math
-import time
 
 import requests
 from django.conf import settings
-from django.core.cache import cache
 
+from . import disjoncteur
 from .client_routage import ClientRoutage, ErreurRoutage
-
-CLE_ECHECS = 'valhalla:disjoncteur:echecs'
-CLE_OUVERT_JUSQU_A = 'valhalla:disjoncteur:ouvert_jusqu_a'
-SEUIL_ECHECS = 3
-DUREE_OUVERTURE_S = 30
-FENETRE_COMPTAGE_ECHECS_S = 60
+from .disjoncteur import DisjoncteurOuvert
 
 VITESSE_REPLI_KMH = 25  # vitesse urbaine moyenne prudente, pour l'estimation degradee
 
@@ -33,11 +27,6 @@ def _distance_haversine_m(depart, arrivee):
     return 2 * 6_371_000 * math.asin(math.sqrt(a))
 
 
-class DisjoncteurOuvert(Exception):
-    """Leve en interne uniquement -- calculer_itineraires() bascule sur
-    replier() des qu'elle attrape ceci, l'appelant ne la voit jamais."""
-
-
 def _forme_complete(trip):
     return ''.join(leg['shape'] for leg in trip['legs'])
 
@@ -48,11 +37,11 @@ class ClientValhalla(ClientRoutage):
 
     def calculer_itineraires(self, depart, arrivee, options):
         try:
-            self._verifier_disjoncteur()
+            disjoncteur.verifier()
             trips = self._collecter_variantes(depart, arrivee, options)
         except (DisjoncteurOuvert, ErreurRoutage):
             return self.replier(depart, arrivee)
-        self._reinitialiser_echecs()
+        disjoncteur.reinitialiser_echecs()
         return trips
 
     def _collecter_variantes(self, depart, arrivee, options):
@@ -95,21 +84,6 @@ class ClientValhalla(ClientRoutage):
             'degrade': True,
         }]
 
-    def _verifier_disjoncteur(self):
-        ouvert_jusqu_a = cache.get(CLE_OUVERT_JUSQU_A)
-        if ouvert_jusqu_a is not None and time.time() < ouvert_jusqu_a:
-            raise DisjoncteurOuvert()
-
-    def _enregistrer_echec(self):
-        echecs = (cache.get(CLE_ECHECS) or 0) + 1
-        cache.set(CLE_ECHECS, echecs, timeout=FENETRE_COMPTAGE_ECHECS_S)
-        if echecs >= SEUIL_ECHECS:
-            cache.set(CLE_OUVERT_JUSQU_A, time.time() + DUREE_OUVERTURE_S, timeout=DUREE_OUVERTURE_S)
-
-    def _reinitialiser_echecs(self):
-        cache.delete(CLE_ECHECS)
-        cache.delete(CLE_OUVERT_JUSQU_A)
-
     def _appeler_avec_retry(self, depart, arrivee, options, alternates):
         derniere_erreur = None
         for _ in range(self.TENTATIVES):
@@ -117,7 +91,7 @@ class ClientValhalla(ClientRoutage):
                 return self._appeler(depart, arrivee, options, alternates)
             except requests.RequestException as exc:
                 derniere_erreur = exc
-        self._enregistrer_echec()
+        disjoncteur.enregistrer_echec()
         raise ErreurRoutage(str(derniere_erreur))
 
     def _appeler(self, depart, arrivee, options, alternates):

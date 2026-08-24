@@ -4,11 +4,22 @@ from django.contrib.gis.db.models.functions import Distance
 from django.contrib.gis.geos import Point
 from django.contrib.gis.measure import D
 from django.contrib.postgres.search import TrigramSimilarity
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import (
+    OpenApiParameter,
+    OpenApiResponse,
+    extend_schema,
+    extend_schema_view,
+    inline_serializer,
+)
+from rest_framework import serializers as drf_serializers
 from rest_framework import status
 from rest_framework.generics import get_object_or_404
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
+
+from accounts.serializers import MessageSerializer
 
 from .models import AdresseEnregistree, Lieu, RechercheRecente, StatutLieu
 from .serializers import (
@@ -32,6 +43,23 @@ RAYON_INVERSE_M = 50
 NB_RECHERCHES_RECENTES_MAX = 10
 
 
+@extend_schema(
+    tags=['Lieux'],
+    summary='Rechercher un lieu (autocompletion)',
+    description=(
+        "Trigram local (nom_normalise) fusionne avec Photon (P2b) -- source='local'|'photon' "
+        'par resultat. Photon, pas Nominatim, pour la recherche : autocompletion rapide ; '
+        "Nominatim reste dedie au geocodage inverse (voir /lieux/inverse/). "
+        'lat/lon, si fournis, influencent uniquement le classement -- jamais un filtre '
+        "qui exclurait un resultat pertinent situe loin de l'utilisateur."
+    ),
+    parameters=[
+        OpenApiParameter('q', OpenApiTypes.STR, required=True, description='Texte tape (min. 2 caracteres).'),
+        OpenApiParameter('lat', OpenApiTypes.FLOAT, description='Latitude de reference pour le classement.'),
+        OpenApiParameter('lon', OpenApiTypes.FLOAT, description='Longitude de reference pour le classement.'),
+    ],
+    responses={200: LieuRechercheSerializer(many=True), 400: MessageSerializer},
+)
 class RechercheView(APIView):
     """GET /api/lieux/recherche/?q=&lat=&lon= : trigram local (nom_normalise)
     fusionne avec Photon (P2b) -- source='local'|'photon' par resultat.
@@ -103,6 +131,28 @@ class RechercheView(APIView):
         return Response(fusion[:LIMITE_TOTALE])
 
 
+@extend_schema(
+    tags=['Lieux'],
+    summary='Geocodage inverse (position -> libelle)',
+    description=(
+        'Nominatim en priorite (P2b), repli sur le lieu approuve le plus proche '
+        f'en local (rayon {RAYON_INVERSE_M} m) si indisponible/sans resultat.'
+    ),
+    parameters=[
+        OpenApiParameter('lat', OpenApiTypes.FLOAT, required=True, description='Latitude.'),
+        OpenApiParameter('lon', OpenApiTypes.FLOAT, required=True, description='Longitude.'),
+    ],
+    responses={
+        200: inline_serializer(
+            name='InverseReponse',
+            fields={
+                'libelle': drf_serializers.CharField(),
+                'lieu': LieuRechercheSerializer(allow_null=True),
+            },
+        ),
+        400: MessageSerializer,
+    },
+)
 class InverseView(APIView):
     """GET /api/lieux/inverse/?lat=&lon= : Nominatim en priorite (P2b), repli
     sur le lieu approuve le plus proche en local si indisponible/sans resultat."""
@@ -130,6 +180,11 @@ class InverseView(APIView):
         return Response({'libelle': lieu.nom, 'lieu': LieuRechercheSerializer(lieu).data})
 
 
+@extend_schema(
+    tags=['Lieux'],
+    summary="Detail d'un lieu approuve",
+    responses={200: LieuDetailSerializer, 404: OpenApiResponse(description='Lieu introuvable ou non approuve.')},
+)
 class LieuDetailView(APIView):
     permission_classes = [AllowAny]
 
@@ -138,6 +193,13 @@ class LieuDetailView(APIView):
         return Response(LieuDetailSerializer(lieu).data)
 
 
+@extend_schema(
+    tags=['Lieux'],
+    summary='Proposer un nouveau lieu',
+    description='Soumission utilisateur, mise en file de moderation (statut EN_ATTENTE).',
+    request=LieuPropositionSerializer,
+    responses={201: LieuDetailSerializer},
+)
 class ProposerLieuView(APIView):
     def post(self, request):
         serializer = LieuPropositionSerializer(data=request.data, context={'request': request})
@@ -146,6 +208,20 @@ class ProposerLieuView(APIView):
         return Response(LieuDetailSerializer(lieu).data, status=status.HTTP_201_CREATED)
 
 
+@extend_schema_view(
+    get=extend_schema(
+        tags=['Adresses enregistrees'],
+        summary='Lister les adresses enregistrees du compte connecte',
+        responses={200: AdresseEnregistreeSerializer(many=True)},
+    ),
+    post=extend_schema(
+        tags=['Adresses enregistrees'],
+        summary='Enregistrer une nouvelle adresse',
+        description="Rejette avec 403 au-dela de max_adresses_enregistrees (limite de la formule, cf. Droits).",
+        request=AdresseEnregistreeSerializer,
+        responses={201: AdresseEnregistreeSerializer, 403: MessageSerializer},
+    ),
+)
 class AdresseEnregistreeListCreateView(APIView):
     def get(self, request):
         adresses = request.user.adresses_enregistrees.all()
@@ -164,6 +240,19 @@ class AdresseEnregistreeListCreateView(APIView):
         return Response(AdresseEnregistreeSerializer(adresse).data, status=status.HTTP_201_CREATED)
 
 
+@extend_schema_view(
+    patch=extend_schema(
+        tags=['Adresses enregistrees'],
+        summary='Mettre a jour partiellement une adresse enregistree',
+        request=AdresseEnregistreeSerializer,
+        responses={200: AdresseEnregistreeSerializer},
+    ),
+    delete=extend_schema(
+        tags=['Adresses enregistrees'],
+        summary='Supprimer une adresse enregistree',
+        responses={204: None},
+    ),
+)
 class AdresseEnregistreeDetailView(APIView):
     def _objet(self, request, id):
         return get_object_or_404(AdresseEnregistree, id=id, utilisateur=request.user)
@@ -182,6 +271,25 @@ class AdresseEnregistreeDetailView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+@extend_schema_view(
+    get=extend_schema(
+        tags=['Recherches recentes'],
+        summary='Lister les recherches recentes',
+        responses={200: RechercheRecenteSerializer(many=True)},
+    ),
+    post=extend_schema(
+        tags=['Recherches recentes'],
+        summary='Ajouter une recherche recente',
+        description=f'Purge automatiquement au-dela des {NB_RECHERCHES_RECENTES_MAX} entrees les plus recentes.',
+        request=RechercheRecenteSerializer,
+        responses={201: RechercheRecenteSerializer},
+    ),
+    delete=extend_schema(
+        tags=['Recherches recentes'],
+        summary="Vider l'historique de recherches",
+        responses={204: None},
+    ),
+)
 class RechercheRecenteView(APIView):
     """GET liste / POST ajoute (purge au-dela de NB_RECHERCHES_RECENTES_MAX) /
     DELETE vide l'historique de l'utilisateur connecte."""

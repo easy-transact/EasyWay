@@ -16,7 +16,7 @@ def expirer_incidents():
         statut__in=[StatutIncident.ACTIF, StatutIncident.EN_ATTENTE],
         expire_le__lte=timezone.now(),
     )
-    cellules_a_invalider = set(expires.values_list('cellule_h3_res7', flat=True))
+    cellules_a_invalider = set(expires.values_list('cellule_h3_res8', flat=True))
     nb = expires.update(statut=StatutIncident.EXPIRE)
 
     for cellule in cellules_a_invalider:

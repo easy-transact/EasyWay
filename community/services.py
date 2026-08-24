@@ -62,7 +62,7 @@ class ServiceIncident:
                 )
                 est_doublon = False
 
-        invalider_cache_cellule(incident.cellule_h3_res7)
+        invalider_cache_cellule(incident.cellule_h3_res8)
         return incident, est_doublon
 
     def _verifier_quota(self, utilisateur):

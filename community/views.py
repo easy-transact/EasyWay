@@ -5,25 +5,51 @@ from django.contrib.gis.geos import Point
 from django.core.cache import cache
 from django.db import transaction
 from django.utils import timezone
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema, extend_schema_view
 from rest_framework import status
 from rest_framework.generics import get_object_or_404
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from accounts.serializers import MessageSerializer
+
 from .cache_incidents import DUREE_CACHE_CELLULE_S, cle_cache_cellule, invalider_cache_cellule
 from .models import Incident, SensVote, StatutIncident, Vote
-from .serializers import IncidentCreationSerializer, IncidentSerializer, VoteIncidentSerializer
+from .serializers import (
+    IncidentAvecDoublonSerializer,
+    IncidentCreationSerializer,
+    IncidentSerializer,
+    VoteIncidentSerializer,
+)
 from .services import QuotaDepasse, ServiceIncident
 
 DUREE_IDEMPOTENCE_S = 24 * 3600
 
 
+@extend_schema(
+    tags=['Incidents'],
+    summary='Lister les incidents actifs sur des cellules H3',
+    description=(
+        'Endpoint le plus sollicite du module. Cache par cellule H3 resolution 8 '
+        "(~0.74km²), invalide a l'ecriture (creation/vote/expiration/retrait) plutot "
+        'que de compter sur le seul TTL -- cf. cache_incidents.py.'
+    ),
+    parameters=[
+        OpenApiParameter(
+            'cellules', OpenApiTypes.STR, required=True,
+            description='Cellules H3 (resolution 8) en hexadecimal, separees par des virgules.',
+        ),
+    ],
+    responses={200: IncidentSerializer(many=True), 400: MessageSerializer},
+)
 class IncidentsProchesView(APIView):
     """GET /api/incidents/proches/?cellules=<hex,hex,...> : endpoint le plus
-    sollicite du module. Cache par cellule H3 res7 (~1.2km), invalide a
-    l'ecriture (creation/vote/expiration/retrait) plutot que de compter sur
-    le seul TTL -- cf. cache_incidents.py."""
+    sollicite du module. Cache par cellule H3 res8 (~0.74km², cf. l'index
+    cellule_h3_res8+statut du modele), invalide a l'ecriture (creation/vote/
+    expiration/retrait) plutot que de compter sur le seul TTL -- cf.
+    cache_incidents.py."""
 
     permission_classes = [AllowAny]
 
@@ -46,13 +72,13 @@ class IncidentsProchesView(APIView):
         if manquantes:
             cellules_int = {c: h3.str_to_int(c) for c in manquantes}
             incidents = Incident.objects.filter(
-                cellule_h3_res7__in=cellules_int.values(),
+                cellule_h3_res8__in=cellules_int.values(),
                 statut__in=[StatutIncident.ACTIF, StatutIncident.EN_ATTENTE],
                 expire_le__gt=timezone.now(),
             )
             par_cellule = defaultdict(list)
             for incident in incidents:
-                par_cellule[h3.int_to_str(incident.cellule_h3_res7)].append(incident)
+                par_cellule[h3.int_to_str(incident.cellule_h3_res8)].append(incident)
 
             for hex_cell in manquantes:
                 donnees = IncidentSerializer(par_cellule.get(hex_cell, []), many=True).data
@@ -63,6 +89,30 @@ class IncidentsProchesView(APIView):
         return Response(fusion)
 
 
+@extend_schema(
+    tags=['Incidents'],
+    summary='Signaler un incident',
+    description=(
+        "L'en-tete Idempotency-Key est obligatoire (rejeu reseau = meme reponse, "
+        "jamais un deuxieme signalement, cle valable "
+        f"{DUREE_IDEMPOTENCE_S // 3600}h). Si le signalement est fusionne avec un "
+        "incident existant a proximite, 'doublon_de_existant' vaut true et le "
+        "statut HTTP est 200 au lieu de 201."
+    ),
+    parameters=[
+        OpenApiParameter(
+            'Idempotency-Key', OpenApiTypes.STR, OpenApiParameter.HEADER, required=True,
+            description='Cle unique generee par le client pour ce signalement.',
+        ),
+    ],
+    request=IncidentCreationSerializer,
+    responses={
+        200: IncidentAvecDoublonSerializer,
+        201: IncidentAvecDoublonSerializer,
+        400: MessageSerializer,
+        429: OpenApiResponse(MessageSerializer, description='Quota horaire de signalements atteint.'),
+    },
+)
 class IncidentCreationView(APIView):
     """POST /api/incidents/ : Idempotency-Key obligatoire (rejeu reseau =
     meme reponse, jamais un deuxieme signalement)."""
@@ -102,6 +152,15 @@ class IncidentCreationView(APIView):
         return Response(corps, status=status.HTTP_200_OK if est_doublon else status.HTTP_201_CREATED)
 
 
+@extend_schema_view(
+    get=extend_schema(tags=['Incidents'], summary="Detail d'un incident", responses={200: IncidentSerializer}),
+    delete=extend_schema(
+        tags=['Incidents'],
+        summary="Retirer son propre signalement",
+        description='Retrait logique (statut, motif) plutot que suppression -- reserve a l\'auteur.',
+        responses={204: None},
+    ),
+)
 class IncidentDetailView(APIView):
     permission_classes = [AllowAny]
 
@@ -112,10 +171,20 @@ class IncidentDetailView(APIView):
     def delete(self, request, id):
         incident = get_object_or_404(Incident, id=id, auteur=request.user)
         incident.retirer(motif="Retire par l'auteur")
-        invalider_cache_cellule(incident.cellule_h3_res7)
+        invalider_cache_cellule(incident.cellule_h3_res8)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+@extend_schema(
+    tags=['Incidents'],
+    summary='Voter (confirmer/infirmer) un incident',
+    description=(
+        "Rejette avec 400 le vote sur son propre signalement ou un second vote du "
+        "meme utilisateur sur le meme incident (un seul Vote par (incident, votant))."
+    ),
+    request=VoteIncidentSerializer,
+    responses={200: IncidentSerializer, 400: MessageSerializer},
+)
 class VoterIncidentView(APIView):
     def post(self, request, id):
         serializer = VoteIncidentSerializer(data=request.data)
@@ -142,10 +211,15 @@ class VoterIncidentView(APIView):
             else:
                 incident.infirmer(vote)
 
-        invalider_cache_cellule(incident.cellule_h3_res7)
+        invalider_cache_cellule(incident.cellule_h3_res8)
         return Response(IncidentSerializer(incident).data)
 
 
+@extend_schema(
+    tags=['Incidents'],
+    summary="Lister les signalements de l'utilisateur connecte",
+    responses={200: IncidentSerializer(many=True)},
+)
 class MesSignalementsView(APIView):
     def get(self, request):
         incidents = request.user.incidents_signales.order_by('-cree_le')

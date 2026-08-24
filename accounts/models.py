@@ -1,4 +1,5 @@
 import uuid
+from decimal import Decimal
 
 from django.contrib.auth.base_user import AbstractBaseUser, BaseUserManager
 from django.contrib.auth.models import PermissionsMixin
@@ -114,10 +115,13 @@ class Utilisateur(AbstractBaseUser, PermissionsMixin):
         )
 
     def poids_de_vote(self):
+        # Decimal, pas float : alimente Vote.poids et Incident.score_confiance,
+        # tous deux DecimalField -- un float y leve un TypeError a l'usage
+        # (Decimal ne supporte pas +=/-= avec un float).
         # Poids borne entre 0,2 et 2,0 : evite qu'un compte tres repute
         # ecrase le consensus et qu'un compte peu repute soit sans voix.
-        poids = self.score_reputation / 100
-        return max(0.2, min(2.0, poids))
+        poids = Decimal(self.score_reputation) / 100
+        return max(Decimal('0.2'), min(Decimal('2.0'), poids))
 
     def peut_signaler(self):
         return self.is_active and not self.est_banni

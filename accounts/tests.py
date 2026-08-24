@@ -146,6 +146,58 @@ class ConnexionTests(TestCase):
         self.assertEqual(reponse.status_code, 400)
 
 
+class RafraichirTests(TestCase):
+    """RafraichirSerializer : /auth/rafraichir/ doit parler la meme convention
+    (acces/rafraichissement) que connexion/inscription, pas access/refresh --
+    incoherence relevee par l'integration frontend."""
+
+    def setUp(self):
+        cache.clear()
+        self.utilisateur = creer_utilisateur()
+        reponse = self.client.post(
+            reverse('accounts:connexion'),
+            {'email': self.utilisateur.email, 'mot_de_passe': MOT_DE_PASSE},
+            content_type='application/json',
+        )
+        self.jetons = reponse.json()['jetons']
+
+    def test_accepte_rafraichissement_et_renvoie_acces(self):
+        reponse = self.client.post(
+            reverse('accounts:rafraichir'),
+            {'rafraichissement': self.jetons['rafraichissement']},
+            content_type='application/json',
+        )
+        self.assertEqual(reponse.status_code, 200)
+        corps = reponse.json()
+        self.assertIn('acces', corps)
+        self.assertIn('rafraichissement', corps)
+        self.assertNotIn('access', corps)
+        self.assertNotIn('refresh', corps)
+
+    def test_champ_access_anglais_est_rejete(self):
+        reponse = self.client.post(
+            reverse('accounts:rafraichir'),
+            {'refresh': self.jetons['rafraichissement']},
+            content_type='application/json',
+        )
+        self.assertEqual(reponse.status_code, 400)
+
+    def test_ancien_jeton_rafraichissement_est_mis_sur_liste_noire(self):
+        """ROTATE_REFRESH_TOKENS + BLACKLIST_AFTER_ROTATION (cf. SIMPLE_JWT) :
+        le jeton reutilise apres rotation doit etre refuse."""
+        self.client.post(
+            reverse('accounts:rafraichir'),
+            {'rafraichissement': self.jetons['rafraichissement']},
+            content_type='application/json',
+        )
+        reponse = self.client.post(
+            reverse('accounts:rafraichir'),
+            {'rafraichissement': self.jetons['rafraichissement']},
+            content_type='application/json',
+        )
+        self.assertEqual(reponse.status_code, 401)
+
+
 class VerificationEmailTests(TestCase):
     def test_lien_valide_marque_email_verifie(self):
         utilisateur = creer_utilisateur()

@@ -1,4 +1,5 @@
 from django.contrib.gis.geos import LineString, Point
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from places.models import Lieu
@@ -78,15 +79,19 @@ class TrajetSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
+    @extend_schema_field(serializers.FloatField())
     def get_origine_lat(self, trajet):
         return trajet.position_origine.y
 
+    @extend_schema_field(serializers.FloatField())
     def get_origine_lon(self, trajet):
         return trajet.position_origine.x
 
+    @extend_schema_field(serializers.FloatField())
     def get_destination_lat(self, trajet):
         return trajet.position_destination.y
 
+    @extend_schema_field(serializers.FloatField())
     def get_destination_lon(self, trajet):
         return trajet.position_destination.x
 
@@ -170,3 +175,43 @@ class TrajetMiseAJourSerializer(serializers.ModelSerializer):
 class NoterTrajetSerializer(serializers.Serializer):
     note = serializers.IntegerField(min_value=1, max_value=5)
     commentaire = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+LIMITE_POSITIONS_PAR_LOT = 500
+
+
+class PositionTelemetrieSerializer(serializers.Serializer):
+    """Une position GPS du lot -- jamais persistee telle quelle (cf.
+    TelemetriePositionsSerializer)."""
+
+    lat = serializers.FloatField()
+    lon = serializers.FloatField()
+    vitesse_kmh = serializers.FloatField(required=False, allow_null=True, min_value=0)
+    cap = serializers.IntegerField(required=False, allow_null=True, min_value=0, max_value=359)
+    horodatage = serializers.DateTimeField()
+
+
+class TelemetriePositionsSerializer(serializers.Serializer):
+    """POST /api/telemetrie/positions/ : lot de positions GPS pour un trajet
+    actif de l'appelant. Ne persiste jamais les positions -- validees ici,
+    publiees sur ProducteurEvenements, jamais ecrites en base sur ce chemin
+    (section confidentialite du cahier des charges)."""
+
+    trajet = serializers.PrimaryKeyRelatedField(queryset=Trajet.objects.none())
+    positions = PositionTelemetrieSerializer(many=True, allow_empty=False)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        request = self.context.get('request')
+        if request is not None:
+            # Un trajet d'un autre utilisateur, ou pas ACTIF, n'est simplement
+            # pas dans ce queryset -- 400 (mauvaise reference), pas 403/404 :
+            # on ne confirme jamais l'existence du trajet d'un tiers.
+            self.fields['trajet'].queryset = Trajet.objects.filter(
+                utilisateur=request.user, statut=StatutTrajet.ACTIF
+            )
+
+    def validate_positions(self, positions):
+        if len(positions) > LIMITE_POSITIONS_PAR_LOT:
+            raise serializers.ValidationError(f'Maximum {LIMITE_POSITIONS_PAR_LOT} positions par lot.')
+        return positions

@@ -20,6 +20,10 @@ DEBUG = env('DEBUG')
 
 ALLOWED_HOSTS = env.list('DJANGO_ALLOWED_HOSTS', default=['localhost', '127.0.0.1'])
 
+# Requis par Django >= 4 pour accepter les POST (admin, login) recus via un
+# domaine autre que ALLOWED_HOSTS local (ex : tunnel ngrok). Vide par defaut.
+CSRF_TRUSTED_ORIGINS = env.list('CSRF_TRUSTED_ORIGINS', default=[])
+
 
 # Application definition
 
@@ -122,6 +126,13 @@ SPECTACULAR_SETTINGS = {
     'DESCRIPTION': 'Application de navigation communautaire et de signalement routier',
     'VERSION': '1.0.0',
     'SERVE_INCLUDE_SCHEMA': False,
+    # Plusieurs modeles ont un champ 'statut' distinct (Lieu, Trajet, Incident) :
+    # sans ca drf-spectacular genere des noms d'enum ambigus (StatutXxxEnum).
+    'ENUM_NAME_OVERRIDES': {
+        'StatutLieuEnum': 'places.models.StatutLieu',
+        'StatutTrajetEnum': 'trips.models.StatutTrajet',
+        'StatutIncidentEnum': 'community.models.StatutIncident',
+    },
 }
 
 # Jetons d'acces et de rafraichissement (section 4.1 : "jetons d'acces et de
@@ -220,7 +231,25 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'community.tasks.expirer_incidents',
         'schedule': 60.0,
     },
+    'consommer-positions': {
+        'task': 'trips.tasks.consommer_positions',
+        # Assez frequent pour vider le flux sans laisser trainer les positions
+        # (impact direct sur la fraicheur du trafic), sans non plus matraquer
+        # Meili/Redis a chaque tick -- pas mesure sur donnees reelles, a ajuster.
+        'schedule': 10.0,
+    },
+    'flusher-echantillons-vitesse': {
+        'task': 'trips.tasks.flusher_echantillons_vitesse',
+        # Alignee sur TAILLE_BUCKET_S (5 min, consommateur_positions.py) : un
+        # bucket ne peut de toute facon pas se fermer plus souvent que ca.
+        'schedule': 300.0,
+    },
 }
+
+# P5 (trips/services/producteur_evenements.py) : DB Redis distincte (/3) pour
+# le flux Streams des positions GPS brutes -- retention courte (~2h, purgee
+# par MAXLEN sur XADD), jamais partagee avec le cache ou le broker Celery.
+TELEMETRIE_REDIS_URL = env('TELEMETRIE_REDIS_URL', default='redis://localhost:6379/3')
 
 
 # Static files (CSS, JavaScript, Images)

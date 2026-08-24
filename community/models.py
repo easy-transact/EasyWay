@@ -6,8 +6,12 @@ from django.contrib.gis.db import models as gis_models
 from django.db import models
 from django.utils import timezone
 
-RESOLUTION_H3_FIN = 8  # ~460m de cote -- rayon de recherche des doublons (150m)
-RESOLUTION_H3_LARGE = 7  # ~1.2km de cote -- fenetre de requete pour /proches/
+RESOLUTION_H3_FIN = 8  # ~460m de cote -- rayon de recherche des doublons (150m),
+# et depuis le passage de /proches/ en resolution 8, fenetre de requete/cache
+# de cet endpoint aussi (beneficie au passage de l'index cellule_h3_res8+statut).
+RESOLUTION_H3_LARGE = 7  # ~1.2km de cote -- conserve sur Incident mais non
+# consomme par un endpoint actuellement ; reserve a un usage futur plus
+# grossier (ex. agregation carte / panning ville).
 
 
 class TypeIncident(models.TextChoices):

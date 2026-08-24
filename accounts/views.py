@@ -3,6 +3,8 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils import timezone
 from django.utils.encoding import force_str
 from django.utils.http import urlsafe_base64_decode
+from drf_spectacular.utils import OpenApiResponse, extend_schema, extend_schema_view, inline_serializer
+from rest_framework import serializers as drf_serializers
 from rest_framework import status
 from rest_framework.generics import get_object_or_404
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -24,13 +26,24 @@ from .serializers import (
     ConnexionGoogleSerializer,
     ConnexionSerializer,
     DemandeReinitialisationSerializer,
+    ExisteSerializer,
     InscriptionSerializer,
+    JetonsSerializer,
+    MessageSerializer,
     ParametresSerializer,
     UtilisateurMiseAJourSerializer,
     UtilisateurSerializer,
     VerifierExistenceSerializer,
 )
 from .tokens import email_verification_token
+
+
+def _reponse_authentification(nom):
+    """Schema de reponse {utilisateur, jetons} partage par inscription/connexion."""
+    return inline_serializer(
+        name=nom,
+        fields={'utilisateur': UtilisateurSerializer(), 'jetons': JetonsSerializer()},
+    )
 
 
 def _jetons_pour(utilisateur):
@@ -47,6 +60,17 @@ def _decoder_uid(uidb64):
         return None
 
 
+@extend_schema(
+    tags=['Authentification'],
+    summary="Verifier si un email est deja associe a un compte",
+    description=(
+        "Premier temps de la connexion en deux temps (section 4.1) : le client "
+        "appelle cet endpoint avant d'afficher le formulaire mot de passe, pour "
+        "savoir s'il doit proposer une connexion ou une inscription."
+    ),
+    request=VerifierExistenceSerializer,
+    responses={200: ExisteSerializer},
+)
 class VerifierExistenceView(APIView):
     """Premier temps de la connexion en deux temps (section 4.1)."""
 
@@ -59,6 +83,18 @@ class VerifierExistenceView(APIView):
         return Response({'existe': existe})
 
 
+@extend_schema(
+    tags=['Authentification'],
+    summary='Creer un compte (UC-01)',
+    description=(
+        'Cree le compte et ses Parametres par defaut (Droits est resolu '
+        "dynamiquement depuis la formule, cf. Utilisateur.droits), envoie le lien "
+        'de verification par email et retourne directement les jetons JWT (acces '
+        'complet des la creation, cf. postconditions de UC-01).'
+    ),
+    request=InscriptionSerializer,
+    responses={201: _reponse_authentification('InscriptionReponse')},
+)
 class InscriptionView(APIView):
     """UC-01 : cree le compte et ses Parametres par defaut (Droits est resolu
     dynamiquement depuis la formule, cf. Utilisateur.droits), envoie le lien
@@ -83,6 +119,13 @@ class InscriptionView(APIView):
         )
 
 
+@extend_schema(
+    tags=['Authentification'],
+    summary='Connexion par email/mot de passe',
+    description='Second temps de la connexion en deux temps, apres VerifierExistenceView.',
+    request=ConnexionSerializer,
+    responses={200: _reponse_authentification('ConnexionReponse')},
+)
 class ConnexionView(APIView):
     permission_classes = [AllowAny]
     throttle_classes = [ScopedRateThrottle]
@@ -100,6 +143,20 @@ class ConnexionView(APIView):
         )
 
 
+@extend_schema(
+    tags=['Authentification'],
+    summary='Connexion / inscription via Google',
+    description=(
+        "Section 4.1 'Connexion avec Google' : verifie le jeton d'identite Google "
+        'cote serveur, lie un compte existant si l\'adresse email verifiee est deja '
+        'connue, sinon en cree un nouveau. Rejette avec 403 si le compte est banni.'
+    ),
+    request=ConnexionGoogleSerializer,
+    responses={
+        200: _reponse_authentification('ConnexionGoogleReponse'),
+        403: OpenApiResponse(MessageSerializer, description='Compte banni.'),
+    },
+)
 class ConnexionGoogleView(APIView):
     """Section 4.1 'Connexion avec Google' : lie un compte existant si l'adresse
     email verifiee est deja connue, sinon en cree un nouveau."""
@@ -146,6 +203,19 @@ class ConnexionGoogleView(APIView):
         )
 
 
+@extend_schema(
+    tags=['Authentification'],
+    summary='Deconnexion (revocation du refresh token)',
+    description=(
+        'ServiceAuthentification.revoquerFamille(jeton) : place le refresh token '
+        'sur liste noire pour empecher toute nouvelle rotation.'
+    ),
+    request=inline_serializer(
+        name='DeconnexionRequete',
+        fields={'rafraichissement': drf_serializers.CharField()},
+    ),
+    responses={204: None, 400: MessageSerializer},
+)
 class DeconnexionView(APIView):
     """ServiceAuthentification.revoquerFamille(jeton) : place le refresh token
     sur liste noire pour empecher toute nouvelle rotation."""
@@ -165,6 +235,12 @@ class DeconnexionView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+@extend_schema(
+    tags=['Authentification'],
+    summary="Verifier l'adresse email via le lien recu",
+    description='uidb64 et jeton sont extraits du lien envoye par email a l\'inscription.',
+    responses={200: MessageSerializer, 400: MessageSerializer},
+)
 class VerifierEmailView(APIView):
     permission_classes = [AllowAny]
 
@@ -177,6 +253,17 @@ class VerifierEmailView(APIView):
         return Response({'detail': 'Adresse email verifiee.'})
 
 
+@extend_schema(
+    tags=['Authentification'],
+    summary='Demander un email de reinitialisation de mot de passe',
+    description=(
+        "Reponse identique que le compte existe ou non (200 dans les deux cas) : "
+        "evite de reveler l'existence d'une adresse, meme principe que la "
+        "connexion en deux temps."
+    ),
+    request=DemandeReinitialisationSerializer,
+    responses={200: MessageSerializer},
+)
 class DemandeReinitialisationView(APIView):
     permission_classes = [AllowAny]
     throttle_classes = [ScopedRateThrottle]
@@ -193,6 +280,13 @@ class DemandeReinitialisationView(APIView):
         return Response({'detail': "Si ce compte existe, un email a ete envoye."})
 
 
+@extend_schema(
+    tags=['Authentification'],
+    summary='Confirmer la reinitialisation avec le lien recu',
+    description='uid et jeton proviennent du lien envoye par DemandeReinitialisationView.',
+    request=ConfirmationReinitialisationSerializer,
+    responses={200: MessageSerializer, 400: MessageSerializer},
+)
 class ConfirmationReinitialisationView(APIView):
     permission_classes = [AllowAny]
 
@@ -210,6 +304,25 @@ class ConfirmationReinitialisationView(APIView):
         return Response({'detail': 'Mot de passe reinitialise.'})
 
 
+@extend_schema_view(
+    get=extend_schema(
+        tags=['Compte'],
+        summary='Lire le profil du compte connecte',
+        responses={200: UtilisateurSerializer},
+    ),
+    patch=extend_schema(
+        tags=['Compte'],
+        summary='Mettre a jour partiellement le profil',
+        request=UtilisateurMiseAJourSerializer,
+        responses={200: UtilisateurSerializer},
+    ),
+    delete=extend_schema(
+        tags=['Compte'],
+        summary='Demander la suppression du compte',
+        description='Suppression logique : grace de 30 jours avant purge par une tache planifiee future.',
+        responses={204: None},
+    ),
+)
 class MoiView(APIView):
     """Profil du compte connecte : lecture, mise a jour partielle, suppression
     logique (grace de 30 jours avant purge par une tache planifiee future)."""
@@ -229,6 +342,13 @@ class MoiView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+@extend_schema(
+    tags=['Compte'],
+    summary="Televerser l'avatar du compte connecte",
+    description='Image jusqu\'a 5 Mo. Remplace tout avatar existant.',
+    request=AvatarSerializer,
+    responses={200: UtilisateurSerializer},
+)
 class AvatarView(APIView):
     def post(self, request):
         serializer = AvatarSerializer(data=request.data)
@@ -238,6 +358,19 @@ class AvatarView(APIView):
         return Response(UtilisateurSerializer(request.user, context={'request': request}).data)
 
 
+@extend_schema_view(
+    get=extend_schema(
+        tags=['Compte'],
+        summary='Lire les parametres du compte connecte',
+        responses={200: ParametresSerializer},
+    ),
+    patch=extend_schema(
+        tags=['Compte'],
+        summary='Mettre a jour partiellement les parametres',
+        request=ParametresSerializer,
+        responses={200: ParametresSerializer},
+    ),
+)
 class ParametresView(APIView):
     def get(self, request):
         return Response(ParametresSerializer(request.user.parametres).data)
@@ -249,6 +382,25 @@ class ParametresView(APIView):
         return Response(serializer.data)
 
 
+@extend_schema(
+    tags=['Compte'],
+    summary='Statistiques du compte connecte',
+    description=(
+        "Stub : le module trajets n'est pas encore branche, retourne des zeros "
+        "pour que l'ecran Statistiques du mobile ait deja une forme stable a consommer."
+    ),
+    responses={
+        200: inline_serializer(
+            name='StatistiquesReponse',
+            fields={
+                'trajets_completes': drf_serializers.IntegerField(),
+                'distance_totale_km': drf_serializers.FloatField(),
+                'incidents_signales': drf_serializers.IntegerField(),
+                'temps_gagne_minutes': drf_serializers.IntegerField(),
+            },
+        )
+    },
+)
 class StatistiquesView(APIView):
     """Stub : le module trajets n'est pas encore branche, retourne des zeros
     pour que l'ecran Statistiques du mobile ait deja une forme stable a consommer."""
@@ -262,6 +414,16 @@ class StatistiquesView(APIView):
         })
 
 
+@extend_schema(
+    tags=['Compte'],
+    summary='Enregistrer ou mettre a jour un appareil (notifications push)',
+    description=(
+        'Upsert sur jeton_push : un meme appareil qui se reenregistre (ex. apres '
+        'reinstallation) met a jour sa ligne plutot que d\'en creer une en double.'
+    ),
+    request=AppareilSerializer,
+    responses={201: AppareilSerializer},
+)
 class AppareilCreationView(APIView):
     """Upsert sur jeton_push : un meme appareil qui se reenregistre (ex. apres
     reinstallation) met a jour sa ligne plutot que d'en creer une en double."""
@@ -277,6 +439,11 @@ class AppareilCreationView(APIView):
         return Response(AppareilSerializer(appareil).data, status=status.HTTP_201_CREATED)
 
 
+@extend_schema(
+    tags=['Compte'],
+    summary='Desenregistrer un appareil',
+    responses={204: None, 404: OpenApiResponse(description='Appareil introuvable pour cet utilisateur.')},
+)
 class AppareilSuppressionView(APIView):
     def delete(self, request, id):
         appareil = get_object_or_404(Appareil, id=id, utilisateur=request.user)
@@ -284,6 +451,25 @@ class AppareilSuppressionView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+@extend_schema(
+    tags=['Configuration'],
+    summary='Configuration publique de l\'application mobile',
+    description=(
+        'Lue par le mobile a chaque lancement : permet de faire evoluer '
+        'villes/types/version minimale sans publication sur les stores.'
+    ),
+    responses={
+        200: inline_serializer(
+            name='ConfigReponse',
+            fields={
+                'villes': drf_serializers.ListField(child=drf_serializers.CharField()),
+                'types_vehicule': drf_serializers.DictField(),
+                'types_incident': drf_serializers.DictField(),
+                'version_minimale_app': drf_serializers.CharField(),
+            },
+        )
+    },
+)
 class ConfigView(APIView):
     """Configuration publique lue par le mobile a chaque lancement : permet de
     faire evoluer villes/types/version minimale sans publication sur les stores."""
