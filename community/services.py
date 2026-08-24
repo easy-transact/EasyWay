@@ -108,4 +108,4 @@ class ServiceIncident:
         # panne renvoie None ici, jamais une exception -- la creation de
         # l'incident ne doit jamais bloquer sur un champ secondaire.
         resultat = ClientNominatim().inverser(position.y, position.x)
-        return resultat['libelle'] if resultat else ''
+        return resultat['label'] if resultat else ''

@@ -1,156 +1,166 @@
 EASYWAY API — AUTH MODULE — FRONTEND INTEGRATION REFERENCE
-Generated for the auth integration phase. Verify against the live Swagger UI
-(/api/docs/) if this drifts from the code over time.
+Regenerated after the API was translated to English (field names, URLs,
+error messages). If this drifts from the code over time, verify against the
+live Swagger UI (/api/docs/) — that's generated straight from the code and
+is always the source of truth.
 
 Base path: /api/  (all paths below are relative to that)
 Content-Type: application/json for every request below
-Auth header (only where marked "Auth: required"): Authorization: Bearer <acces>
+Auth header (only where marked "Auth: required"): Authorization: Bearer <access>
 
 ------------------------------------------------------------
-1. POST auth/verifier-existence/          Auth: none
+1. POST auth/check-existence/             Auth: none
 Body:
   { "email": "user@example.com" }
 Success 200:
-  { "existe": true }
+  { "exists": true }
 Errors:
   400  { "email": ["This field is required."] }   (or invalid email format message)
 
 ------------------------------------------------------------
-2. POST auth/inscription/                 Auth: none   (throttled: 10/hour)
+2. POST auth/register/                    Auth: none   (throttled: 10/hour)
 Body:
   {
     "email": "user@example.com",
-    "nom_complet": "Jean Dupont",
-    "mot_de_passe": "...",
-    "confirmation_mot_de_passe": "...",
-    "telephone": "...",          // optional
-    "ville": "...",              // optional
-    "type_vehicule": "VOITURE",  // optional — see TypeVehicule enum below
-    "accepte_cgu": true
+    "full_name": "Jean Dupont",
+    "password": "...",
+    "password_confirmation": "...",
+    "phone": "...",              // optional
+    "city": "...",               // optional
+    "vehicle_type": "VOITURE",   // optional — see enum below (values stay French, not translated)
+    "accepts_terms": true
   }
 Success 201:
   {
-    "utilisateur": { ...see UTILISATEUR OBJECT below... },
-    "jetons": { "acces": "...", "rafraichissement": "..." }
+    "user": { ...see USER OBJECT below... },
+    "tokens": { "access": "...", "refresh": "..." }
   }
 Errors (400, field-keyed):
-  "email": ["Adresse deja utilisee."]
-  "confirmation_mot_de_passe": ["Les mots de passe ne correspondent pas."]
-  "accepte_cgu": ["L'acceptation des CGU est obligatoire."]
-  "mot_de_passe": [Django password-validator messages, e.g. "Ce mot de passe est trop court."]
+  "email": ["Email already in use."]
+  "password_confirmation": ["Passwords do not match."]
+  "accepts_terms": ["You must accept the terms and conditions."]
+  "password": [Django password-validator messages, e.g. "This password is too short."]
   429 if throttled: { "detail": "Request was throttled. Expected available in N seconds." }
 
 ------------------------------------------------------------
-3. POST auth/connexion/                   Auth: none   (throttled: 20/hour)
+3. POST auth/login/                       Auth: none   (throttled: 20/hour)
 Body:
-  { "email": "user@example.com", "mot_de_passe": "..." }
+  { "email": "user@example.com", "password": "..." }
 Success 200:
-  { "utilisateur": {...}, "jetons": { "acces": "...", "rafraichissement": "..." } }
+  { "user": {...}, "tokens": { "access": "...", "refresh": "..." } }
 Errors:
-  400  { "non_field_errors": ["Identifiants incorrects."] }
-  400  { "non_field_errors": ["Ce compte est banni."] }
+  400  { "non_field_errors": ["Incorrect credentials."] }
+  400  { "non_field_errors": ["This account is banned."] }
 
 ------------------------------------------------------------
-4. POST auth/connexion-google/            Auth: none   (throttled: 20/hour)
+4. POST auth/google-login/                Auth: none   (throttled: 20/hour)
 Body:
-  { "jeton_identite": "<Google ID token from the mobile SDK>" }
+  { "id_token": "<Google ID token from the mobile SDK>" }
 Success 200:
-  { "utilisateur": {...}, "jetons": {...} }
+  { "user": {...}, "tokens": {...} }
   (Links to an existing account if the verified Google email matches one;
   otherwise creates a new account.)
 Errors:
   400  { "non_field_errors": ["<message from Google token verification failure>"] }
-  403  { "detail": "Ce compte est banni." }
+  403  { "detail": "This account is banned." }
+
+*** Getting the id_token is the part that needs per-platform setup on your
+side — see "GOOGLE SIGN-IN SETUP" below. This is what your note was about. ***
 
 ------------------------------------------------------------
-5. POST auth/rafraichir/                  Auth: none
-   *** DIFFERENT FIELD NAMES *** — this is SimpleJWT's stock TokenRefreshView,
-   NOT the app's own "acces"/"rafraichissement" convention.
+5. POST auth/refresh/                     Auth: none
+   Stock SimpleJWT TokenRefreshView — access/refresh, same convention as
+   everywhere else in this API now (no more special-cased field names here).
 Body:
-  { "refresh": "<rafraichissement token from login/signup>" }
+  { "refresh": "<refresh token from login/signup>" }
 Success 200:
-  { "access": "<new access token>" }
+  { "access": "<new access token>", "refresh": "<new refresh token>" }
+  (ROTATE_REFRESH_TOKENS is on: you get a new refresh token too, and the
+  old one is blacklisted — save the new one and discard the old one.)
 Errors:
   401  { "detail": "Token is invalid or expired", "code": "token_not_valid" }
 
 ------------------------------------------------------------
-6. POST auth/deconnexion/                 Auth: required
+6. POST auth/logout/                      Auth: required
 Body:
-  { "rafraichissement": "<refresh token>" }
+  { "refresh": "<refresh token>" }
 Success 204: (empty body)
 Errors:
-  400  { "detail": "Le jeton de rafraichissement est requis." }
-  400  { "detail": "Jeton invalide." }
+  400  { "detail": "Refresh token is required." }
+  400  { "detail": "Invalid token." }
 
 ------------------------------------------------------------
-7. GET auth/verifier-email/<uidb64>/<jeton>/    Auth: none
-   No body — uidb64 and jeton are path segments taken from the link in the
+7. GET auth/verify-email/<uidb64>/<token>/    Auth: none
+   No body — uidb64 and token are path segments taken from the link in the
    verification email (not query params, not a JSON body).
 Success 200:
-  { "detail": "Adresse email verifiee." }
+  { "detail": "Email address verified." }
 Errors:
-  400  { "detail": "Lien invalide ou expire." }
+  400  { "detail": "Invalid or expired link." }
 
 ------------------------------------------------------------
-8. POST auth/mot-de-passe/reinitialiser/   Auth: none   (throttled: 5/hour)
+8. POST auth/password/reset/              Auth: none   (throttled: 5/hour)
 Body:
   { "email": "user@example.com" }
 Success 200 (ALWAYS 200, whether or not the account exists — do not treat
 this as confirmation the email is registered; it's deliberate to avoid
 leaking account existence):
-  { "detail": "Si ce compte existe, un email a ete envoye." }
+  { "detail": "If this account exists, an email has been sent." }
 
 ------------------------------------------------------------
-9. POST auth/mot-de-passe/confirmer/       Auth: none
+9. POST auth/password/confirm/            Auth: none
 Body:
   {
     "uid": "<from reset-password email link>",
-    "jeton": "<from reset-password email link>",
-    "nouveau_mot_de_passe": "..."
+    "token": "<from reset-password email link>",
+    "new_password": "..."
   }
 Success 200:
-  { "detail": "Mot de passe reinitialise." }
+  { "detail": "Password reset." }
 Errors:
-  400  { "detail": "Lien invalide ou expire." }
-  400  { "nouveau_mot_de_passe": [Django password-validator messages] }
+  400  { "detail": "Invalid or expired link." }
+  400  { "new_password": [Django password-validator messages] }
 
 ------------------------------------------------------------
-UTILISATEUR OBJECT (returned inside "utilisateur" in endpoints 2, 3, 4):
+USER OBJECT (returned inside "user" in endpoints 2, 3, 4):
 {
   "id": "<uuid>",
   "email": "...",
-  "nom_complet": "...",
-  "telephone": "...",
-  "ville": "...",
-  "type_vehicule": "VOITURE" | "MOTO" | "TAXI" | "CAMION" | "BUS" | "UTILITAIRE",
-  "url_avatar": "..." or null,
-  "email_verifie": true | false,
-  "formule": "GRATUITE" | "PREMIUM",
-  "score_reputation": 0,
+  "full_name": "...",
+  "phone": "...",
+  "city": "...",
+  "vehicle_type": "VOITURE" | "MOTO" | "TAXI" | "CAMION" | "BUS" | "UTILITAIRE",
+  "avatar_url": "..." or null,
+  "email_verified": true | false,
+  "plan": "GRATUITE" | "PREMIUM",
+  "reputation_score": 0,
   "points": 0,
-  "mode_invisible": false,
-  "droits": {
-    "formule": "GRATUITE" | "PREMIUM",
-    "max_adresses_enregistrees": <int or null>,
-    "publicite_active": true | false,
-    "routage_avance": true | false,
-    "packs_hors_ligne": true | false,
-    "retention_historique_jours": <int or null>
+  "invisible_mode": false,
+  "plan_limits": {
+    "plan": "GRATUITE" | "PREMIUM",
+    "max_saved_addresses": <int or null>,
+    "ads_enabled": true | false,
+    "advanced_routing": true | false,
+    "offline_packs": true | false,
+    "history_retention_days": <int or null>
   }
 }
-All fields in "utilisateur" and "droits" are read-only from the client's
+All fields in "user" and "plan_limits" are read-only from the client's
 perspective (this endpoint never accepts them back as input).
+Note: enum VALUES (vehicle_type, plan) are still the original French model
+choices ("VOITURE", "GRATUITE", ...) — only field NAMES and free-text
+messages were translated, not stored choice values.
 
 ------------------------------------------------------------
 GENERAL ERROR-SHAPE RULES
 - A plain "field required / invalid format" DRF validation error always
   comes back as: { "<field_name>": ["message", ...] }
 - A validation error NOT tied to one specific field (raised from a
-  serializer's validate() method — e.g. wrong password, CGU not accepted)
+  serializer's validate() method — e.g. wrong password, terms not accepted)
   comes back as: { "non_field_errors": ["message"] }
 - Endpoints that build their own Response() directly instead of relying on
-  serializer validation (deconnexion, verifier-email, mot-de-passe/confirmer
-  link errors) return: { "detail": "message" } — no non_field_errors wrapper.
+  serializer validation (logout, verify-email, password/confirm link errors)
+  return: { "detail": "message" } — no non_field_errors wrapper.
 - Every 429 (throttled) response looks like:
   { "detail": "Request was throttled. Expected available in N seconds." }
 - Every 401 from a missing/expired/invalid access token on an
@@ -158,7 +168,83 @@ GENERAL ERROR-SHAPE RULES
   { "detail": "...", "code": "..." }  (standard SimpleJWT/DRF shape)
 
 ------------------------------------------------------------
+GOOGLE SIGN-IN SETUP (the actual gap your note flagged)
+
+Backend side is done and working: POST auth/google-login/ verifies whatever
+ID token you send it against Google's public keys and the configured OAuth
+client ID, so there's nothing left to change server-side. What's missing is
+purely client-side: getting a real Google ID token out of the device.
+
+What you need, and why:
+
+1. A "Web application" type OAuth client ID — THIS ALREADY EXISTS:
+     776686983052-3n9e6kustjnhm371mmg3p9av1173o25s.apps.googleusercontent.com
+   This is not secret — it's meant to ship inside client apps. It is the
+   value the backend checks the token's audience against
+   (GOOGLE_OAUTH_CLIENT_ID in the Django .env), so it MUST be the one you
+   pass as serverClientId (see below) — using a different client ID there
+   will make every login fail 400 with an audience-mismatch error.
+
+   ⚠ Please confirm in Google Cloud Console → APIs & Services → Credentials
+   that this client is actually typed "Web application", not "Android" or
+   "iOS" — if it turns out to be the wrong type, tell me and I'll swap the
+   env var once you've created the right one; it's a one-line config change
+   on my side, no code change.
+
+2. Per-platform OAuth clients, in the SAME Google Cloud project as the Web
+   client above (create these yourself in Credentials → Create Credentials
+   → OAuth client ID — I don't have Console access, so this part is on you
+   or whoever holds the project):
+     - Android: type "Android", needs your app's package name (applicationId
+       in build.gradle) and the SHA-1 fingerprint of your signing certificate
+       (`./gradlew signingReport` for a debug build, or your release
+       keystore's SHA-1 for release builds — you need BOTH registered, debug
+       and release, or debug builds won't authenticate).
+     - iOS: type "iOS", needs your app's bundle ID. Download the resulting
+       GoogleService-Info.plist (or just copy the REVERSED_CLIENT_ID) and
+       add the URL scheme to Info.plist per the google_sign_in package's iOS
+       setup instructions.
+   These platform clients don't need their own audience check on the
+   backend — they exist so Google's SDK trusts your app enough to run the
+   sign-in flow at all. The ID token that comes back is still scoped to the
+   Web client ID via serverClientId, which is what the backend validates.
+
+3. Flutter (google_sign_in package) — request the token with serverClientId
+   set to the Web client ID above, not left blank:
+
+     final googleSignIn = GoogleSignIn(
+       serverClientId: '776686983052-3n9e6kustjnhm371mmg3p9av1173o25s.apps.googleusercontent.com',
+     );
+     final account = await googleSignIn.signIn();
+     final auth = await account?.authentication;
+     final idToken = auth?.idToken;   // <- this is what goes in the request body below
+
+   (google_sign_in v7+ changed some of this API — check the version pinned
+   in pubspec.yaml if the above doesn't match; the concept — serverClientId
+   must be the Web client ID, and you want idToken not accessToken — holds
+   across versions.)
+
+4. Send it to the backend:
+     POST auth/google-login/
+     { "id_token": "<idToken from step 3>" }
+
+Common failure modes, so you don't lose time debugging the wrong layer:
+   - 400 "Wrong recipient, payload audience != requiredAudience" (or similar)
+     → serverClientId isn't the Web client ID, or GOOGLE_OAUTH_CLIENT_ID on
+       the backend doesn't match it. Check both sides.
+   - Sign-in dialog fails / cancels immediately on Android
+     → SHA-1 not registered for the keystore you're building with (debug
+       vs release mismatch is the usual culprit).
+   - Sign-in fails on iOS before any dialog appears
+     → URL scheme in Info.plist doesn't match the iOS client's
+       REVERSED_CLIENT_ID, or bundle ID doesn't match the iOS OAuth client.
+   - idToken is null but accessToken is present
+     → serverClientId wasn't set — google_sign_in only returns an idToken
+       usable for server verification when you explicitly ask for one via
+       serverClientId (this is the #1 real-world gotcha with this package).
+
+------------------------------------------------------------
 NOT INCLUDED HERE (separate from auth, ask if you need these next):
-- GET/PATCH/DELETE utilisateurs/moi/, avatar, parametres, statistiques
-- appareils/ (push token registration)
-- config/ (public app config: villes, types, version minimale)
+- GET/PATCH/DELETE users/me/, avatar, settings, statistics
+- devices/ (push token registration)
+- config/ (public app config: cities, vehicle types, minimum version)

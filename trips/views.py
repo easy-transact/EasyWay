@@ -26,24 +26,24 @@ from .services.producteur_evenements import FLUX_POSITIONS, ProducteurRedisStrea
 from .services.service_itineraire import ServiceItineraire
 
 DUREE_PERIODE = {
-    'semaine': timedelta(days=7),
-    'mois': timedelta(days=30),
+    'week': timedelta(days=7),
+    'month': timedelta(days=30),
 }
 
 
 @extend_schema(
-    tags=['Itineraires'],
+    tags=['Routes'],
     summary="Calculer des candidats d'itineraire",
     description=(
         'view -> ServiceItineraire -> ClientValhalla. Ne persiste rien -- le client '
-        "renvoie l'itineraire choisi tel quel a POST /api/trajets/ pour le faire persister."
+        "renvoie l'itineraire choisi tel quel a POST /api/trips/ pour le faire persister."
     ),
     request=CalculItineraireSerializer,
     responses={200: ItineraireCandidatSerializer(many=True)},
 )
 class CalculItineraireView(APIView):
-    """POST /api/itineraires/calculer/ : view -> ServiceItineraire -> ClientValhalla.
-    Ne persiste rien -- le client renvoie l'itineraire choisi a POST /api/trajets/."""
+    """POST /api/routes/calculate/ : view -> ServiceItineraire -> ClientValhalla.
+    Ne persiste rien -- le client renvoie l'itineraire choisi a POST /api/trips/."""
 
     def post(self, request):
         serializer = CalculItineraireSerializer(data=request.data)
@@ -61,31 +61,31 @@ class CalculItineraireView(APIView):
 @extend_schema_view(
     get=extend_schema(
         operation_id='trajets_lister',
-        tags=['Trajets'],
+        tags=['Trips'],
         summary="Lister les trajets de l'utilisateur connecte",
         description=(
-            "periode=semaine|mois|tout respecte la retention du plan (Droits."
-            "retention_historique_jours) -- tronque toujours 'tout', jamais l'inverse. "
-            "'tronque_le' est non-null quand la retention du plan a effectivement exclu des trajets."
+            "period=week|month|all respecte la retention du plan (Droits."
+            "retention_historique_jours) -- tronque toujours 'all', jamais l'inverse. "
+            "'truncated_at' est non-null quand la retention du plan a effectivement exclu des trajets."
         ),
         parameters=[
             OpenApiParameter(
-                'periode', OpenApiTypes.STR, enum=['semaine', 'mois', 'tout'], default='tout',
+                'period', OpenApiTypes.STR, enum=['week', 'month', 'all'], default='all',
             ),
         ],
         responses={
             200: inline_serializer(
                 name='TrajetListeReponse',
                 fields={
-                    'resultats': TrajetSerializer(many=True),
-                    'tronque_le': drf_serializers.DateTimeField(allow_null=True),
+                    'results': TrajetSerializer(many=True),
+                    'truncated_at': drf_serializers.DateTimeField(allow_null=True),
                 },
             ),
             400: MessageSerializer,
         },
     ),
     post=extend_schema(
-        tags=['Trajets'],
+        tags=['Trips'],
         summary='Creer un trajet a partir d\'un itineraire choisi',
         description="Demarre immediatement le trajet (PLANIFIE -> ACTIF via la machine a etats).",
         request=TrajetCreationSerializer,
@@ -93,13 +93,13 @@ class CalculItineraireView(APIView):
     ),
 )
 class TrajetListeCreationView(APIView):
-    """GET ?periode=semaine|mois|tout respecte la retention du plan (Droits.
-    retention_historique_jours) -- tronque toujours 'tout', jamais l'inverse."""
+    """GET ?period=week|month|all respecte la retention du plan (Droits.
+    retention_historique_jours) -- tronque toujours 'all', jamais l'inverse."""
 
     def get(self, request):
-        periode = request.query_params.get('periode', 'tout')
-        if periode not in (*DUREE_PERIODE, 'tout'):
-            return Response({'detail': "periode doit etre 'semaine', 'mois' ou 'tout'."}, status=400)
+        periode = request.query_params.get('period', 'all')
+        if periode not in (*DUREE_PERIODE, 'all'):
+            return Response({'detail': "period must be 'week', 'month' or 'all'."}, status=400)
 
         queryset = request.user.trajets.order_by('-demarre_le')
 
@@ -120,8 +120,8 @@ class TrajetListeCreationView(APIView):
             queryset = queryset.filter(demarre_le__gte=depuis)
 
         return Response({
-            'resultats': TrajetSerializer(queryset, many=True).data,
-            'tronque_le': tronque_le.isoformat() if tronque_le else None,
+            'results': TrajetSerializer(queryset, many=True).data,
+            'truncated_at': tronque_le.isoformat() if tronque_le else None,
         })
 
     def post(self, request):
@@ -133,17 +133,17 @@ class TrajetListeCreationView(APIView):
 
 @extend_schema_view(
     get=extend_schema(
-        operation_id='trajets_detail', tags=['Trajets'], summary="Detail d'un trajet",
+        operation_id='trajets_detail', tags=['Trips'], summary="Detail d'un trajet",
         responses={200: TrajetSerializer},
     ),
     patch=extend_schema(
-        tags=['Trajets'],
+        tags=['Trips'],
         summary="Mettre a jour un trajet (statut, mesures reelles)",
         description='changer_statut() applique la machine a etats du trajet ; une transition illegale renvoie 400.',
         request=TrajetMiseAJourSerializer,
         responses={200: TrajetSerializer, 400: MessageSerializer},
     ),
-    delete=extend_schema(tags=['Trajets'], summary='Supprimer un trajet', responses={204: None}),
+    delete=extend_schema(tags=['Trips'], summary='Supprimer un trajet', responses={204: None}),
 )
 class TrajetDetailView(APIView):
     def _objet(self, request, id):
@@ -168,7 +168,7 @@ class TrajetDetailView(APIView):
 
 
 @extend_schema(
-    tags=['Trajets'],
+    tags=['Trips'],
     summary='Noter un trajet termine',
     description='Refuse avec 400 si le trajet n\'est pas au statut TERMINE.',
     request=NoterTrajetSerializer,
@@ -179,7 +179,7 @@ class NoterTrajetView(APIView):
         trajet = get_object_or_404(Trajet, id=id, utilisateur=request.user)
         if trajet.statut != StatutTrajet.TERMINE:
             return Response(
-                {'detail': 'Seul un trajet termine peut etre note.'}, status=status.HTTP_400_BAD_REQUEST
+                {'detail': 'Only a completed trip can be rated.'}, status=status.HTTP_400_BAD_REQUEST
             )
         serializer = NoterTrajetSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -188,7 +188,7 @@ class NoterTrajetView(APIView):
 
 
 @extend_schema(
-    tags=['Telemetrie'],
+    tags=['Telemetry'],
     summary='Ingerer un lot de positions GPS',
     description=(
         'Valide et publie sur le flux Redis Streams (ProducteurEvenements), '

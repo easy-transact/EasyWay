@@ -39,16 +39,16 @@ from .tokens import email_verification_token
 
 
 def _reponse_authentification(nom):
-    """Schema de reponse {utilisateur, jetons} partage par inscription/connexion."""
+    """Schema de reponse {user, tokens} partage par inscription/connexion."""
     return inline_serializer(
         name=nom,
-        fields={'utilisateur': UtilisateurSerializer(), 'jetons': JetonsSerializer()},
+        fields={'user': UtilisateurSerializer(), 'tokens': JetonsSerializer()},
     )
 
 
 def _jetons_pour(utilisateur):
     rafraichissement = RefreshToken.for_user(utilisateur)
-    return {'acces': str(rafraichissement.access_token), 'rafraichissement': str(rafraichissement)}
+    return {'access': str(rafraichissement.access_token), 'refresh': str(rafraichissement)}
 
 
 def _decoder_uid(uidb64):
@@ -61,7 +61,7 @@ def _decoder_uid(uidb64):
 
 
 @extend_schema(
-    tags=['Authentification'],
+    tags=['Authentication'],
     summary="Verifier si un email est deja associe a un compte",
     description=(
         "Premier temps de la connexion en deux temps (section 4.1) : le client "
@@ -80,11 +80,11 @@ class VerifierExistenceView(APIView):
         serializer = VerifierExistenceSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         existe = Utilisateur.objects.filter(email__iexact=serializer.validated_data['email']).exists()
-        return Response({'existe': existe})
+        return Response({'exists': existe})
 
 
 @extend_schema(
-    tags=['Authentification'],
+    tags=['Authentication'],
     summary='Creer un compte (UC-01)',
     description=(
         'Cree le compte et ses Parametres par defaut (Droits est resolu '
@@ -112,15 +112,15 @@ class InscriptionView(APIView):
         envoyer_email_verification(utilisateur)
         return Response(
             {
-                'utilisateur': UtilisateurSerializer(utilisateur, context={'request': request}).data,
-                'jetons': _jetons_pour(utilisateur),
+                'user': UtilisateurSerializer(utilisateur, context={'request': request}).data,
+                'tokens': _jetons_pour(utilisateur),
             },
             status=status.HTTP_201_CREATED,
         )
 
 
 @extend_schema(
-    tags=['Authentification'],
+    tags=['Authentication'],
     summary='Connexion par email/mot de passe',
     description='Second temps de la connexion en deux temps, apres VerifierExistenceView.',
     request=ConnexionSerializer,
@@ -137,14 +137,14 @@ class ConnexionView(APIView):
         utilisateur = serializer.validated_data['utilisateur']
         return Response(
             {
-                'utilisateur': UtilisateurSerializer(utilisateur, context={'request': request}).data,
-                'jetons': _jetons_pour(utilisateur),
+                'user': UtilisateurSerializer(utilisateur, context={'request': request}).data,
+                'tokens': _jetons_pour(utilisateur),
             }
         )
 
 
 @extend_schema(
-    tags=['Authentification'],
+    tags=['Authentication'],
     summary='Connexion / inscription via Google',
     description=(
         "Section 4.1 'Connexion avec Google' : verifie le jeton d'identite Google "
@@ -154,7 +154,7 @@ class ConnexionView(APIView):
     request=ConnexionGoogleSerializer,
     responses={
         200: _reponse_authentification('ConnexionGoogleReponse'),
-        403: OpenApiResponse(MessageSerializer, description='Compte banni.'),
+        403: OpenApiResponse(MessageSerializer, description='Banned account.'),
     },
 )
 class ConnexionGoogleView(APIView):
@@ -193,18 +193,18 @@ class ConnexionGoogleView(APIView):
             Parametres.objects.create(utilisateur=utilisateur)
 
         if utilisateur.est_banni:
-            return Response({'detail': 'Ce compte est banni.'}, status=status.HTTP_403_FORBIDDEN)
+            return Response({'detail': 'This account is banned.'}, status=status.HTTP_403_FORBIDDEN)
 
         return Response(
             {
-                'utilisateur': UtilisateurSerializer(utilisateur, context={'request': request}).data,
-                'jetons': _jetons_pour(utilisateur),
+                'user': UtilisateurSerializer(utilisateur, context={'request': request}).data,
+                'tokens': _jetons_pour(utilisateur),
             }
         )
 
 
 @extend_schema(
-    tags=['Authentification'],
+    tags=['Authentication'],
     summary='Deconnexion (revocation du refresh token)',
     description=(
         'ServiceAuthentification.revoquerFamille(jeton) : place le refresh token '
@@ -212,7 +212,7 @@ class ConnexionGoogleView(APIView):
     ),
     request=inline_serializer(
         name='DeconnexionRequete',
-        fields={'rafraichissement': drf_serializers.CharField()},
+        fields={'refresh': drf_serializers.CharField()},
     ),
     responses={204: None, 400: MessageSerializer},
 )
@@ -223,20 +223,20 @@ class DeconnexionView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        rafraichissement = request.data.get('rafraichissement')
+        rafraichissement = request.data.get('refresh')
         if not rafraichissement:
             return Response(
-                {'detail': 'Le jeton de rafraichissement est requis.'}, status=status.HTTP_400_BAD_REQUEST
+                {'detail': 'Refresh token is required.'}, status=status.HTTP_400_BAD_REQUEST
             )
         try:
             RefreshToken(rafraichissement).blacklist()
         except TokenError:
-            return Response({'detail': 'Jeton invalide.'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'detail': 'Invalid token.'}, status=status.HTTP_400_BAD_REQUEST)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 @extend_schema(
-    tags=['Authentification'],
+    tags=['Authentication'],
     summary="Verifier l'adresse email via le lien recu",
     description='uidb64 et jeton sont extraits du lien envoye par email a l\'inscription.',
     responses={200: MessageSerializer, 400: MessageSerializer},
@@ -244,17 +244,17 @@ class DeconnexionView(APIView):
 class VerifierEmailView(APIView):
     permission_classes = [AllowAny]
 
-    def get(self, request, uidb64, jeton):
+    def get(self, request, uidb64, token):
         utilisateur = _decoder_uid(uidb64)
-        if utilisateur is None or not email_verification_token.check_token(utilisateur, jeton):
-            return Response({'detail': 'Lien invalide ou expire.'}, status=status.HTTP_400_BAD_REQUEST)
+        if utilisateur is None or not email_verification_token.check_token(utilisateur, token):
+            return Response({'detail': 'Invalid or expired link.'}, status=status.HTTP_400_BAD_REQUEST)
         utilisateur.email_verifie = True
         utilisateur.save(update_fields=['email_verifie'])
-        return Response({'detail': 'Adresse email verifiee.'})
+        return Response({'detail': 'Email address verified.'})
 
 
 @extend_schema(
-    tags=['Authentification'],
+    tags=['Authentication'],
     summary='Demander un email de reinitialisation de mot de passe',
     description=(
         "Reponse identique que le compte existe ou non (200 dans les deux cas) : "
@@ -277,11 +277,11 @@ class DemandeReinitialisationView(APIView):
             envoyer_email_reinitialisation(utilisateur, default_token_generator)
         # Reponse identique que le compte existe ou non : evite de reveler
         # l'existence d'une adresse (meme principe que la connexion en deux temps).
-        return Response({'detail': "Si ce compte existe, un email a ete envoye."})
+        return Response({'detail': 'If this account exists, an email has been sent.'})
 
 
 @extend_schema(
-    tags=['Authentification'],
+    tags=['Authentication'],
     summary='Confirmer la reinitialisation avec le lien recu',
     description='uid et jeton proviennent du lien envoye par DemandeReinitialisationView.',
     request=ConfirmationReinitialisationSerializer,
@@ -296,28 +296,28 @@ class ConfirmationReinitialisationView(APIView):
         donnees = serializer.validated_data
 
         utilisateur = _decoder_uid(donnees['uid'])
-        if utilisateur is None or not default_token_generator.check_token(utilisateur, donnees['jeton']):
-            return Response({'detail': 'Lien invalide ou expire.'}, status=status.HTTP_400_BAD_REQUEST)
+        if utilisateur is None or not default_token_generator.check_token(utilisateur, donnees['token']):
+            return Response({'detail': 'Invalid or expired link.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        utilisateur.set_password(donnees['nouveau_mot_de_passe'])
+        utilisateur.set_password(donnees['new_password'])
         utilisateur.save(update_fields=['password'])
-        return Response({'detail': 'Mot de passe reinitialise.'})
+        return Response({'detail': 'Password reset.'})
 
 
 @extend_schema_view(
     get=extend_schema(
-        tags=['Compte'],
+        tags=['Account'],
         summary='Lire le profil du compte connecte',
         responses={200: UtilisateurSerializer},
     ),
     patch=extend_schema(
-        tags=['Compte'],
+        tags=['Account'],
         summary='Mettre a jour partiellement le profil',
         request=UtilisateurMiseAJourSerializer,
         responses={200: UtilisateurSerializer},
     ),
     delete=extend_schema(
-        tags=['Compte'],
+        tags=['Account'],
         summary='Demander la suppression du compte',
         description='Suppression logique : grace de 30 jours avant purge par une tache planifiee future.',
         responses={204: None},
@@ -343,7 +343,7 @@ class MoiView(APIView):
 
 
 @extend_schema(
-    tags=['Compte'],
+    tags=['Account'],
     summary="Televerser l'avatar du compte connecte",
     description='Image jusqu\'a 5 Mo. Remplace tout avatar existant.',
     request=AvatarSerializer,
@@ -360,12 +360,12 @@ class AvatarView(APIView):
 
 @extend_schema_view(
     get=extend_schema(
-        tags=['Compte'],
+        tags=['Account'],
         summary='Lire les parametres du compte connecte',
         responses={200: ParametresSerializer},
     ),
     patch=extend_schema(
-        tags=['Compte'],
+        tags=['Account'],
         summary='Mettre a jour partiellement les parametres',
         request=ParametresSerializer,
         responses={200: ParametresSerializer},
@@ -383,7 +383,7 @@ class ParametresView(APIView):
 
 
 @extend_schema(
-    tags=['Compte'],
+    tags=['Account'],
     summary='Statistiques du compte connecte',
     description=(
         "Stub : le module trajets n'est pas encore branche, retourne des zeros "
@@ -393,10 +393,10 @@ class ParametresView(APIView):
         200: inline_serializer(
             name='StatistiquesReponse',
             fields={
-                'trajets_completes': drf_serializers.IntegerField(),
-                'distance_totale_km': drf_serializers.FloatField(),
-                'incidents_signales': drf_serializers.IntegerField(),
-                'temps_gagne_minutes': drf_serializers.IntegerField(),
+                'completed_trips': drf_serializers.IntegerField(),
+                'total_distance_km': drf_serializers.FloatField(),
+                'reported_incidents': drf_serializers.IntegerField(),
+                'time_saved_minutes': drf_serializers.IntegerField(),
             },
         )
     },
@@ -407,15 +407,15 @@ class StatistiquesView(APIView):
 
     def get(self, request):
         return Response({
-            'trajets_completes': 0,
-            'distance_totale_km': 0,
-            'incidents_signales': 0,
-            'temps_gagne_minutes': 0,
+            'completed_trips': 0,
+            'total_distance_km': 0,
+            'reported_incidents': 0,
+            'time_saved_minutes': 0,
         })
 
 
 @extend_schema(
-    tags=['Compte'],
+    tags=['Account'],
     summary='Enregistrer ou mettre a jour un appareil (notifications push)',
     description=(
         'Upsert sur jeton_push : un meme appareil qui se reenregistre (ex. apres '
@@ -440,9 +440,9 @@ class AppareilCreationView(APIView):
 
 
 @extend_schema(
-    tags=['Compte'],
+    tags=['Account'],
     summary='Desenregistrer un appareil',
-    responses={204: None, 404: OpenApiResponse(description='Appareil introuvable pour cet utilisateur.')},
+    responses={204: None, 404: OpenApiResponse(description='Device not found for this user.')},
 )
 class AppareilSuppressionView(APIView):
     def delete(self, request, id):
@@ -462,10 +462,10 @@ class AppareilSuppressionView(APIView):
         200: inline_serializer(
             name='ConfigReponse',
             fields={
-                'villes': drf_serializers.ListField(child=drf_serializers.CharField()),
-                'types_vehicule': drf_serializers.DictField(),
-                'types_incident': drf_serializers.DictField(),
-                'version_minimale_app': drf_serializers.CharField(),
+                'cities': drf_serializers.ListField(child=drf_serializers.CharField()),
+                'vehicle_types': drf_serializers.DictField(),
+                'incident_types': drf_serializers.DictField(),
+                'minimum_app_version': drf_serializers.CharField(),
             },
         )
     },
@@ -478,8 +478,8 @@ class ConfigView(APIView):
 
     def get(self, request):
         return Response({
-            'villes': VILLES_DISPONIBLES,
-            'types_vehicule': dict(TypeVehicule.choices),
-            'types_incident': dict(TypeIncident.choices),
-            'version_minimale_app': VERSION_MINIMALE_APP,
+            'cities': VILLES_DISPONIBLES,
+            'vehicle_types': dict(TypeVehicule.choices),
+            'incident_types': dict(TypeIncident.choices),
+            'minimum_app_version': VERSION_MINIMALE_APP,
         })

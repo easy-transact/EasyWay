@@ -33,9 +33,9 @@ def _normaliser(objet: dict) -> dict:
     ]))
     return {
         'id': f"nominatim:{objet.get('place_id')}",
-        'libelle': libelle,
-        'sous_libelle': sous_libelle,
-        'categorie': objet.get('type') or objet.get('class', ''),
+        'label': libelle,
+        'sublabel': sous_libelle,
+        'category': objet.get('type') or objet.get('class', ''),
         'lat': float(objet['lat']),
         'lon': float(objet['lon']),
         'distance_m': None,

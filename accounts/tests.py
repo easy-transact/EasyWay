@@ -27,10 +27,10 @@ def connecter(client, email, mot_de_passe=MOT_DE_PASSE):
     cache.clear()
     reponse = client.post(
         reverse('accounts:connexion'),
-        {'email': email, 'mot_de_passe': mot_de_passe},
+        {'email': email, 'password': mot_de_passe},
         content_type='application/json',
     )
-    return {'HTTP_AUTHORIZATION': f"Bearer {reponse.json()['jetons']['acces']}"}
+    return {'HTTP_AUTHORIZATION': f"Bearer {reponse.json()['tokens']['access']}"}
 
 
 class DroitsTests(TestCase):
@@ -67,10 +67,10 @@ class InscriptionTests(TestCase):
     def _payload(self, **overrides):
         payload = {
             'email': 'nouveau@easyway.local',
-            'nom_complet': 'Nouveau Utilisateur',
-            'mot_de_passe': MOT_DE_PASSE,
-            'confirmation_mot_de_passe': MOT_DE_PASSE,
-            'accepte_cgu': True,
+            'full_name': 'Nouveau Utilisateur',
+            'password': MOT_DE_PASSE,
+            'password_confirmation': MOT_DE_PASSE,
+            'accepts_terms': True,
         }
         payload.update(overrides)
         return payload
@@ -84,12 +84,12 @@ class InscriptionTests(TestCase):
         self.assertTrue(Parametres.objects.filter(utilisateur=utilisateur).exists())
         # L'inscription ne doit pas creer de nouvelle ligne Droits.
         self.assertEqual(Droits.objects.count(), nb_droits_avant)
-        self.assertEqual(reponse.json()['utilisateur']['droits']['formule'], 'GRATUITE')
+        self.assertEqual(reponse.json()['user']['plan_limits']['plan'], 'GRATUITE')
 
     def test_inscription_retourne_des_jetons_immediatement(self):
         reponse = self.client.post(reverse('accounts:inscription'), self._payload(), content_type='application/json')
-        self.assertIn('acces', reponse.json()['jetons'])
-        self.assertIn('rafraichissement', reponse.json()['jetons'])
+        self.assertIn('access', reponse.json()['tokens'])
+        self.assertIn('refresh', reponse.json()['tokens'])
 
     def test_email_deja_utilise_rejete(self):
         creer_utilisateur('nouveau@easyway.local')
@@ -99,14 +99,14 @@ class InscriptionTests(TestCase):
     def test_mots_de_passe_differents_rejetes(self):
         reponse = self.client.post(
             reverse('accounts:inscription'),
-            self._payload(confirmation_mot_de_passe='autre-chose'),
+            self._payload(password_confirmation='autre-chose'),
             content_type='application/json',
         )
         self.assertEqual(reponse.status_code, 400)
 
     def test_cgu_non_acceptees_rejetees(self):
         reponse = self.client.post(
-            reverse('accounts:inscription'), self._payload(accepte_cgu=False), content_type='application/json'
+            reverse('accounts:inscription'), self._payload(accepts_terms=False), content_type='application/json'
         )
         self.assertEqual(reponse.status_code, 400)
 
@@ -119,17 +119,17 @@ class ConnexionTests(TestCase):
         cache.clear()
         reponse = self.client.post(
             reverse('accounts:connexion'),
-            {'email': self.utilisateur.email, 'mot_de_passe': MOT_DE_PASSE},
+            {'email': self.utilisateur.email, 'password': MOT_DE_PASSE},
             content_type='application/json',
         )
         self.assertEqual(reponse.status_code, 200)
-        self.assertIn('acces', reponse.json()['jetons'])
+        self.assertIn('access', reponse.json()['tokens'])
 
     def test_mauvais_mot_de_passe_rejete(self):
         cache.clear()
         reponse = self.client.post(
             reverse('accounts:connexion'),
-            {'email': self.utilisateur.email, 'mot_de_passe': 'incorrect'},
+            {'email': self.utilisateur.email, 'password': 'incorrect'},
             content_type='application/json',
         )
         self.assertEqual(reponse.status_code, 400)
@@ -140,59 +140,48 @@ class ConnexionTests(TestCase):
         cache.clear()
         reponse = self.client.post(
             reverse('accounts:connexion'),
-            {'email': self.utilisateur.email, 'mot_de_passe': MOT_DE_PASSE},
+            {'email': self.utilisateur.email, 'password': MOT_DE_PASSE},
             content_type='application/json',
         )
         self.assertEqual(reponse.status_code, 400)
 
 
 class RafraichirTests(TestCase):
-    """RafraichirSerializer : /auth/rafraichir/ doit parler la meme convention
-    (acces/rafraichissement) que connexion/inscription, pas access/refresh --
-    incoherence relevee par l'integration frontend."""
+    """/auth/refresh/ : vue SimpleJWT stock, access/refresh -- desormais la
+    meme convention que le reste du module (traduction de la surface API)."""
 
     def setUp(self):
         cache.clear()
         self.utilisateur = creer_utilisateur()
         reponse = self.client.post(
             reverse('accounts:connexion'),
-            {'email': self.utilisateur.email, 'mot_de_passe': MOT_DE_PASSE},
+            {'email': self.utilisateur.email, 'password': MOT_DE_PASSE},
             content_type='application/json',
         )
-        self.jetons = reponse.json()['jetons']
+        self.jetons = reponse.json()['tokens']
 
-    def test_accepte_rafraichissement_et_renvoie_acces(self):
+    def test_refresh_renvoie_un_nouvel_access(self):
         reponse = self.client.post(
             reverse('accounts:rafraichir'),
-            {'rafraichissement': self.jetons['rafraichissement']},
+            {'refresh': self.jetons['refresh']},
             content_type='application/json',
         )
         self.assertEqual(reponse.status_code, 200)
         corps = reponse.json()
-        self.assertIn('acces', corps)
-        self.assertIn('rafraichissement', corps)
-        self.assertNotIn('access', corps)
-        self.assertNotIn('refresh', corps)
-
-    def test_champ_access_anglais_est_rejete(self):
-        reponse = self.client.post(
-            reverse('accounts:rafraichir'),
-            {'refresh': self.jetons['rafraichissement']},
-            content_type='application/json',
-        )
-        self.assertEqual(reponse.status_code, 400)
+        self.assertIn('access', corps)
+        self.assertIn('refresh', corps)
 
     def test_ancien_jeton_rafraichissement_est_mis_sur_liste_noire(self):
         """ROTATE_REFRESH_TOKENS + BLACKLIST_AFTER_ROTATION (cf. SIMPLE_JWT) :
         le jeton reutilise apres rotation doit etre refuse."""
         self.client.post(
             reverse('accounts:rafraichir'),
-            {'rafraichissement': self.jetons['rafraichissement']},
+            {'refresh': self.jetons['refresh']},
             content_type='application/json',
         )
         reponse = self.client.post(
             reverse('accounts:rafraichir'),
-            {'rafraichissement': self.jetons['rafraichissement']},
+            {'refresh': self.jetons['refresh']},
             content_type='application/json',
         )
         self.assertEqual(reponse.status_code, 401)
@@ -205,7 +194,7 @@ class VerificationEmailTests(TestCase):
         jeton = email_verification_token.make_token(utilisateur)
 
         reponse = self.client.get(
-            reverse('accounts:verifier-email', kwargs={'uidb64': uid, 'jeton': jeton})
+            reverse('accounts:verifier-email', kwargs={'uidb64': uid, 'token': jeton})
         )
         self.assertEqual(reponse.status_code, 200)
         utilisateur.refresh_from_db()
@@ -215,7 +204,7 @@ class VerificationEmailTests(TestCase):
         utilisateur = creer_utilisateur()
         uid = urlsafe_base64_encode(force_bytes(str(utilisateur.pk)))
         reponse = self.client.get(
-            reverse('accounts:verifier-email', kwargs={'uidb64': uid, 'jeton': 'jeton-invalide'})
+            reverse('accounts:verifier-email', kwargs={'uidb64': uid, 'token': 'jeton-invalide'})
         )
         self.assertEqual(reponse.status_code, 400)
 
@@ -228,7 +217,7 @@ class ReinitialisationMotDePasseTests(TestCase):
 
         reponse = self.client.post(
             reverse('accounts:mot-de-passe-confirmer'),
-            {'uid': uid, 'jeton': jeton, 'nouveau_mot_de_passe': 'NouveauMotDePasse9!'},
+            {'uid': uid, 'token': jeton, 'new_password': 'NouveauMotDePasse9!'},
             content_type='application/json',
         )
         self.assertEqual(reponse.status_code, 200)
@@ -260,7 +249,7 @@ class CompteAuthentifieTests(TestCase):
 
     def test_moi_patch_partiel(self):
         reponse = self.client.patch(
-            reverse('accounts:moi'), {'ville': 'Douala'}, content_type='application/json', **self.jetons
+            reverse('accounts:moi'), {'city': 'Douala'}, content_type='application/json', **self.jetons
         )
         self.assertEqual(reponse.status_code, 200)
         self.utilisateur.refresh_from_db()
@@ -268,7 +257,7 @@ class CompteAuthentifieTests(TestCase):
 
     def test_moi_patch_ignore_champs_non_autorises(self):
         reponse = self.client.patch(
-            reverse('accounts:moi'), {'formule': 'PREMIUM'}, content_type='application/json', **self.jetons
+            reverse('accounts:moi'), {'plan': 'PREMIUM'}, content_type='application/json', **self.jetons
         )
         self.assertEqual(reponse.status_code, 200)
         self.utilisateur.refresh_from_db()
@@ -283,12 +272,12 @@ class CompteAuthentifieTests(TestCase):
     def test_parametres_get(self):
         reponse = self.client.get(reverse('accounts:moi-parametres'), **self.jetons)
         self.assertEqual(reponse.status_code, 200)
-        self.assertIn('notif_alertes_police', reponse.json())
+        self.assertIn('notify_police_alerts', reponse.json())
 
     def test_parametres_patch(self):
         reponse = self.client.patch(
             reverse('accounts:moi-parametres'),
-            {'notif_nouveautes': False},
+            {'notify_news': False},
             content_type='application/json',
             **self.jetons,
         )
@@ -299,14 +288,14 @@ class CompteAuthentifieTests(TestCase):
     def test_statistiques_stub(self):
         reponse = self.client.get(reverse('accounts:moi-statistiques'), **self.jetons)
         self.assertEqual(reponse.status_code, 200)
-        self.assertEqual(reponse.json()['trajets_completes'], 0)
+        self.assertEqual(reponse.json()['completed_trips'], 0)
 
     def test_appareil_creation_puis_upsert(self):
         payload = {
-            'jeton_push': 'ExponentPushToken[abc]',
-            'plateforme': 'ANDROID',
-            'version_application': '1.0.0',
-            'version_systeme': '14',
+            'push_token': 'ExponentPushToken[abc]',
+            'platform': 'ANDROID',
+            'app_version': '1.0.0',
+            'os_version': '14',
         }
         reponse = self.client.post(
             reverse('accounts:appareils'), payload, content_type='application/json', **self.jetons
@@ -314,7 +303,7 @@ class CompteAuthentifieTests(TestCase):
         self.assertEqual(reponse.status_code, 201)
         self.assertEqual(Appareil.objects.filter(utilisateur=self.utilisateur).count(), 1)
 
-        # Meme jeton_push -> upsert, pas de doublon.
+        # Meme push_token -> upsert, pas de doublon.
         reponse = self.client.post(
             reverse('accounts:appareils'), payload, content_type='application/json', **self.jetons
         )
@@ -349,7 +338,7 @@ class ConfigTests(TestCase):
         reponse = self.client.get(reverse('accounts:config'))
         self.assertEqual(reponse.status_code, 200)
         corps = reponse.json()
-        self.assertIn('villes', corps)
-        self.assertIn('types_vehicule', corps)
-        self.assertIn('types_incident', corps)
-        self.assertIn('version_minimale_app', corps)
+        self.assertIn('cities', corps)
+        self.assertIn('vehicle_types', corps)
+        self.assertIn('incident_types', corps)
+        self.assertIn('minimum_app_version', corps)

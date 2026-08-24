@@ -4,37 +4,57 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
-from rest_framework_simplejwt.serializers import TokenRefreshSerializer
 
 from .google_oauth import JetonGoogleInvalide, verifier_jeton_google
-from .models import Appareil, Droits, Parametres, Utilisateur
+from .models import Appareil, Droits, Formule, Parametres, Plateforme, TypeVehicule, Unite, Utilisateur
+
+# Les champs ci-dessous sont delibrement declares avec `source=` plutot que
+# de laisser ModelSerializer les auto-generer : la reponse API doit parler
+# anglais (cf. discussion), mais les modeles/colonnes DB restent en francais
+# (aucune migration ni renommage interne) -- source= est le seul point de
+# traduction entre les deux.
 
 
 class DroitsSerializer(serializers.ModelSerializer):
+    plan = serializers.CharField(source='formule', read_only=True)
+    max_saved_addresses = serializers.IntegerField(source='max_adresses_enregistrees', read_only=True)
+    ads_enabled = serializers.BooleanField(source='publicite_active', read_only=True)
+    advanced_routing = serializers.BooleanField(source='routage_avance', read_only=True)
+    offline_packs = serializers.BooleanField(source='packs_hors_ligne', read_only=True)
+    history_retention_days = serializers.IntegerField(source='retention_historique_jours', read_only=True)
+
     class Meta:
         model = Droits
         fields = [
-            'formule', 'max_adresses_enregistrees', 'publicite_active',
-            'routage_avance', 'packs_hors_ligne', 'retention_historique_jours',
+            'plan', 'max_saved_addresses', 'ads_enabled',
+            'advanced_routing', 'offline_packs', 'history_retention_days',
         ]
         read_only_fields = fields
 
 
 class UtilisateurSerializer(serializers.ModelSerializer):
-    url_avatar = serializers.SerializerMethodField()
-    droits = DroitsSerializer(read_only=True)
+    full_name = serializers.CharField(source='nom_complet', read_only=True)
+    phone = serializers.CharField(source='telephone', read_only=True)
+    city = serializers.CharField(source='ville', read_only=True)
+    vehicle_type = serializers.ChoiceField(choices=TypeVehicule.choices, source='type_vehicule', read_only=True)
+    avatar_url = serializers.SerializerMethodField()
+    email_verified = serializers.BooleanField(source='email_verifie', read_only=True)
+    plan = serializers.ChoiceField(choices=Formule.choices, source='formule', read_only=True)
+    reputation_score = serializers.IntegerField(source='score_reputation', read_only=True)
+    invisible_mode = serializers.BooleanField(source='mode_invisible', read_only=True)
+    plan_limits = DroitsSerializer(source='droits', read_only=True)
 
     class Meta:
         model = Utilisateur
         fields = [
-            'id', 'email', 'nom_complet', 'telephone', 'ville', 'type_vehicule',
-            'url_avatar', 'email_verifie', 'formule', 'score_reputation', 'points',
-            'mode_invisible', 'droits',
+            'id', 'email', 'full_name', 'phone', 'city', 'vehicle_type',
+            'avatar_url', 'email_verified', 'plan', 'reputation_score', 'points',
+            'invisible_mode', 'plan_limits',
         ]
         read_only_fields = fields
 
     @extend_schema_field(serializers.URLField(allow_null=True))
-    def get_url_avatar(self, utilisateur):
+    def get_avatar_url(self, utilisateur):
         if utilisateur.avatar:
             url = utilisateur.avatar.url
             request = self.context.get('request')
@@ -43,10 +63,16 @@ class UtilisateurSerializer(serializers.ModelSerializer):
 
 
 class UtilisateurMiseAJourSerializer(serializers.ModelSerializer):
+    full_name = serializers.CharField(source='nom_complet', required=False)
+    city = serializers.CharField(source='ville', required=False, allow_null=True)
+    vehicle_type = serializers.ChoiceField(
+        choices=TypeVehicule.choices, source='type_vehicule', required=False, allow_null=True
+    )
+    invisible_mode = serializers.BooleanField(source='mode_invisible', required=False)
+
     class Meta:
         model = Utilisateur
-        fields = ['nom_complet', 'ville', 'type_vehicule', 'mode_invisible']
-        extra_kwargs = {field: {'required': False} for field in fields}
+        fields = ['full_name', 'city', 'vehicle_type', 'invisible_mode']
 
 
 class AvatarSerializer(serializers.Serializer):
@@ -55,77 +81,69 @@ class AvatarSerializer(serializers.Serializer):
     def validate_avatar(self, fichier):
         limite = 5 * 1024 * 1024
         if fichier.size > limite:
-            raise serializers.ValidationError("L'image ne doit pas depasser 5 Mo.")
+            raise serializers.ValidationError('Image must not exceed 5 MB.')
         return fichier
 
 
 class ParametresSerializer(serializers.ModelSerializer):
+    avoid_tolls = serializers.BooleanField(source='eviter_peages', required=False)
+    avoid_unpaved_roads = serializers.BooleanField(source='eviter_non_bitumees', required=False)
+    avoid_difficult_intersections = serializers.BooleanField(
+        source='eviter_intersections_difficiles', required=False
+    )
+    map_style = serializers.CharField(source='style_carte', required=False)
+    voice_guidance_enabled = serializers.BooleanField(source='guidage_vocal_actif', required=False)
+    voice_language = serializers.CharField(source='langue_vocale', required=False)
+    units = serializers.ChoiceField(choices=Unite.choices, source='unites', required=False)
+    speedometer_enabled = serializers.BooleanField(source='compteur_vitesse_actif', required=False)
+    speed_alert_enabled = serializers.BooleanField(source='alerte_vitesse_active', required=False)
+    notifications_enabled = serializers.BooleanField(source='notifications_globales', required=False)
+    notify_announcements = serializers.BooleanField(source='notif_annonces', required=False)
+    notify_frequent_incidents = serializers.BooleanField(source='notif_incidents_frequents', required=False)
+    notify_police_alerts = serializers.BooleanField(source='notif_alertes_police', required=False)
+    notify_route_change = serializers.BooleanField(source='notif_changement_itineraire', required=False)
+    notify_news = serializers.BooleanField(source='notif_nouveautes', required=False)
+
     class Meta:
         model = Parametres
-        exclude = ['id', 'utilisateur']
+        fields = [
+            'avoid_tolls', 'avoid_unpaved_roads', 'avoid_difficult_intersections', 'map_style',
+            'voice_guidance_enabled', 'voice_language', 'units', 'speedometer_enabled', 'speed_alert_enabled',
+            'notifications_enabled', 'notify_announcements', 'notify_frequent_incidents',
+            'notify_police_alerts', 'notify_route_change', 'notify_news',
+        ]
 
 
 class AppareilSerializer(serializers.ModelSerializer):
+    push_token = serializers.CharField(source='jeton_push')
+    platform = serializers.ChoiceField(choices=Plateforme.choices, source='plateforme')
+    app_version = serializers.CharField(source='version_application')
+    os_version = serializers.CharField(source='version_systeme')
+    language = serializers.CharField(source='langue', required=False)
+
     class Meta:
         model = Appareil
-        fields = [
-            'id', 'jeton_push', 'plateforme', 'version_application',
-            'version_systeme', 'langue',
-        ]
+        fields = ['id', 'push_token', 'platform', 'app_version', 'os_version', 'language']
         read_only_fields = ['id']
 
 
 class JetonsSerializer(serializers.Serializer):
-    """Documentation only: forme des jetons JWT retournes par les vues d'authentification."""
+    """Documentation only: shape of the JWT tokens returned by auth endpoints."""
 
-    acces = serializers.CharField(help_text='Jeton JWT court (15 min) a joindre en Authorization: Bearer <acces>.')
-    rafraichissement = serializers.CharField(help_text='Jeton JWT long (30 jours) utilise sur /auth/rafraichir/.')
-
-
-class RafraichirSerializer(TokenRefreshSerializer):
-    """SimpleJWT nomme ses champs access/refresh (anglais) par defaut -- seule
-    incoherence face au reste du module, qui utilise acces/rafraichissement
-    partout ailleurs (cf. JetonsSerializer). Repere par l'integration
-    frontend : deux conventions dans le meme module produisent des bugs.
-
-    Renomme la requete et la reponse sans toucher a la logique de rotation/
-    blacklist heritee de TokenRefreshSerializer.validate() : le renommage du
-    champ d'entree passe par `source` (le wire-name change, la cle lue par
-    validate() reste 'refresh') ; la reponse, elle-meme une simple recopie du
-    dict retourne par validate() (TokenViewBase.post ne passe jamais par
-    to_representation()), est reconstruite explicitement ici."""
-
-    def get_fields(self):
-        fields = super().get_fields()
-
-        champ_entree = fields.pop('refresh')
-        champ_entree.source = 'refresh'
-        fields['rafraichissement'] = champ_entree
-
-        champ_sortie = fields.pop('access')
-        champ_sortie.source = 'access'
-        fields['acces'] = champ_sortie
-
-        return fields
-
-    def validate(self, attrs):
-        resultat = super().validate(attrs)
-        reponse = {'acces': resultat['access']}
-        if 'refresh' in resultat:  # present seulement si ROTATE_REFRESH_TOKENS (cf. SIMPLE_JWT)
-            reponse['rafraichissement'] = resultat['refresh']
-        return reponse
+    access = serializers.CharField(help_text='Short-lived JWT (15 min) to send as Authorization: Bearer <access>.')
+    refresh = serializers.CharField(help_text='Long-lived JWT (30 days) used on /auth/refresh/.')
 
 
 class MessageSerializer(serializers.Serializer):
-    """Documentation only: reponse generique {"detail": "..."} utilisee par plusieurs vues."""
+    """Documentation only: generic {"detail": "..."} response used by several views."""
 
     detail = serializers.CharField()
 
 
 class ExisteSerializer(serializers.Serializer):
-    """Documentation only: reponse de VerifierExistenceView."""
+    """Documentation only: response of VerifierExistenceView."""
 
-    existe = serializers.BooleanField()
+    exists = serializers.BooleanField()
 
 
 class VerifierExistenceSerializer(serializers.Serializer):
@@ -133,46 +151,45 @@ class VerifierExistenceSerializer(serializers.Serializer):
 
 
 class InscriptionSerializer(serializers.ModelSerializer):
-    mot_de_passe = serializers.CharField(write_only=True)
-    confirmation_mot_de_passe = serializers.CharField(write_only=True)
-    accepte_cgu = serializers.BooleanField(write_only=True)
+    full_name = serializers.CharField(source='nom_complet')
+    password = serializers.CharField(write_only=True)
+    password_confirmation = serializers.CharField(write_only=True)
+    phone = serializers.CharField(source='telephone', required=False)
+    city = serializers.CharField(source='ville', required=False)
+    vehicle_type = serializers.ChoiceField(choices=TypeVehicule.choices, source='type_vehicule', required=False)
+    accepts_terms = serializers.BooleanField(write_only=True)
 
     class Meta:
         model = Utilisateur
         fields = [
-            'email', 'nom_complet', 'mot_de_passe', 'confirmation_mot_de_passe',
-            'telephone', 'ville', 'type_vehicule', 'accepte_cgu',
+            'email', 'full_name', 'password', 'password_confirmation',
+            'phone', 'city', 'vehicle_type', 'accepts_terms',
         ]
-        extra_kwargs = {
-            'telephone': {'required': False},
-            'ville': {'required': False},
-            'type_vehicule': {'required': False},
-        }
 
     def validate_email(self, email):
         email = Utilisateur.objects.normalize_email(email)
         if Utilisateur.objects.filter(email__iexact=email).exists():
-            raise serializers.ValidationError('Adresse deja utilisee.')
+            raise serializers.ValidationError('Email already in use.')
         return email
 
     def validate(self, attrs):
-        if attrs['mot_de_passe'] != attrs.pop('confirmation_mot_de_passe'):
+        if attrs['password'] != attrs.pop('password_confirmation'):
             raise serializers.ValidationError(
-                {'confirmation_mot_de_passe': 'Les mots de passe ne correspondent pas.'}
+                {'password_confirmation': 'Passwords do not match.'}
             )
-        if not attrs.get('accepte_cgu'):
+        if not attrs.get('accepts_terms'):
             raise serializers.ValidationError(
-                {'accepte_cgu': "L'acceptation des CGU est obligatoire."}
+                {'accepts_terms': 'You must accept the terms and conditions.'}
             )
         try:
-            validate_password(attrs['mot_de_passe'])
+            validate_password(attrs['password'])
         except DjangoValidationError as exc:
-            raise serializers.ValidationError({'mot_de_passe': list(exc.messages)})
+            raise serializers.ValidationError({'password': list(exc.messages)})
         return attrs
 
     def create(self, validated_data):
-        validated_data.pop('accepte_cgu')
-        mot_de_passe = validated_data.pop('mot_de_passe')
+        validated_data.pop('accepts_terms')
+        mot_de_passe = validated_data.pop('password')
         utilisateur = Utilisateur.objects.create_user(
             password=mot_de_passe,
             cgu_acceptee_le=timezone.now(),
@@ -184,28 +201,28 @@ class InscriptionSerializer(serializers.ModelSerializer):
 
 class ConnexionSerializer(serializers.Serializer):
     email = serializers.EmailField()
-    mot_de_passe = serializers.CharField(write_only=True, trim_whitespace=False)
+    password = serializers.CharField(write_only=True, trim_whitespace=False)
 
     def validate(self, attrs):
         utilisateur = authenticate(
             request=self.context.get('request'),
             username=attrs['email'],
-            password=attrs['mot_de_passe'],
+            password=attrs['password'],
         )
         if utilisateur is None:
-            raise serializers.ValidationError('Identifiants incorrects.')
+            raise serializers.ValidationError('Incorrect credentials.')
         if utilisateur.est_banni:
-            raise serializers.ValidationError('Ce compte est banni.')
+            raise serializers.ValidationError('This account is banned.')
         attrs['utilisateur'] = utilisateur
         return attrs
 
 
 class ConnexionGoogleSerializer(serializers.Serializer):
-    jeton_identite = serializers.CharField(write_only=True)
+    id_token = serializers.CharField(write_only=True)
 
     def validate(self, attrs):
         try:
-            attrs['identite'] = verifier_jeton_google(attrs['jeton_identite'])
+            attrs['identite'] = verifier_jeton_google(attrs['id_token'])
         except JetonGoogleInvalide as exc:
             raise serializers.ValidationError(str(exc))
         return attrs
@@ -217,10 +234,10 @@ class DemandeReinitialisationSerializer(serializers.Serializer):
 
 class ConfirmationReinitialisationSerializer(serializers.Serializer):
     uid = serializers.CharField()
-    jeton = serializers.CharField()
-    nouveau_mot_de_passe = serializers.CharField(write_only=True, trim_whitespace=False)
+    token = serializers.CharField()
+    new_password = serializers.CharField(write_only=True, trim_whitespace=False)
 
-    def validate_nouveau_mot_de_passe(self, valeur):
+    def validate_new_password(self, valeur):
         try:
             validate_password(valeur)
         except DjangoValidationError as exc:

@@ -32,9 +32,9 @@ def _normaliser(feature: dict) -> dict:
     ]))
     return {
         'id': f"photon:{props.get('osm_type', '')}{props.get('osm_id', '')}",
-        'libelle': props.get('name') or props.get('street') or props.get('osm_value', ''),
-        'sous_libelle': sous_libelle,
-        'categorie': props.get('osm_value') or props.get('osm_key', ''),
+        'label': props.get('name') or props.get('street') or props.get('osm_value', ''),
+        'sublabel': sous_libelle,
+        'category': props.get('osm_value') or props.get('osm_key', ''),
         'lat': lat,
         'lon': lon,
         'distance_m': None,

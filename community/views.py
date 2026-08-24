@@ -38,14 +38,14 @@ DUREE_IDEMPOTENCE_S = 24 * 3600
     ),
     parameters=[
         OpenApiParameter(
-            'cellules', OpenApiTypes.STR, required=True,
+            'cells', OpenApiTypes.STR, required=True,
             description='Cellules H3 (resolution 8) en hexadecimal, separees par des virgules.',
         ),
     ],
     responses={200: IncidentSerializer(many=True), 400: MessageSerializer},
 )
 class IncidentsProchesView(APIView):
-    """GET /api/incidents/proches/?cellules=<hex,hex,...> : endpoint le plus
+    """GET /api/incidents/nearby/?cells=<hex,hex,...> : endpoint le plus
     sollicite du module. Cache par cellule H3 res8 (~0.74km², cf. l'index
     cellule_h3_res8+statut du modele), invalide a l'ecriture (creation/vote/
     expiration/retrait) plutot que de compter sur le seul TTL -- cf.
@@ -54,10 +54,10 @@ class IncidentsProchesView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
-        cellules_hex = [c for c in request.query_params.get('cellules', '').split(',') if c]
+        cellules_hex = [c for c in request.query_params.get('cells', '').split(',') if c]
         if not cellules_hex:
             return Response(
-                {'detail': "'cellules' est requis (cellules H3 hex separees par des virgules)."}, status=400
+                {'detail': "'cells' is required (comma-separated H3 hex cells)."}, status=400
             )
 
         resultats_par_cellule = {}
@@ -96,7 +96,7 @@ class IncidentsProchesView(APIView):
         "L'en-tete Idempotency-Key est obligatoire (rejeu reseau = meme reponse, "
         "jamais un deuxieme signalement, cle valable "
         f"{DUREE_IDEMPOTENCE_S // 3600}h). Si le signalement est fusionne avec un "
-        "incident existant a proximite, 'doublon_de_existant' vaut true et le "
+        "incident existant a proximite, 'duplicate_of_existing' vaut true et le "
         "statut HTTP est 200 au lieu de 201."
     ),
     parameters=[
@@ -110,7 +110,7 @@ class IncidentsProchesView(APIView):
         200: IncidentAvecDoublonSerializer,
         201: IncidentAvecDoublonSerializer,
         400: MessageSerializer,
-        429: OpenApiResponse(MessageSerializer, description='Quota horaire de signalements atteint.'),
+        429: OpenApiResponse(MessageSerializer, description='Hourly report quota reached.'),
     },
 )
 class IncidentCreationView(APIView):
@@ -120,7 +120,7 @@ class IncidentCreationView(APIView):
     def post(self, request):
         cle_idempotence = request.headers.get('Idempotency-Key')
         if not cle_idempotence:
-            return Response({'detail': "L'en-tete Idempotency-Key est requis."}, status=400)
+            return Response({'detail': 'The Idempotency-Key header is required.'}, status=400)
 
         cle_cache = f'incident:idempotence:{request.user.id}:{cle_idempotence}'
         incident_id_rejoue = cache.get(cle_cache)
@@ -142,13 +142,13 @@ class IncidentCreationView(APIView):
             )
         except QuotaDepasse:
             return Response(
-                {'detail': 'Quota horaire de signalements atteint.'}, status=status.HTTP_429_TOO_MANY_REQUESTS
+                {'detail': 'Hourly report quota reached.'}, status=status.HTTP_429_TOO_MANY_REQUESTS
             )
 
         cache.set(cle_cache, str(incident.id), timeout=DUREE_IDEMPOTENCE_S)
 
         corps = IncidentSerializer(incident).data
-        corps['doublon_de_existant'] = est_doublon
+        corps['duplicate_of_existing'] = est_doublon
         return Response(corps, status=status.HTTP_200_OK if est_doublon else status.HTTP_201_CREATED)
 
 
@@ -196,17 +196,17 @@ class VoterIncidentView(APIView):
 
             if incident.auteur_id == request.user.id:
                 return Response(
-                    {'detail': 'Vous ne pouvez pas voter sur votre propre signalement.'}, status=400
+                    {'detail': 'You cannot vote on your own report.'}, status=400
                 )
             if Vote.objects.filter(incident=incident, votant=request.user).exists():
-                return Response({'detail': 'Vous avez deja vote sur ce signalement.'}, status=400)
+                return Response({'detail': 'You have already voted on this report.'}, status=400)
 
             vote = Vote.objects.create(
                 incident=incident, votant=request.user,
-                sens=SensVote.CONFIRMATION if sens == 'confirmer' else SensVote.INFIRMATION,
+                sens=SensVote.CONFIRMATION if sens == 'confirm' else SensVote.INFIRMATION,
                 poids=request.user.poids_de_vote(),
             )
-            if sens == 'confirmer':
+            if sens == 'confirm':
                 incident.confirmer(vote)
             else:
                 incident.infirmer(vote)

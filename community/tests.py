@@ -40,7 +40,7 @@ def patcher_nominatim_incident(test_case, libelle=None):
     patcheur = patch('community.services.ClientNominatim')
     classe_simulee = patcheur.start()
     classe_simulee.return_value.inverser.return_value = (
-        {'libelle': libelle, 'source': 'nominatim'} if libelle else None
+        {'label': libelle, 'source': 'nominatim'} if libelle else None
     )
     test_case.addCleanup(patcheur.stop)
 
@@ -185,7 +185,7 @@ class IncidentsProchesApiTests(TestCase):
         import h3
         cellule_hex = h3.int_to_str(incident.cellule_h3_res8)
 
-        reponse = self.client.get(reverse('community:incidents-proches'), {'cellules': cellule_hex})
+        reponse = self.client.get(reverse('community:incidents-proches'), {'cells': cellule_hex})
         corps = reponse.json()
         self.assertEqual(len(corps), 1)
         self.assertEqual(corps[0]['id'], str(incident.id))
@@ -193,7 +193,7 @@ class IncidentsProchesApiTests(TestCase):
     def test_cellule_vide_retourne_liste_vide(self):
         import h3
         cellule_hex = h3.latlng_to_cell(0.0, 0.0, 8)
-        reponse = self.client.get(reverse('community:incidents-proches'), {'cellules': cellule_hex})
+        reponse = self.client.get(reverse('community:incidents-proches'), {'cells': cellule_hex})
         self.assertEqual(reponse.json(), [])
 
 
@@ -213,29 +213,29 @@ class InvalidationCacheProchesTests(TestCase):
 
     def test_vote_invalide_le_cache_de_la_cellule(self):
         premiere_lecture = self.client.get(
-            reverse('community:incidents-proches'), {'cellules': self.cellule_hex}
+            reverse('community:incidents-proches'), {'cells': self.cellule_hex}
         ).json()
         confirmations_avant = premiere_lecture[0]['confirmations']
         self.assertIsNotNone(cache.get(cle_cache_cellule(self.incident.cellule_h3_res8)))
 
         self.client.post(
             reverse('community:incident-vote', kwargs={'id': self.incident.id}),
-            {'sens': 'confirmer'}, content_type='application/json', **self.jetons_votant,
+            {'direction': 'confirm'}, content_type='application/json', **self.jetons_votant,
         )
 
         deuxieme_lecture = self.client.get(
-            reverse('community:incidents-proches'), {'cellules': self.cellule_hex}
+            reverse('community:incidents-proches'), {'cells': self.cellule_hex}
         ).json()
         self.assertEqual(deuxieme_lecture[0]['confirmations'], confirmations_avant + 1)
 
     def test_retrait_invalide_le_cache_de_la_cellule(self):
-        self.client.get(reverse('community:incidents-proches'), {'cellules': self.cellule_hex})
+        self.client.get(reverse('community:incidents-proches'), {'cells': self.cellule_hex})
         jetons_auteur = connecter(self.client, self.auteur.email)
 
         self.client.delete(reverse('community:incident-detail', kwargs={'id': self.incident.id}), **jetons_auteur)
 
         deuxieme_lecture = self.client.get(
-            reverse('community:incidents-proches'), {'cellules': self.cellule_hex}
+            reverse('community:incidents-proches'), {'cells': self.cellule_hex}
         ).json()
         self.assertEqual(deuxieme_lecture, [])
 
@@ -247,7 +247,7 @@ class IncidentDetailApiTests(TestCase):
 
     def test_detail_inclut_impact_estime(self):
         reponse = self.client.get(reverse('community:incident-detail', kwargs={'id': self.incident.id}))
-        self.assertEqual(reponse.json()['impact_estime'], 2)
+        self.assertEqual(reponse.json()['estimated_impact'], 2)
 
     def test_retrait_par_lauteur(self):
         jetons = connecter(self.client, self.auteur.email)
@@ -277,13 +277,13 @@ class VoteApiTests(TestCase):
     def _voter(self, incident, sens, jetons=None):
         return self.client.post(
             reverse('community:incident-vote', kwargs={'id': incident.id}),
-            {'sens': sens}, content_type='application/json', **(jetons or self.jetons_votant),
+            {'direction': sens}, content_type='application/json', **(jetons or self.jetons_votant),
         )
 
     def test_confirmer_incremente_et_prolonge(self):
         incident = creer_incident(self.auteur, expire_le=timezone.now() + timezone.timedelta(minutes=10))
         expire_avant = incident.expire_le
-        reponse = self._voter(incident, 'confirmer')
+        reponse = self._voter(incident, 'confirm')
         self.assertEqual(reponse.status_code, 200)
         incident.refresh_from_db()
         self.assertEqual(incident.confirmations, 1)
@@ -292,7 +292,7 @@ class VoteApiTests(TestCase):
     def test_infirmer_incremente_et_reduit(self):
         incident = creer_incident(self.auteur)
         expire_avant = incident.expire_le
-        self._voter(incident, 'infirmer')
+        self._voter(incident, 'dispute')
         incident.refresh_from_db()
         self.assertEqual(incident.infirmations, 1)
         self.assertLess(incident.expire_le, expire_avant)
@@ -300,30 +300,30 @@ class VoteApiTests(TestCase):
     def test_vote_sur_son_propre_signalement_refuse(self):
         incident = creer_incident(self.auteur)
         jetons_auteur = connecter(self.client, self.auteur.email)
-        reponse = self._voter(incident, 'confirmer', jetons=jetons_auteur)
+        reponse = self._voter(incident, 'confirm', jetons=jetons_auteur)
         self.assertEqual(reponse.status_code, 400)
 
     def test_double_vote_refuse(self):
         incident = creer_incident(self.auteur)
-        self._voter(incident, 'confirmer')
-        reponse = self._voter(incident, 'confirmer')
+        self._voter(incident, 'confirm')
+        reponse = self._voter(incident, 'confirm')
         self.assertEqual(reponse.status_code, 400)
 
     def test_deux_confirmations_promeuvent_en_attente_vers_actif(self):
         incident = creer_incident(self.auteur, statut=StatutIncident.EN_ATTENTE)
-        self._voter(incident, 'confirmer')
+        self._voter(incident, 'confirm')
         incident.refresh_from_db()
         self.assertEqual(incident.statut, StatutIncident.EN_ATTENTE)
 
         autre_votant = creer_utilisateur('votant2@easyway.local')
-        self._voter(incident, 'confirmer', jetons=connecter(self.client, autre_votant.email))
+        self._voter(incident, 'confirm', jetons=connecter(self.client, autre_votant.email))
         incident.refresh_from_db()
         self.assertEqual(incident.statut, StatutIncident.ACTIF)
 
     def test_score_confiance_pondere_par_reputation(self):
         votant_fort = creer_utilisateur('fort@easyway.local', score_reputation=200)
         incident = creer_incident(self.auteur)
-        self._voter(incident, 'confirmer', jetons=connecter(self.client, votant_fort.email))
+        self._voter(incident, 'confirm', jetons=connecter(self.client, votant_fort.email))
         incident.refresh_from_db()
         self.assertEqual(incident.score_confiance, votant_fort.poids_de_vote())
 
@@ -357,7 +357,7 @@ class ExpirationTaskTests(TestCase):
         )
         import h3
         cellule_hex = h3.int_to_str(incident.cellule_h3_res8)
-        self.client.get(reverse('community:incidents-proches'), {'cellules': cellule_hex})
+        self.client.get(reverse('community:incidents-proches'), {'cells': cellule_hex})
         self.assertIsNotNone(cache.get(cle_cache_cellule(incident.cellule_h3_res8)))
 
         incident.expire_le = timezone.now() - timezone.timedelta(seconds=1)
@@ -366,7 +366,7 @@ class ExpirationTaskTests(TestCase):
 
         self.assertIsNone(cache.get(cle_cache_cellule(incident.cellule_h3_res8)))
         deuxieme_lecture = self.client.get(
-            reverse('community:incidents-proches'), {'cellules': cellule_hex}
+            reverse('community:incidents-proches'), {'cells': cellule_hex}
         ).json()
         self.assertEqual(deuxieme_lecture, [])
 

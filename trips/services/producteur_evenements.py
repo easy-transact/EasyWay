@@ -2,7 +2,7 @@
 ProducteurEvenements : interface de publication sur un flux d'evenements.
 Redis Streams est la seule implementation aujourd'hui (P5), mais un futur
 passage a Kafka (charge plus lourde, retention plus longue) ne doit changer
-qu'une config/un import -- jamais les appelants (POST /api/telemetrie/positions/,
+qu'une config/un import -- jamais les appelants (POST /api/telemetry/positions/,
 et tout futur producteur similaire).
 """
 

@@ -31,7 +31,7 @@ def consommer_positions():
     plusieurs workers Celery sur le meme hote ne se disputent pas le meme nom
     dans le groupe Redis Streams. Un retard de consommation degrade
     uniquement la fraicheur du trafic -- jamais une erreur, POST
-    /api/telemetrie/positions/ retourne 202 quel que soit l'etat de cette tache."""
+    /api/telemetry/positions/ retourne 202 quel que soit l'etat de cette tache."""
     consommateur = ConsommateurPositions(nom_consommateur=f'celery-{os.getpid()}')
     return consommateur.consommer()
 

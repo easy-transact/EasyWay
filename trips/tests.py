@@ -274,30 +274,54 @@ class TrajetApiTests(TestCase):
         ):
             reponse = self.client.post(
                 reverse('trips:calculer-itineraire'),
-                {'origine_lat': 4.0483, 'origine_lon': 9.7043, 'destination_lat': 4.0469, 'destination_lon': 9.6970},
+                {'origin_lat': 4.0483, 'origin_lon': 9.7043, 'destination_lat': 4.0469, 'destination_lon': 9.6970},
                 content_type='application/json',
                 **self.jetons,
             )
         self.assertEqual(reponse.status_code, 200)
         self.assertEqual(len(reponse.json()), 1)
-        self.assertTrue(reponse.json()[0]['est_recommande'])
+        self.assertTrue(reponse.json()[0]['is_recommended'])
 
     def test_calcul_itineraire_non_authentifie_rejete(self):
         reponse = self.client.post(
             reverse('trips:calculer-itineraire'),
-            {'origine_lat': 4.0, 'origine_lon': 9.7, 'destination_lat': 4.01, 'destination_lon': 9.71},
+            {'origin_lat': 4.0, 'origin_lon': 9.7, 'destination_lat': 4.01, 'destination_lon': 9.71},
             content_type='application/json',
         )
         self.assertEqual(reponse.status_code, 401)
 
+    def _route_depuis_candidat(self, candidat):
+        """Le dict brut renvoye par _normaliser_trip() (cles francaises,
+        jamais serialise a cette etape) doit etre traduit en forme anglaise
+        pour etre resoumis tel qu'un client le ferait a POST /api/trips/."""
+        return {
+            'route_id': candidat['identifiant'],
+            'label': candidat['libelle'],
+            'distance': candidat['distance'],
+            'duration': candidat['duree'],
+            'duration_with_traffic': candidat['duree_avec_trafic'],
+            'traffic_level': candidat['niveau_trafic'],
+            'geometry': candidat['geometrie'],
+            'is_recommended': candidat['est_recommande'],
+            'maneuvers': [
+                {
+                    'type': m['type'], 'instruction': m['instruction'],
+                    'voice_instruction': m['instruction_vocale'], 'distance': m['distance'],
+                    'duration': m['duree'], 'street_name': m['nom_voie'],
+                }
+                for m in candidat['manoeuvres']
+            ],
+            'degraded': candidat.get('degrade', False),
+        }
+
     def _payload_creation(self):
         candidat = ServiceItineraire()._normaliser_trip(trip_factice()['trip'], 0)
         return {
-            'libelle_origine': 'Marche Central',
-            'origine_lat': 4.0483, 'origine_lon': 9.7043,
-            'libelle_destination': 'Hopital General',
+            'origin_label': 'Marche Central',
+            'origin_lat': 4.0483, 'origin_lon': 9.7043,
+            'destination_label': 'Hopital General',
             'destination_lat': 4.0469, 'destination_lon': 9.6970,
-            'itineraire': candidat,
+            'route': self._route_depuis_candidat(candidat),
         }
 
     def test_creation_trajet_demarre_actif(self):
@@ -306,9 +330,9 @@ class TrajetApiTests(TestCase):
         )
         self.assertEqual(reponse.status_code, 201)
         corps = reponse.json()
-        self.assertEqual(corps['statut'], StatutTrajet.ACTIF)
-        self.assertEqual(len(corps['itineraires']), 1)
-        self.assertEqual(len(corps['itineraires'][0]['manoeuvres']), 1)
+        self.assertEqual(corps['status'], StatutTrajet.ACTIF)
+        self.assertEqual(len(corps['routes']), 1)
+        self.assertEqual(len(corps['routes'][0]['maneuvers']), 1)
 
     def test_patch_transition_illegale_rejetee(self):
         trajet = _trajet_actif_pour(self.utilisateur)
@@ -316,7 +340,7 @@ class TrajetApiTests(TestCase):
 
         reponse = self.client.patch(
             reverse('trips:trajet-detail', kwargs={'id': trajet.id}),
-            {'statut': StatutTrajet.ACTIF},
+            {'status': StatutTrajet.ACTIF},
             content_type='application/json',
             **self.jetons,
         )
@@ -326,31 +350,31 @@ class TrajetApiTests(TestCase):
         trajet = _trajet_actif_pour(self.utilisateur)
         reponse = self.client.patch(
             reverse('trips:trajet-detail', kwargs={'id': trajet.id}),
-            {'statut': StatutTrajet.TERMINE, 'distance_reelle': 1300, 'duree_reelle': 130},
+            {'status': StatutTrajet.TERMINE, 'actual_distance': 1300, 'actual_duration': 130},
             content_type='application/json',
             **self.jetons,
         )
         self.assertEqual(reponse.status_code, 200)
-        self.assertEqual(reponse.json()['statut'], StatutTrajet.TERMINE)
-        self.assertEqual(reponse.json()['distance_reelle'], 1300)
+        self.assertEqual(reponse.json()['status'], StatutTrajet.TERMINE)
+        self.assertEqual(reponse.json()['actual_distance'], 1300)
 
     def test_noter_trajet_termine(self):
         trajet = _trajet_actif_pour(self.utilisateur)
         trajet.changer_statut(StatutTrajet.TERMINE)
         reponse = self.client.post(
             reverse('trips:trajet-note', kwargs={'id': trajet.id}),
-            {'note': 5, 'commentaire': 'Parfait'},
+            {'rating': 5, 'comment': 'Parfait'},
             content_type='application/json',
             **self.jetons,
         )
         self.assertEqual(reponse.status_code, 200)
-        self.assertEqual(reponse.json()['note'], 5)
+        self.assertEqual(reponse.json()['rating'], 5)
 
     def test_noter_trajet_actif_refuse(self):
         trajet = _trajet_actif_pour(self.utilisateur)
         reponse = self.client.post(
             reverse('trips:trajet-note', kwargs={'id': trajet.id}),
-            {'note': 5},
+            {'rating': 5},
             content_type='application/json',
             **self.jetons,
         )
@@ -376,37 +400,37 @@ class RetentionTrajetsTests(TestCase):
         self.jetons = connecter(self.client, self.utilisateur.email)
 
     def _lister(self, periode=None):
-        params = {'periode': periode} if periode else {}
+        params = {'period': periode} if periode else {}
         return self.client.get(reverse('trips:trajets'), params, **self.jetons)
 
     def test_gratuite_tronque_a_30_jours(self):
         _trajet_actif_pour(self.utilisateur, demarre_le=timezone.now() - timezone.timedelta(days=5))
         _trajet_actif_pour(self.utilisateur, demarre_le=timezone.now() - timezone.timedelta(days=45))
 
-        reponse = self._lister('tout')
+        reponse = self._lister('all')
         corps = reponse.json()
-        self.assertEqual(len(corps['resultats']), 1)
-        self.assertIsNotNone(corps['tronque_le'])
+        self.assertEqual(len(corps['results']), 1)
+        self.assertIsNotNone(corps['truncated_at'])
 
     def test_premium_conserve_plus_longtemps(self):
         self.utilisateur.formule = Formule.PREMIUM
         self.utilisateur.save(update_fields=['formule'])
         _trajet_actif_pour(self.utilisateur, demarre_le=timezone.now() - timezone.timedelta(days=45))
 
-        reponse = self._lister('tout')
+        reponse = self._lister('all')
         corps = reponse.json()
-        self.assertEqual(len(corps['resultats']), 1)
-        self.assertIsNone(corps['tronque_le'])
+        self.assertEqual(len(corps['results']), 1)
+        self.assertIsNone(corps['truncated_at'])
 
     def test_periode_semaine_filtre(self):
         _trajet_actif_pour(self.utilisateur, demarre_le=timezone.now() - timezone.timedelta(days=2))
         _trajet_actif_pour(self.utilisateur, demarre_le=timezone.now() - timezone.timedelta(days=10))
 
-        reponse = self._lister('semaine')
-        self.assertEqual(len(reponse.json()['resultats']), 1)
+        reponse = self._lister('week')
+        self.assertEqual(len(reponse.json()['results']), 1)
 
     def test_periode_invalide_rejetee(self):
-        reponse = self._lister('annee')
+        reponse = self._lister('year')
         self.assertEqual(reponse.status_code, 400)
 
 
@@ -433,10 +457,10 @@ class TelemetriePositionsApiTests(TestCase):
 
     def _lot(self, **overrides):
         payload = {
-            'trajet': str(self.trajet.id),
+            'trip': str(self.trajet.id),
             'positions': [
-                {'lat': 4.0483, 'lon': 9.7043, 'vitesse_kmh': 32.5, 'cap': 180, 'horodatage': '2026-01-01T10:00:00Z'},
-                {'lat': 4.0480, 'lon': 9.7040, 'horodatage': '2026-01-01T10:00:05Z'},
+                {'lat': 4.0483, 'lon': 9.7043, 'speed_kmh': 32.5, 'heading': 180, 'timestamp': '2026-01-01T10:00:00Z'},
+                {'lat': 4.0480, 'lon': 9.7040, 'timestamp': '2026-01-01T10:00:05Z'},
             ],
         }
         payload.update(overrides)
@@ -483,7 +507,7 @@ class TelemetriePositionsApiTests(TestCase):
         with patch('trips.views.ProducteurRedisStreams') as ClasseProducteur:
             reponse = self.client.post(
                 reverse('trips:telemetrie-positions'),
-                self._lot(trajet=str(trajet_autre.id)),
+                self._lot(trip=str(trajet_autre.id)),
                 content_type='application/json',
                 **self.jetons,
             )

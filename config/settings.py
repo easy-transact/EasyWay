@@ -123,15 +123,15 @@ REST_FRAMEWORK = {
 
 SPECTACULAR_SETTINGS = {
     'TITLE': 'Easy Way API',
-    'DESCRIPTION': 'Application de navigation communautaire et de signalement routier',
+    'DESCRIPTION': 'Community navigation and road incident reporting application',
     'VERSION': '1.0.0',
     'SERVE_INCLUDE_SCHEMA': False,
     # Plusieurs modeles ont un champ 'statut' distinct (Lieu, Trajet, Incident) :
     # sans ca drf-spectacular genere des noms d'enum ambigus (StatutXxxEnum).
     'ENUM_NAME_OVERRIDES': {
-        'StatutLieuEnum': 'places.models.StatutLieu',
-        'StatutTrajetEnum': 'trips.models.StatutTrajet',
-        'StatutIncidentEnum': 'community.models.StatutIncident',
+        'PlaceStatusEnum': 'places.models.StatutLieu',
+        'TripStatusEnum': 'trips.models.StatutTrajet',
+        'IncidentStatusEnum': 'community.models.StatutIncident',
     },
 }
 

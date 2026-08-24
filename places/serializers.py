@@ -1,15 +1,19 @@
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
-from .models import AdresseEnregistree, Lieu, RechercheRecente
+from .models import AdresseEnregistree, LibelleAdresse, Lieu, RechercheRecente
+
+# Champs declares avec `source=` : la reponse API parle anglais, les modeles/
+# colonnes DB restent en francais (aucune migration, cf. discussion).
 
 
 class LieuRechercheSerializer(serializers.ModelSerializer):
-    """Resultat de GET /api/lieux/recherche/ : forme allegee attendue par
-    l'ecran de resultats (libelle/sous-libelle/distance), pas le detail complet."""
+    """Resultat de GET /api/places/search/ : forme allegee attendue par
+    l'ecran de resultats (label/sublabel/distance), pas le detail complet."""
 
-    libelle = serializers.CharField(source='nom')
-    sous_libelle = serializers.SerializerMethodField()
+    label = serializers.CharField(source='nom')
+    sublabel = serializers.SerializerMethodField()
+    category = serializers.CharField(source='categorie')
     lat = serializers.SerializerMethodField()
     lon = serializers.SerializerMethodField()
     distance_m = serializers.SerializerMethodField()
@@ -17,10 +21,10 @@ class LieuRechercheSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Lieu
-        fields = ['id', 'libelle', 'sous_libelle', 'categorie', 'lat', 'lon', 'distance_m', 'source']
+        fields = ['id', 'label', 'sublabel', 'category', 'lat', 'lon', 'distance_m', 'source']
 
     @extend_schema_field(serializers.CharField())
-    def get_sous_libelle(self, lieu):
+    def get_sublabel(self, lieu):
         return lieu.quartier or lieu.adresse or lieu.ville
 
     @extend_schema_field(serializers.CharField())
@@ -42,14 +46,21 @@ class LieuRechercheSerializer(serializers.ModelSerializer):
 
 
 class LieuDetailSerializer(serializers.ModelSerializer):
+    name = serializers.CharField(source='nom', read_only=True)
+    category = serializers.CharField(source='categorie', read_only=True)
+    address = serializers.CharField(source='adresse', read_only=True)
+    neighborhood = serializers.CharField(source='quartier', read_only=True)
+    city = serializers.CharField(source='ville', read_only=True)
     lat = serializers.SerializerMethodField()
     lon = serializers.SerializerMethodField()
+    status = serializers.CharField(source='statut', read_only=True)
+    popularity_score = serializers.IntegerField(source='score_popularite', read_only=True)
 
     class Meta:
         model = Lieu
         fields = [
-            'id', 'nom', 'categorie', 'adresse', 'quartier', 'ville',
-            'lat', 'lon', 'source', 'statut', 'score_popularite',
+            'id', 'name', 'category', 'address', 'neighborhood', 'city',
+            'lat', 'lon', 'source', 'status', 'popularity_score',
         ]
         read_only_fields = fields
 
@@ -63,14 +74,14 @@ class LieuDetailSerializer(serializers.ModelSerializer):
 
 
 class LieuPropositionSerializer(serializers.Serializer):
-    """POST /api/lieux/proposer/ : soumission utilisateur, mise en file de
+    """POST /api/places/propose/ : soumission utilisateur, mise en file de
     moderation (statut EN_ATTENTE, cf. Lieu.approuver/rejeter)."""
 
-    nom = serializers.CharField(max_length=255)
-    categorie = serializers.CharField(max_length=100)
-    adresse = serializers.CharField(max_length=500, required=False, allow_blank=True)
-    quartier = serializers.CharField(max_length=255, required=False, allow_blank=True)
-    ville = serializers.CharField(max_length=255)
+    name = serializers.CharField(max_length=255, source='nom')
+    category = serializers.CharField(max_length=100, source='categorie')
+    address = serializers.CharField(max_length=500, required=False, allow_blank=True, source='adresse')
+    neighborhood = serializers.CharField(max_length=255, required=False, allow_blank=True, source='quartier')
+    city = serializers.CharField(max_length=255, source='ville')
     lat = serializers.FloatField()
     lon = serializers.FloatField()
 
@@ -93,6 +104,12 @@ class LieuPropositionSerializer(serializers.Serializer):
 
 
 class AdresseEnregistreeSerializer(serializers.ModelSerializer):
+    place = serializers.PrimaryKeyRelatedField(
+        source='lieu', queryset=Lieu.objects.all(), required=False, allow_null=True
+    )
+    label = serializers.ChoiceField(choices=LibelleAdresse.choices, source='libelle')
+    custom_name = serializers.CharField(source='nom_personnalise', required=False, allow_null=True)
+    address = serializers.CharField(source='adresse')
     lat = serializers.FloatField(write_only=True)
     lon = serializers.FloatField(write_only=True)
     position_lat = serializers.SerializerMethodField()
@@ -101,10 +118,9 @@ class AdresseEnregistreeSerializer(serializers.ModelSerializer):
     class Meta:
         model = AdresseEnregistree
         fields = [
-            'id', 'lieu', 'libelle', 'nom_personnalise', 'adresse',
+            'id', 'place', 'label', 'custom_name', 'address',
             'lat', 'lon', 'position_lat', 'position_lon',
         ]
-        extra_kwargs = {'lieu': {'required': False, 'allow_null': True}}
 
     @extend_schema_field(serializers.FloatField())
     def get_position_lat(self, adresse):
@@ -138,13 +154,16 @@ class AdresseEnregistreeSerializer(serializers.ModelSerializer):
 
 
 class RechercheRecenteSerializer(serializers.ModelSerializer):
+    label = serializers.CharField(source='libelle')
+    sublabel = serializers.CharField(source='sous_libelle', required=False, allow_null=True)
     lat = serializers.FloatField(write_only=True)
     lon = serializers.FloatField(write_only=True)
+    searched_at = serializers.DateTimeField(source='recherche_le', read_only=True)
 
     class Meta:
         model = RechercheRecente
-        fields = ['id', 'libelle', 'sous_libelle', 'lat', 'lon', 'recherche_le']
-        read_only_fields = ['id', 'recherche_le']
+        fields = ['id', 'label', 'sublabel', 'lat', 'lon', 'searched_at']
+        read_only_fields = ['id', 'searched_at']
 
     def create(self, validated_data):
         from django.contrib.gis.geos import Point

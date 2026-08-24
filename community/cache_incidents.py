@@ -1,5 +1,5 @@
 """
-Cache Redis par cellule H3 (resolution 8, ~0.74km²) pour /api/incidents/proches/,
+Cache Redis par cellule H3 (resolution 8, ~0.74km²) pour /api/incidents/nearby/,
 le chemin le plus sollicite du module. La cle est la forme hexadecimale de la
 cellule -- la meme que celle envoyee par le client dans ?cellules= -- pour que
 lecture (vue) et invalidation (creation/vote/expiration/retrait) s'accordent

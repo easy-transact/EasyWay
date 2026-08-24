@@ -7,10 +7,16 @@ from places.models import Lieu
 from .models import Itineraire, Manoeuvre, StatutTrajet, Trajet
 from .polyline import decoder_polyline6
 
+# Champs declares avec `source=` : la reponse API parle anglais, les modeles/
+# colonnes DB restent en francais (aucune migration, cf. discussion). Pour
+# ItineraireCandidatSerializer/ManoeuvreCandidatSerializer, source= fonctionne
+# aussi bien sur les dicts bruts renvoyes par ServiceItineraire que sur des
+# instances de modele -- DRF resout `source` par cle ou attribut indifferemment.
+
 
 class CalculItineraireSerializer(serializers.Serializer):
-    origine_lat = serializers.FloatField()
-    origine_lon = serializers.FloatField()
+    origin_lat = serializers.FloatField(source='origine_lat')
+    origin_lon = serializers.FloatField(source='origine_lon')
     destination_lat = serializers.FloatField()
     destination_lon = serializers.FloatField()
 
@@ -18,73 +24,99 @@ class CalculItineraireSerializer(serializers.Serializer):
 class ManoeuvreCandidatSerializer(serializers.Serializer):
     type = serializers.CharField()
     instruction = serializers.CharField(allow_blank=True)
-    instruction_vocale = serializers.CharField(allow_blank=True)
+    voice_instruction = serializers.CharField(allow_blank=True, source='instruction_vocale')
     distance = serializers.IntegerField()
-    duree = serializers.IntegerField()
-    nom_voie = serializers.CharField(allow_blank=True)
+    duration = serializers.IntegerField(source='duree')
+    street_name = serializers.CharField(allow_blank=True, source='nom_voie')
 
 
 class ItineraireCandidatSerializer(serializers.Serializer):
     """Forme d'un itineraire calcule mais pas encore persiste (retour de
-    POST /api/itineraires/calculer/). Le client renvoie l'objet choisi tel
-    quel a POST /api/trajets/ pour le faire persister."""
+    POST /api/routes/calculate/). Le client renvoie l'objet choisi tel
+    quel a POST /api/trips/ pour le faire persister."""
 
-    identifiant = serializers.CharField()
-    libelle = serializers.CharField()
+    route_id = serializers.CharField(source='identifiant')
+    label = serializers.CharField(source='libelle')
     distance = serializers.IntegerField()
-    duree = serializers.IntegerField()
-    duree_avec_trafic = serializers.IntegerField(allow_null=True)
-    niveau_trafic = serializers.CharField()
-    geometrie = serializers.CharField()
-    est_recommande = serializers.BooleanField()
-    manoeuvres = ManoeuvreCandidatSerializer(many=True)
-    degrade = serializers.BooleanField(default=False)
+    duration = serializers.IntegerField(source='duree')
+    duration_with_traffic = serializers.IntegerField(allow_null=True, source='duree_avec_trafic')
+    traffic_level = serializers.CharField(source='niveau_trafic')
+    geometry = serializers.CharField(source='geometrie')
+    is_recommended = serializers.BooleanField(source='est_recommande')
+    maneuvers = ManoeuvreCandidatSerializer(many=True, source='manoeuvres')
+    degraded = serializers.BooleanField(default=False, source='degrade')
 
 
 class ManoeuvreSerializer(serializers.ModelSerializer):
+    order = serializers.IntegerField(source='ordre', read_only=True)
+    voice_instruction = serializers.CharField(source='instruction_vocale', read_only=True)
+    duration = serializers.IntegerField(source='duree', read_only=True)
+    street_name = serializers.CharField(source='nom_voie', read_only=True)
+
     class Meta:
         model = Manoeuvre
-        fields = ['ordre', 'type', 'instruction', 'instruction_vocale', 'distance', 'duree', 'nom_voie']
+        fields = ['order', 'type', 'instruction', 'voice_instruction', 'distance', 'duration', 'street_name']
         read_only_fields = fields
 
 
 class ItineraireSerializer(serializers.ModelSerializer):
-    manoeuvres = ManoeuvreSerializer(many=True, read_only=True)
+    route_id = serializers.CharField(source='identifiant', read_only=True)
+    is_recommended = serializers.BooleanField(source='est_recommande', read_only=True)
+    label = serializers.CharField(source='libelle', read_only=True)
+    duration = serializers.IntegerField(source='duree', read_only=True)
+    duration_with_traffic = serializers.IntegerField(source='duree_avec_trafic', read_only=True)
+    traffic_level = serializers.CharField(source='niveau_trafic', read_only=True)
+    geometry = serializers.CharField(source='geometrie', read_only=True)
+    maneuvers = ManoeuvreSerializer(many=True, read_only=True, source='manoeuvres')
 
     class Meta:
         model = Itineraire
         fields = [
-            'identifiant', 'est_recommande', 'libelle', 'distance', 'duree',
-            'duree_avec_trafic', 'niveau_trafic', 'geometrie', 'manoeuvres',
+            'route_id', 'is_recommended', 'label', 'distance', 'duration',
+            'duration_with_traffic', 'traffic_level', 'geometry', 'maneuvers',
         ]
         read_only_fields = fields
 
 
 class TrajetSerializer(serializers.ModelSerializer):
-    origine_lat = serializers.SerializerMethodField()
-    origine_lon = serializers.SerializerMethodField()
+    origin_label = serializers.CharField(source='libelle_origine', read_only=True)
+    origin_lat = serializers.SerializerMethodField()
+    origin_lon = serializers.SerializerMethodField()
+    destination_label = serializers.CharField(source='libelle_destination', read_only=True)
     destination_lat = serializers.SerializerMethodField()
     destination_lon = serializers.SerializerMethodField()
-    itineraires = ItineraireSerializer(many=True, read_only=True)
+    destination_place = serializers.PrimaryKeyRelatedField(source='lieu_destination', read_only=True)
+    chosen_route_id = serializers.CharField(source='itineraire_choisi', read_only=True)
+    planned_distance = serializers.IntegerField(source='distance_prevue', read_only=True)
+    planned_duration = serializers.IntegerField(source='duree_prevue', read_only=True)
+    actual_distance = serializers.IntegerField(source='distance_reelle', read_only=True)
+    actual_duration = serializers.IntegerField(source='duree_reelle', read_only=True)
+    status = serializers.CharField(source='statut', read_only=True)
+    incidents_avoided = serializers.IntegerField(source='incidents_evites', read_only=True)
+    rating = serializers.IntegerField(source='note', read_only=True)
+    comment = serializers.CharField(source='commentaire', read_only=True)
+    started_at = serializers.DateTimeField(source='demarre_le', read_only=True)
+    ended_at = serializers.DateTimeField(source='termine_le', read_only=True)
+    routes = ItineraireSerializer(many=True, read_only=True, source='itineraires')
 
     class Meta:
         model = Trajet
         fields = [
-            'id', 'libelle_origine', 'origine_lat', 'origine_lon',
-            'libelle_destination', 'destination_lat', 'destination_lon',
-            'lieu_destination', 'itineraire_choisi',
-            'distance_prevue', 'duree_prevue', 'distance_reelle', 'duree_reelle',
-            'statut', 'incidents_evites', 'note', 'commentaire',
-            'demarre_le', 'termine_le', 'itineraires',
+            'id', 'origin_label', 'origin_lat', 'origin_lon',
+            'destination_label', 'destination_lat', 'destination_lon',
+            'destination_place', 'chosen_route_id',
+            'planned_distance', 'planned_duration', 'actual_distance', 'actual_duration',
+            'status', 'incidents_avoided', 'rating', 'comment',
+            'started_at', 'ended_at', 'routes',
         ]
         read_only_fields = fields
 
     @extend_schema_field(serializers.FloatField())
-    def get_origine_lat(self, trajet):
+    def get_origin_lat(self, trajet):
         return trajet.position_origine.y
 
     @extend_schema_field(serializers.FloatField())
-    def get_origine_lon(self, trajet):
+    def get_origin_lon(self, trajet):
         return trajet.position_origine.x
 
     @extend_schema_field(serializers.FloatField())
@@ -97,16 +129,16 @@ class TrajetSerializer(serializers.ModelSerializer):
 
 
 class TrajetCreationSerializer(serializers.Serializer):
-    libelle_origine = serializers.CharField(max_length=500)
-    origine_lat = serializers.FloatField()
-    origine_lon = serializers.FloatField()
-    libelle_destination = serializers.CharField(max_length=500)
+    origin_label = serializers.CharField(max_length=500, source='libelle_origine')
+    origin_lat = serializers.FloatField(source='origine_lat')
+    origin_lon = serializers.FloatField(source='origine_lon')
+    destination_label = serializers.CharField(max_length=500, source='libelle_destination')
     destination_lat = serializers.FloatField()
     destination_lon = serializers.FloatField()
-    lieu_destination = serializers.PrimaryKeyRelatedField(
-        queryset=Lieu.objects.all(), required=False, allow_null=True
+    destination_place = serializers.PrimaryKeyRelatedField(
+        source='lieu_destination', queryset=Lieu.objects.all(), required=False, allow_null=True
     )
-    itineraire = ItineraireCandidatSerializer()
+    route = ItineraireCandidatSerializer(source='itineraire')
 
     def create(self, validated_data):
         itineraire_data = validated_data.pop('itineraire')
@@ -151,15 +183,14 @@ class TrajetCreationSerializer(serializers.Serializer):
 
 
 class TrajetMiseAJourSerializer(serializers.ModelSerializer):
+    status = serializers.ChoiceField(choices=StatutTrajet.choices, source='statut', required=False)
+    actual_distance = serializers.IntegerField(source='distance_reelle', required=False)
+    actual_duration = serializers.IntegerField(source='duree_reelle', required=False)
+    incidents_avoided = serializers.IntegerField(source='incidents_evites', required=False)
+
     class Meta:
         model = Trajet
-        fields = ['statut', 'distance_reelle', 'duree_reelle', 'incidents_evites']
-        extra_kwargs = {champ: {'required': False} for champ in fields}
-
-    def validate_statut(self, valeur):
-        if valeur not in StatutTrajet.values:
-            raise serializers.ValidationError('Statut inconnu.')
-        return valeur
+        fields = ['status', 'actual_distance', 'actual_duration', 'incidents_avoided']
 
     def update(self, instance, validated_data):
         nouveau_statut = validated_data.pop('statut', None)
@@ -173,8 +204,8 @@ class TrajetMiseAJourSerializer(serializers.ModelSerializer):
 
 
 class NoterTrajetSerializer(serializers.Serializer):
-    note = serializers.IntegerField(min_value=1, max_value=5)
-    commentaire = serializers.CharField(required=False, allow_blank=True, default='')
+    rating = serializers.IntegerField(min_value=1, max_value=5, source='note')
+    comment = serializers.CharField(required=False, allow_blank=True, default='', source='commentaire')
 
 
 LIMITE_POSITIONS_PAR_LOT = 500
@@ -186,18 +217,18 @@ class PositionTelemetrieSerializer(serializers.Serializer):
 
     lat = serializers.FloatField()
     lon = serializers.FloatField()
-    vitesse_kmh = serializers.FloatField(required=False, allow_null=True, min_value=0)
-    cap = serializers.IntegerField(required=False, allow_null=True, min_value=0, max_value=359)
-    horodatage = serializers.DateTimeField()
+    speed_kmh = serializers.FloatField(required=False, allow_null=True, min_value=0, source='vitesse_kmh')
+    heading = serializers.IntegerField(required=False, allow_null=True, min_value=0, max_value=359, source='cap')
+    timestamp = serializers.DateTimeField(source='horodatage')
 
 
 class TelemetriePositionsSerializer(serializers.Serializer):
-    """POST /api/telemetrie/positions/ : lot de positions GPS pour un trajet
+    """POST /api/telemetry/positions/ : lot de positions GPS pour un trajet
     actif de l'appelant. Ne persiste jamais les positions -- validees ici,
     publiees sur ProducteurEvenements, jamais ecrites en base sur ce chemin
     (section confidentialite du cahier des charges)."""
 
-    trajet = serializers.PrimaryKeyRelatedField(queryset=Trajet.objects.none())
+    trip = serializers.PrimaryKeyRelatedField(queryset=Trajet.objects.none(), source='trajet')
     positions = PositionTelemetrieSerializer(many=True, allow_empty=False)
 
     def __init__(self, *args, **kwargs):
@@ -207,11 +238,11 @@ class TelemetriePositionsSerializer(serializers.Serializer):
             # Un trajet d'un autre utilisateur, ou pas ACTIF, n'est simplement
             # pas dans ce queryset -- 400 (mauvaise reference), pas 403/404 :
             # on ne confirme jamais l'existence du trajet d'un tiers.
-            self.fields['trajet'].queryset = Trajet.objects.filter(
+            self.fields['trip'].queryset = Trajet.objects.filter(
                 utilisateur=request.user, statut=StatutTrajet.ACTIF
             )
 
     def validate_positions(self, positions):
         if len(positions) > LIMITE_POSITIONS_PAR_LOT:
-            raise serializers.ValidationError(f'Maximum {LIMITE_POSITIONS_PAR_LOT} positions par lot.')
+            raise serializers.ValidationError(f'Maximum {LIMITE_POSITIONS_PAR_LOT} positions per batch.')
         return positions

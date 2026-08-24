@@ -3,56 +3,46 @@ from drf_spectacular.utils import extend_schema
 from rest_framework_simplejwt.views import TokenRefreshView
 
 from . import views
-from .serializers import JetonsSerializer, RafraichirSerializer
 
 app_name = 'accounts'
 
-
-class _RafraichirView(TokenRefreshView):
-    serializer_class = RafraichirSerializer
-
-
-RafraichirView = extend_schema(
-    tags=['Authentification'],
-    summary='Rafraichir le jeton d\'acces',
-    description=(
-        "Renvoie un nouveau jeton d'acces (et, la rotation etant activee, un "
-        "nouveau jeton de rafraichissement -- l'ancien est mis sur liste noire). "
-        "Champs en francais (rafraichissement/acces), comme le reste du module -- "
-        "SimpleJWT utilise refresh/access par defaut, RafraichirSerializer les "
-        "renomme pour rester coherent."
-    ),
-    request=RafraichirSerializer,
-    responses={200: JetonsSerializer},
-)(_RafraichirView)
+# Stock TokenRefreshView/serializer, unmodified: access/refresh (English) is
+# now the project-wide convention, so SimpleJWT's own field names already
+# match -- no custom serializer needed, just tagged to join the rest of the
+# Authentification group instead of drf-spectacular's default 'auth' tag.
+RafraichirView = extend_schema(tags=['Authentication'])(TokenRefreshView)
 
 urlpatterns = [
     # Authentification
-    path('auth/verifier-existence/', views.VerifierExistenceView.as_view(), name='verifier-existence'),
-    path('auth/inscription/', views.InscriptionView.as_view(), name='inscription'),
-    path('auth/connexion/', views.ConnexionView.as_view(), name='connexion'),
-    path('auth/connexion-google/', views.ConnexionGoogleView.as_view(), name='connexion-google'),
-    path('auth/rafraichir/', RafraichirView.as_view(), name='rafraichir'),
-    path('auth/deconnexion/', views.DeconnexionView.as_view(), name='deconnexion'),
-    path('auth/verifier-email/<str:uidb64>/<str:jeton>/', views.VerifierEmailView.as_view(), name='verifier-email'),
+    path('auth/check-existence/', views.VerifierExistenceView.as_view(), name='verifier-existence'),
+    path('auth/register/', views.InscriptionView.as_view(), name='inscription'),
+    path('auth/login/', views.ConnexionView.as_view(), name='connexion'),
+    path('auth/google-login/', views.ConnexionGoogleView.as_view(), name='connexion-google'),
+    path('auth/refresh/', RafraichirView.as_view(), name='rafraichir'),
+    path('auth/logout/', views.DeconnexionView.as_view(), name='deconnexion'),
     path(
-        'auth/mot-de-passe/reinitialiser/',
+        'auth/verify-email/<str:uidb64>/<str:token>/',
+        views.VerifierEmailView.as_view(),
+        name='verifier-email',
+    ),
+    path(
+        'auth/password/reset/',
         views.DemandeReinitialisationView.as_view(),
         name='mot-de-passe-reinitialiser',
     ),
     path(
-        'auth/mot-de-passe/confirmer/',
+        'auth/password/confirm/',
         views.ConfirmationReinitialisationView.as_view(),
         name='mot-de-passe-confirmer',
     ),
 
     # Compte (profil, parametres, appareils)
-    path('utilisateurs/moi/', views.MoiView.as_view(), name='moi'),
-    path('utilisateurs/moi/avatar/', views.AvatarView.as_view(), name='moi-avatar'),
-    path('utilisateurs/moi/parametres/', views.ParametresView.as_view(), name='moi-parametres'),
-    path('utilisateurs/moi/statistiques/', views.StatistiquesView.as_view(), name='moi-statistiques'),
-    path('appareils/', views.AppareilCreationView.as_view(), name='appareils'),
-    path('appareils/<uuid:id>/', views.AppareilSuppressionView.as_view(), name='appareil-suppression'),
+    path('users/me/', views.MoiView.as_view(), name='moi'),
+    path('users/me/avatar/', views.AvatarView.as_view(), name='moi-avatar'),
+    path('users/me/settings/', views.ParametresView.as_view(), name='moi-parametres'),
+    path('users/me/statistics/', views.StatistiquesView.as_view(), name='moi-statistiques'),
+    path('devices/', views.AppareilCreationView.as_view(), name='appareils'),
+    path('devices/<uuid:id>/', views.AppareilSuppressionView.as_view(), name='appareil-suppression'),
 
     # Configuration publique
     path('config/', views.ConfigView.as_view(), name='config'),

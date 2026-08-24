@@ -80,7 +80,7 @@ class RechercheTests(TestCase):
     def test_recherche_trouve_par_nom_partiel(self):
         reponse = self.client.get(reverse('places:recherche'), {'q': 'Palais'})
         self.assertEqual(reponse.status_code, 200)
-        noms = [r['libelle'] for r in reponse.json()]
+        noms = [r['label'] for r in reponse.json()]
         self.assertIn('Palais des Congres', noms)
 
     def test_recherche_ignore_les_lieux_non_approuves(self):
@@ -89,7 +89,7 @@ class RechercheTests(TestCase):
 
     def test_recherche_tolere_les_accents(self):
         reponse = self.client.get(reverse('places:recherche'), {'q': 'marche'})
-        noms = [r['libelle'] for r in reponse.json()]
+        noms = [r['label'] for r in reponse.json()]
         self.assertIn('Marche Central', noms)
 
     def test_recherche_avec_position_annote_la_distance(self):
@@ -110,12 +110,12 @@ class InverseTests(TestCase):
 
     def test_position_proche_retourne_le_lieu(self):
         reponse = self.client.get(reverse('places:inverse'), {'lat': '3.8690', 'lon': '11.5174'})
-        self.assertEqual(reponse.json()['libelle'], 'Palais des Congres')
+        self.assertEqual(reponse.json()['label'], 'Palais des Congres')
 
     def test_position_loin_retourne_position_generique(self):
         reponse = self.client.get(reverse('places:inverse'), {'lat': '0.0', 'lon': '0.0'})
-        self.assertEqual(reponse.json()['libelle'], 'Position actuelle')
-        self.assertIsNone(reponse.json()['lieu'])
+        self.assertEqual(reponse.json()['label'], 'Current position')
+        self.assertIsNone(reponse.json()['place'])
 
     def test_parametres_manquants_rejetes(self):
         reponse = self.client.get(reverse('places:inverse'), {'lat': '0.0'})
@@ -127,7 +127,7 @@ class LieuDetailTests(TestCase):
         lieu = creer_lieu('Palais des Congres', 3.8690, 11.5174, ville='Yaounde')
         reponse = self.client.get(reverse('places:lieu-detail', kwargs={'id': lieu.id}))
         self.assertEqual(reponse.status_code, 200)
-        self.assertEqual(reponse.json()['nom'], 'Palais des Congres')
+        self.assertEqual(reponse.json()['name'], 'Palais des Congres')
 
     def test_detail_lieu_non_approuve_masque(self):
         lieu = creer_lieu('En attente', 4.05, 9.70, statut=StatutLieu.EN_ATTENTE)
@@ -141,7 +141,7 @@ class ProposerLieuTests(TestCase):
         self.jetons = connecter(self.client, self.utilisateur.email)
 
     def test_proposition_authentifiee_cree_lieu_en_attente(self):
-        payload = {'nom': 'Boutique Test', 'categorie': 'shop', 'ville': 'Douala', 'lat': 4.05, 'lon': 9.70}
+        payload = {'name': 'Boutique Test', 'category': 'shop', 'city': 'Douala', 'lat': 4.05, 'lon': 9.70}
         reponse = self.client.post(
             reverse('places:proposer'), payload, content_type='application/json', **self.jetons
         )
@@ -152,7 +152,7 @@ class ProposerLieuTests(TestCase):
         self.assertEqual(lieu.propose_par, self.utilisateur)
 
     def test_proposition_non_authentifiee_rejetee(self):
-        payload = {'nom': 'Boutique Test', 'categorie': 'shop', 'ville': 'Douala', 'lat': 4.05, 'lon': 9.70}
+        payload = {'name': 'Boutique Test', 'category': 'shop', 'city': 'Douala', 'lat': 4.05, 'lon': 9.70}
         reponse = self.client.post(reverse('places:proposer'), payload, content_type='application/json')
         self.assertEqual(reponse.status_code, 401)
 
@@ -162,8 +162,8 @@ class AdresseEnregistreeTests(TestCase):
         self.utilisateur = creer_utilisateur()
         self.jetons = connecter(self.client, self.utilisateur.email)
 
-    def _ajouter(self, libelle='PERSONNALISE', **extra):
-        payload = {'libelle': libelle, 'adresse': 'Rue test', 'lat': 4.05, 'lon': 9.70, **extra}
+    def _ajouter(self, label='PERSONNALISE', **extra):
+        payload = {'label': label, 'address': 'Rue test', 'lat': 4.05, 'lon': 9.70, **extra}
         return self.client.post(
             reverse('places:enregistres'), payload, content_type='application/json', **self.jetons
         )
@@ -182,10 +182,10 @@ class AdresseEnregistreeTests(TestCase):
 
     def test_limite_formule_gratuite_appliquee_cote_serveur(self):
         for i in range(5):
-            reponse = self._ajouter(nom_personnalise=f'Spot {i}', lat=4.0 + i * 0.01, lon=9.7)
+            reponse = self._ajouter(custom_name=f'Spot {i}', lat=4.0 + i * 0.01, lon=9.7)
             self.assertEqual(reponse.status_code, 201)
 
-        reponse = self._ajouter(nom_personnalise='Spot en trop', lat=4.09, lon=9.7)
+        reponse = self._ajouter(custom_name='Spot en trop', lat=4.09, lon=9.7)
         self.assertEqual(reponse.status_code, 403)
         self.assertEqual(AdresseEnregistree.objects.filter(utilisateur=self.utilisateur).count(), 5)
 
@@ -193,19 +193,19 @@ class AdresseEnregistreeTests(TestCase):
         self.utilisateur.formule = Formule.PREMIUM
         self.utilisateur.save(update_fields=['formule'])
         for i in range(6):
-            reponse = self._ajouter(nom_personnalise=f'Spot {i}', lat=4.0 + i * 0.01, lon=9.7)
+            reponse = self._ajouter(custom_name=f'Spot {i}', lat=4.0 + i * 0.01, lon=9.7)
             self.assertEqual(reponse.status_code, 201)
 
     def test_patch_renomme(self):
-        adresse_id = self._ajouter(nom_personnalise='Ancien nom').json()['id']
+        adresse_id = self._ajouter(custom_name='Ancien nom').json()['id']
         reponse = self.client.patch(
             reverse('places:enregistres-detail', kwargs={'id': adresse_id}),
-            {'nom_personnalise': 'Nouveau nom'},
+            {'custom_name': 'Nouveau nom'},
             content_type='application/json',
             **self.jetons,
         )
         self.assertEqual(reponse.status_code, 200)
-        self.assertEqual(reponse.json()['nom_personnalise'], 'Nouveau nom')
+        self.assertEqual(reponse.json()['custom_name'], 'Nouveau nom')
 
     def test_delete(self):
         adresse_id = self._ajouter().json()['id']
@@ -230,10 +230,10 @@ class RechercheRecenteTests(TestCase):
         self.utilisateur = creer_utilisateur()
         self.jetons = connecter(self.client, self.utilisateur.email)
 
-    def _ajouter(self, libelle):
+    def _ajouter(self, label):
         return self.client.post(
             reverse('places:recents'),
-            {'libelle': libelle, 'lat': 4.05, 'lon': 9.70},
+            {'label': label, 'lat': 4.05, 'lon': 9.70},
             content_type='application/json',
             **self.jetons,
         )
@@ -242,8 +242,8 @@ class RechercheRecenteTests(TestCase):
         self._ajouter('Premier')
         self._ajouter('Second')
         reponse = self.client.get(reverse('places:recents'), **self.jetons)
-        libelles = [r['libelle'] for r in reponse.json()]
-        self.assertEqual(libelles, ['Second', 'Premier'])
+        labels = [r['label'] for r in reponse.json()]
+        self.assertEqual(labels, ['Second', 'Premier'])
 
     def test_purge_au_dela_de_dix(self):
         for i in range(12):
@@ -257,10 +257,10 @@ class RechercheRecenteTests(TestCase):
         self.assertEqual(RechercheRecente.objects.filter(utilisateur=self.utilisateur).count(), 0)
 
 
-def _resultat_photon_factice(libelle='Boulangerie Externe', lat=4.05, lon=9.70):
+def _resultat_photon_factice(label='Boulangerie Externe', lat=4.05, lon=9.70):
     return {
-        'id': 'photon:N12345', 'libelle': libelle, 'sous_libelle': 'Douala',
-        'categorie': 'bakery', 'lat': lat, 'lon': lon, 'distance_m': None, 'source': 'photon',
+        'id': 'photon:N12345', 'label': label, 'sublabel': 'Douala',
+        'category': 'bakery', 'lat': lat, 'lon': lon, 'distance_m': None, 'source': 'photon',
     }
 
 
@@ -275,7 +275,7 @@ class RechercheFusionPhotonTests(TestCase):
     def test_resultat_photon_distinct_est_ajoute(self):
         patcher_photon(self, rechercher=[_resultat_photon_factice('Boulangerie du Marche')])
         reponse = self.client.get(reverse('places:recherche'), {'q': 'Marche'})
-        sources = {(r['libelle'], r['source']) for r in reponse.json()}
+        sources = {(r['label'], r['source']) for r in reponse.json()}
         self.assertIn(('Marche Central', 'local'), sources)
         self.assertIn(('Boulangerie du Marche', 'photon'), sources)
 
@@ -300,7 +300,7 @@ class RechercheFusionPhotonTests(TestCase):
         ])
         reponse = self.client.get(reverse('places:recherche'), {'q': 'Avenue Kennedy'})
         corps = reponse.json()
-        self.assertEqual(sum(1 for r in corps if r['libelle'] == 'Avenue Kennedy'), 1)
+        self.assertEqual(sum(1 for r in corps if r['label'] == 'Avenue Kennedy'), 1)
 
     def test_meilleure_correspondance_photon_passe_avant_un_local_faible(self):
         # Reproduit le bug observe en pratique ("Hopital Laquintinie") : un
@@ -309,7 +309,7 @@ class RechercheFusionPhotonTests(TestCase):
         creer_lieu('Marche Improvise du Quartier', 4.20, 9.90, ville='Douala')
         patcher_photon(self, rechercher=[_resultat_photon_factice('Grand Marche Central de Douala')])
         reponse = self.client.get(reverse('places:recherche'), {'q': 'Grand Marche Central de Douala'})
-        self.assertEqual(reponse.json()[0]['libelle'], 'Grand Marche Central de Douala')
+        self.assertEqual(reponse.json()[0]['label'], 'Grand Marche Central de Douala')
         self.assertEqual(reponse.json()[0]['source'], 'photon')
 
 
@@ -319,18 +319,18 @@ class InverseNominatimTests(TestCase):
 
     def test_nominatim_reussit_est_priorise_sur_le_local(self):
         patcher_nominatim(self, inverser={
-            'id': 'nominatim:99', 'libelle': 'Avenue Kennedy', 'sous_libelle': 'Yaounde',
-            'categorie': 'road', 'lat': 3.8690, 'lon': 11.5174, 'distance_m': None, 'source': 'nominatim',
+            'id': 'nominatim:99', 'label': 'Avenue Kennedy', 'sublabel': 'Yaounde',
+            'category': 'road', 'lat': 3.8690, 'lon': 11.5174, 'distance_m': None, 'source': 'nominatim',
         })
         reponse = self.client.get(reverse('places:inverse'), {'lat': '3.8690', 'lon': '11.5174'})
-        self.assertEqual(reponse.json()['libelle'], 'Avenue Kennedy')
-        self.assertEqual(reponse.json()['lieu']['source'], 'nominatim')
+        self.assertEqual(reponse.json()['label'], 'Avenue Kennedy')
+        self.assertEqual(reponse.json()['place']['source'], 'nominatim')
 
     def test_nominatim_sans_resultat_retombe_sur_le_lieu_local(self):
         patcher_nominatim(self, inverser=None)  # aucun resultat externe (pas une panne)
         reponse = self.client.get(reverse('places:inverse'), {'lat': '3.8690', 'lon': '11.5174'})
-        self.assertEqual(reponse.json()['libelle'], 'Palais des Congres')
-        self.assertEqual(reponse.json()['lieu']['source'], 'local')
+        self.assertEqual(reponse.json()['label'], 'Palais des Congres')
+        self.assertEqual(reponse.json()['place']['source'], 'local')
 
 
 class DisjoncteurNominatimTests(TestCase):
@@ -365,7 +365,7 @@ class DisjoncteurNominatimTests(TestCase):
             resultats = client.rechercher('Marche', autour=None)
 
         self.assertEqual(len(resultats), 1)
-        self.assertEqual(resultats[0]['libelle'], 'Marche Central')
+        self.assertEqual(resultats[0]['label'], 'Marche Central')
         self.assertIsNone(cache.get(CLE_ECHECS_NOMINATIM))
 
 
@@ -404,5 +404,5 @@ class DisjoncteurPhotonTests(TestCase):
             resultats = client.rechercher('Marche', autour=None)
 
         self.assertEqual(len(resultats), 1)
-        self.assertEqual(resultats[0]['libelle'], 'Marche Central')
+        self.assertEqual(resultats[0]['label'], 'Marche Central')
         self.assertIsNone(cache.get(CLE_ECHECS_PHOTON))

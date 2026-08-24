@@ -44,12 +44,12 @@ NB_RECHERCHES_RECENTES_MAX = 10
 
 
 @extend_schema(
-    tags=['Lieux'],
+    tags=['Places'],
     summary='Rechercher un lieu (autocompletion)',
     description=(
         "Trigram local (nom_normalise) fusionne avec Photon (P2b) -- source='local'|'photon' "
         'par resultat. Photon, pas Nominatim, pour la recherche : autocompletion rapide ; '
-        "Nominatim reste dedie au geocodage inverse (voir /lieux/inverse/). "
+        "Nominatim reste dedie au geocodage inverse (voir /places/reverse/). "
         'lat/lon, si fournis, influencent uniquement le classement -- jamais un filtre '
         "qui exclurait un resultat pertinent situe loin de l'utilisateur."
     ),
@@ -61,7 +61,7 @@ NB_RECHERCHES_RECENTES_MAX = 10
     responses={200: LieuRechercheSerializer(many=True), 400: MessageSerializer},
 )
 class RechercheView(APIView):
-    """GET /api/lieux/recherche/?q=&lat=&lon= : trigram local (nom_normalise)
+    """GET /api/places/search/?q=&lat=&lon= : trigram local (nom_normalise)
     fusionne avec Photon (P2b) -- source='local'|'photon' par resultat.
     Photon, pas Nominatim, pour la recherche : c'est son role (autocompletion
     rapide) ; Nominatim reste dedie a l'inverse (InverseView), le seul des
@@ -78,7 +78,7 @@ class RechercheView(APIView):
     def get(self, request):
         q = request.query_params.get('q', '').strip()
         if len(q) < 2:
-            return Response({'detail': "Le parametre 'q' doit contenir au moins 2 caracteres."}, status=400)
+            return Response({'detail': "The 'q' parameter must contain at least 2 characters."}, status=400)
 
         lat = request.query_params.get('lat')
         lon = request.query_params.get('lon')
@@ -100,14 +100,14 @@ class RechercheView(APIView):
         # la correspondance la plus pertinente (ex. un lieu mappe en way/relation
         # OSM, que seed_places n'importe pas encore -- seuls les nodes le sont).
         resultats_locaux = LieuRechercheSerializer(requete[:LIMITE_LOCALE], many=True).data
-        noms_vus = {normaliser(r['libelle']) for r in resultats_locaux}
+        noms_vus = {normaliser(r['label']) for r in resultats_locaux}
 
         # Deduplique aussi entre resultats externes : une rue mappee en
         # plusieurs troncons OSM (donc plusieurs osm_id) revient sinon comme
         # autant de doublons portant exactement le meme nom affiche.
         resultats_externes = []
         for r in ClientPhoton().rechercher(q, autour=position):
-            nom = normaliser(r['libelle'])
+            nom = normaliser(r['label'])
             if nom in noms_vus:
                 continue
             noms_vus.add(nom)
@@ -123,7 +123,7 @@ class RechercheView(APIView):
         q_normalise = normaliser(q)
 
         def cle_tri(resultat):
-            pertinence = SequenceMatcher(None, q_normalise, normaliser(resultat['libelle'])).ratio()
+            pertinence = SequenceMatcher(None, q_normalise, normaliser(resultat['label'])).ratio()
             distance = resultat.get('distance_m')
             return (-pertinence, distance if distance is not None else float('inf'))
 
@@ -132,7 +132,7 @@ class RechercheView(APIView):
 
 
 @extend_schema(
-    tags=['Lieux'],
+    tags=['Places'],
     summary='Geocodage inverse (position -> libelle)',
     description=(
         'Nominatim en priorite (P2b), repli sur le lieu approuve le plus proche '
@@ -146,15 +146,15 @@ class RechercheView(APIView):
         200: inline_serializer(
             name='InverseReponse',
             fields={
-                'libelle': drf_serializers.CharField(),
-                'lieu': LieuRechercheSerializer(allow_null=True),
+                'label': drf_serializers.CharField(),
+                'place': LieuRechercheSerializer(allow_null=True),
             },
         ),
         400: MessageSerializer,
     },
 )
 class InverseView(APIView):
-    """GET /api/lieux/inverse/?lat=&lon= : Nominatim en priorite (P2b), repli
+    """GET /api/places/reverse/?lat=&lon= : Nominatim en priorite (P2b), repli
     sur le lieu approuve le plus proche en local si indisponible/sans resultat."""
 
     permission_classes = [AllowAny]
@@ -163,12 +163,12 @@ class InverseView(APIView):
         lat = request.query_params.get('lat')
         lon = request.query_params.get('lon')
         if lat is None or lon is None:
-            return Response({'detail': "'lat' et 'lon' sont requis."}, status=400)
+            return Response({'detail': "'lat' and 'lon' are required."}, status=400)
         lat, lon = float(lat), float(lon)
 
         resultat_externe = ClientNominatim().inverser(lat, lon)
         if resultat_externe is not None:
-            return Response({'libelle': resultat_externe['libelle'], 'lieu': resultat_externe})
+            return Response({'label': resultat_externe['label'], 'place': resultat_externe})
 
         point = Point(lon, lat, srid=4326)
         lieu = Lieu.objects.filter(statut=StatutLieu.APPROUVE).annotate(
@@ -176,14 +176,14 @@ class InverseView(APIView):
         ).filter(distance__lte=D(m=RAYON_INVERSE_M)).order_by('distance').first()
 
         if lieu is None:
-            return Response({'libelle': 'Position actuelle', 'lieu': None})
-        return Response({'libelle': lieu.nom, 'lieu': LieuRechercheSerializer(lieu).data})
+            return Response({'label': 'Current position', 'place': None})
+        return Response({'label': lieu.nom, 'place': LieuRechercheSerializer(lieu).data})
 
 
 @extend_schema(
-    tags=['Lieux'],
+    tags=['Places'],
     summary="Detail d'un lieu approuve",
-    responses={200: LieuDetailSerializer, 404: OpenApiResponse(description='Lieu introuvable ou non approuve.')},
+    responses={200: LieuDetailSerializer, 404: OpenApiResponse(description='Place not found or not approved.')},
 )
 class LieuDetailView(APIView):
     permission_classes = [AllowAny]
@@ -194,7 +194,7 @@ class LieuDetailView(APIView):
 
 
 @extend_schema(
-    tags=['Lieux'],
+    tags=['Places'],
     summary='Proposer un nouveau lieu',
     description='Soumission utilisateur, mise en file de moderation (statut EN_ATTENTE).',
     request=LieuPropositionSerializer,
@@ -210,12 +210,12 @@ class ProposerLieuView(APIView):
 
 @extend_schema_view(
     get=extend_schema(
-        tags=['Adresses enregistrees'],
+        tags=['Saved Addresses'],
         summary='Lister les adresses enregistrees du compte connecte',
         responses={200: AdresseEnregistreeSerializer(many=True)},
     ),
     post=extend_schema(
-        tags=['Adresses enregistrees'],
+        tags=['Saved Addresses'],
         summary='Enregistrer une nouvelle adresse',
         description="Rejette avec 403 au-dela de max_adresses_enregistrees (limite de la formule, cf. Droits).",
         request=AdresseEnregistreeSerializer,
@@ -231,7 +231,7 @@ class AdresseEnregistreeListCreateView(APIView):
         limite = request.user.droits.max_adresses_enregistrees
         if limite is not None and request.user.adresses_enregistrees.count() >= limite:
             return Response(
-                {'detail': f"Limite de {limite} adresses enregistrees atteinte pour votre formule."},
+                {'detail': f"Limit of {limite} saved addresses reached for your plan."},
                 status=status.HTTP_403_FORBIDDEN,
             )
         serializer = AdresseEnregistreeSerializer(data=request.data, context={'request': request})
@@ -242,13 +242,13 @@ class AdresseEnregistreeListCreateView(APIView):
 
 @extend_schema_view(
     patch=extend_schema(
-        tags=['Adresses enregistrees'],
+        tags=['Saved Addresses'],
         summary='Mettre a jour partiellement une adresse enregistree',
         request=AdresseEnregistreeSerializer,
         responses={200: AdresseEnregistreeSerializer},
     ),
     delete=extend_schema(
-        tags=['Adresses enregistrees'],
+        tags=['Saved Addresses'],
         summary='Supprimer une adresse enregistree',
         responses={204: None},
     ),
@@ -273,19 +273,19 @@ class AdresseEnregistreeDetailView(APIView):
 
 @extend_schema_view(
     get=extend_schema(
-        tags=['Recherches recentes'],
+        tags=['Recent Searches'],
         summary='Lister les recherches recentes',
         responses={200: RechercheRecenteSerializer(many=True)},
     ),
     post=extend_schema(
-        tags=['Recherches recentes'],
+        tags=['Recent Searches'],
         summary='Ajouter une recherche recente',
         description=f'Purge automatiquement au-dela des {NB_RECHERCHES_RECENTES_MAX} entrees les plus recentes.',
         request=RechercheRecenteSerializer,
         responses={201: RechercheRecenteSerializer},
     ),
     delete=extend_schema(
-        tags=['Recherches recentes'],
+        tags=['Recent Searches'],
         summary="Vider l'historique de recherches",
         responses={204: None},
     ),
