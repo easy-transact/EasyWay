@@ -1,6 +1,8 @@
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
+from trips.polyline import decoder_polyline6
+
 from .models import Incident, TypeIncident
 
 # Champs declares avec `source=` : la reponse API parle anglais, les modeles/
@@ -68,3 +70,29 @@ class IncidentCreationSerializer(serializers.Serializer):
 
 class VoteIncidentSerializer(serializers.Serializer):
     direction = serializers.ChoiceField(choices=['confirm', 'dispute'], source='sens')
+
+
+BUFFER_M_DEFAUT = 300  # couloir de recherche autour du trace -- pas mesure sur donnees reelles, a ajuster
+BUFFER_M_MAX = 1000
+
+
+class IncidentsSurTrajetSerializer(serializers.Serializer):
+    """POST /api/incidents/along-route/ : geometrie en corps de requete
+    (encodee polyline6, meme format que routes/calculate -> route.geometry),
+    jamais en cellules H3 dans l'URL -- cf. discussion frontend, un trajet
+    long (ex. Douala-Yaounde, ~250km) generait des centaines de cellules et
+    une URL ingerable. validate_geometry() decode directement en liste de
+    points (lon, lat) : la vue construit la LineString a partir de ca, pas
+    du texte brut, pour ne decoder qu'une seule fois."""
+
+    geometry = serializers.CharField()
+    buffer_m = serializers.IntegerField(required=False, default=BUFFER_M_DEFAUT, min_value=1, max_value=BUFFER_M_MAX)
+
+    def validate_geometry(self, valeur):
+        try:
+            points = decoder_polyline6(valeur)
+        except Exception:
+            raise serializers.ValidationError('Invalid encoded polyline.')
+        if len(points) < 2:
+            raise serializers.ValidationError('geometry must decode to at least 2 points.')
+        return points

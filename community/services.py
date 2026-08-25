@@ -12,6 +12,8 @@ from django.db import transaction
 from django.utils import timezone
 
 from places.services.client_nominatim import ClientNominatim
+from trips.services import client_locate
+from trips.services.disjoncteur import DisjoncteurOuvert
 
 from .cache_incidents import invalider_cache_cellule
 from .models import (
@@ -27,10 +29,19 @@ QUOTA_SIGNALEMENTS_PAR_HEURE = 10
 RAYON_DOUBLON_M = 150
 SECTEUR_DOUBLON_DEGRES = 45
 SEUIL_REPUTATION_AUTO_ACTIF = 30
+# Au-dela, on considere que la position n'est sur/pres d'aucune route connue
+# de Valhalla -- pas mesure sur donnees reelles (derive GPS, imprecision
+# urbaine autour des grands carrefours), a ajuster avec de l'usage reel.
+RAYON_MAX_HORS_ROUTE_M = 50
 
 
 class QuotaDepasse(Exception):
     """Leve quand l'utilisateur a atteint QUOTA_SIGNALEMENTS_PAR_HEURE."""
+
+
+class PositionHorsRoute(Exception):
+    """Leve quand la position du signalement est trop loin de toute route
+    connue de Valhalla (RAYON_MAX_HORS_ROUTE_M)."""
 
 
 class ServiceIncident:
@@ -38,6 +49,7 @@ class ServiceIncident:
         """Retourne (incident, est_doublon). est_doublon=True signifie qu'aucun
         nouvel Incident n'a ete cree -- le signalement a corrobore un existant."""
         self._verifier_quota(utilisateur)
+        self._verifier_position_routiere(position)
 
         with transaction.atomic():
             doublon = self._chercher_doublon(type_incident, position, cap)
@@ -70,6 +82,19 @@ class ServiceIncident:
         recents = Incident.objects.filter(auteur=utilisateur, cree_le__gte=depuis).count()
         if recents >= QUOTA_SIGNALEMENTS_PAR_HEURE:
             raise QuotaDepasse()
+
+    def _verifier_position_routiere(self, position):
+        try:
+            distance = client_locate.distance_a_la_route_m(position.y, position.x)
+        except (client_locate.ErreurLocate, DisjoncteurOuvert):
+            # Meme principe que _nom_voie() : un Valhalla en panne ne doit
+            # jamais bloquer un signalement -- on renonce juste a la
+            # verification pour cette fois.
+            return
+        if distance is not None and distance > RAYON_MAX_HORS_ROUTE_M:
+            raise PositionHorsRoute(
+                f'Reported position is {round(distance)}m from the nearest known road.'
+            )
 
     def _chercher_doublon(self, type_incident, position, cap):
         # select_for_update() verrouille les candidats pour la duree de la

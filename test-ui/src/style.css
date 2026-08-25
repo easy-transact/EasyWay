@@ -30,13 +30,41 @@ h1 { font-size: 1.15rem; margin: 0 0 .3rem; }
 h2 { font-size: .95rem; margin: 1.3rem 0 .4rem; border-bottom: 1px solid #eee; padding-bottom: .3rem; }
 p.sous-titre { color: #777; font-size: .8rem; margin: 0 0 1rem; }
 
-input[type=text] {
+input[type=text], input[type=email], input[type=password], select {
   width: 100%;
   padding: .5rem;
   border: 1px solid #ccc;
   border-radius: 6px;
   font-size: .9rem;
 }
+
+.compte {
+  padding: .6rem;
+  border: 1px solid #eee;
+  border-radius: 6px;
+  background: #fafafa;
+  font-size: .82rem;
+}
+.compte .ligne { display: flex; gap: .4rem; margin-bottom: .4rem; }
+.compte .ligne:last-child { margin-bottom: 0; }
+.compte .statut { font-weight: 600; }
+.compte .statut.connecte { color: #14611f; }
+.compte .statut.deconnecte { color: #888; }
+.compte .erreur { color: #b81010; font-size: .78rem; margin-top: .3rem; }
+
+.chip-liste { display: flex; flex-wrap: wrap; gap: .3rem; margin: .4rem 0; }
+.chip {
+  display: inline-flex; align-items: center; gap: .3rem;
+  background: #fff1de; color: #b8631a; border-radius: 10px;
+  padding: .15rem .5rem; font-size: .74rem;
+}
+.chip button {
+  padding: 0; border: none; background: none; color: inherit;
+  font-size: .85rem; line-height: 1; cursor: pointer;
+}
+
+.mode-signalement { background: #d92b2b; }
+.mode-signalement.actif { background: #7a1010; }
 
 button {
   padding: .4rem .8rem;

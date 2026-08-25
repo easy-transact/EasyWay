@@ -35,10 +35,18 @@ class ServiceItineraire:
     def __init__(self, client=None):
         self.client = client or ClientValhalla()
 
-    def calculer(self, depart, arrivee, utilisateur) -> list[dict]:
-        """depart/arrivee : (lat, lon). Retourne une liste d'itineraires
-        candidats normalises (voir _normaliser_trip), le premier etant recommande."""
+    def calculer(self, depart, arrivee, utilisateur, eviter=None) -> list[dict]:
+        """depart/arrivee : (lat, lon). eviter : liste de (lat, lon) a exclure
+        du graphe de routage (ex. position d'un incident) -- transmis a
+        Valhalla via exclude_locations, jamais un simple reclassement des
+        candidats : Valhalla replanifie reellement autour du point. Retourne
+        une liste d'itineraires candidats normalises (voir _normaliser_trip),
+        le premier etant recommande."""
         options = self._options_depuis_parametres(utilisateur)
+        if eviter:
+            # cf. https://valhalla.github.io/valhalla/api/turn-by-turn/api-reference/#exclude-locations
+            # -- cle top-level du payload /route, pas une costing_option.
+            options['exclude_locations'] = [{'lat': lat, 'lon': lon} for lat, lon in eviter]
         cle = self._cle_cache(depart, arrivee, options)
 
         trips = cache.get(cle)

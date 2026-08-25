@@ -160,6 +160,14 @@ CORS_ALLOWED_ORIGINS = env.list(
     'CORS_ALLOWED_ORIGINS', default=['http://localhost:5173'] if DEBUG else []
 )
 
+# Idempotency-Key (POST /api/incidents/, cf. community/views.py) n'est pas
+# dans la liste par defaut de django-cors-headers -- sans cet ajout, le
+# preflight OPTIONS le rejette et le navigateur bloque la requete avant
+# meme qu'elle atteigne Django.
+from corsheaders.defaults import default_headers  # noqa: E402
+
+CORS_ALLOW_HEADERS = list(default_headers) + ['idempotency-key']
+
 # Routage (ClientValhalla, trips/services/) : instance Valhalla du
 # docker-compose local, ou service manage si deploye separement.
 VALHALLA_URL = env('VALHALLA_URL', default='http://localhost:8002')
@@ -211,7 +219,12 @@ AUTH_PASSWORD_VALIDATORS = [
 # Internationalization
 # https://docs.djangoproject.com/en/6.1/topics/i18n/
 
-LANGUAGE_CODE = 'fr-fr'
+# Anglais : les messages d'erreur INTEGRES a Django/DRF (404 par defaut,
+# "this field is required", "invalid pk", validateurs de mot de passe, etc.)
+# suivent cette langue -- doit rester coherent avec la traduction manuelle du
+# reste de l'API (accounts/serializers.py et consorts, cf. discussion), sans
+# quoi ces messages-la restent en francais alors que tout le reste est en anglais.
+LANGUAGE_CODE = 'en-us'
 
 TIME_ZONE = 'UTC'
 

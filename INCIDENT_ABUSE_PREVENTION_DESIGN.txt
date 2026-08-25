@@ -1,0 +1,233 @@
+EASYWAY — INCIDENT ABUSE PREVENTION — DESIGN DISCUSSION (NOT IMPLEMENTED)
+Captured from a design conversation, 2026-08-25. Nothing in this file has
+been coded. It's a record of the reasoning, with worked numeric examples,
+so the decision can be picked back up without re-deriving it.
+
+------------------------------------------------------------
+THE SCENARIO THAT STARTED THIS
+
+A user registers at 09:00 and, starting at 09:05, submits incident reports
+from locations scattered across Cameroon, minutes apart. No real person can
+do that. Question: how do we prevent it — a trust/reputation score where
+validated reports raise it, a max-reports-per-day cap, or something else?
+
+------------------------------------------------------------
+WHAT ALREADY EXISTS IN THE CODEBASE (verified against the code, not assumed)
+
+- Hourly quota: QUOTA_SIGNALEMENTS_PAR_HEURE = 10 (community/services.py).
+  Per user, sliding 1-hour window, checked before every report.
+- Reputation-gated visibility: Utilisateur.score_reputation < 30 =>
+  new reports start EN_ATTENTE instead of ACTIF. Two independent
+  confirmations promote EN_ATTENTE -> ACTIF (community/models.py,
+  Incident.confirmer()).
+- Vote weight scales with the VOTER's own reputation:
+  poids_de_vote() = clamp(score_reputation / 100, 0.2, 2.0)
+  (accounts/models.py). A low-trust account's confirm/dispute counts for
+  less than a high-trust account's.
+- Idempotency-Key prevents double-submission from client retries (not an
+  abuse defense, just a reliability one — noted for completeness).
+- 150m/45deg/same-type dedup: a second report of the same jam near an
+  existing one corroborates it rather than creating a duplicate.
+
+------------------------------------------------------------
+THE GAP THIS SCENARIO ACTUALLY EXPOSES
+
+`score_reputation` defaults to 100 at account creation (accounts/models.py)
+and is READ in several places (the EN_ATTENTE gate, vote weighting) but is
+never WRITTEN anywhere in the codebase except that default and the Django
+admin. Confirming, disputing, or a moderator rejecting a report currently
+has zero effect on the report's author's score_reputation.
+
+Consequence: a brand-new account starts at 100 — ABOVE the 30-point
+EN_ATTENTE threshold. The 09:05am user in the scenario is not a low-trust
+account getting extra scrutiny; the system currently treats them as fully
+trusted from the first request. The cold-start assumption is inverted from
+what you'd want: trust should be EARNED, and right now it's GRANTED.
+
+------------------------------------------------------------
+WHY QUOTA AND REPUTATION, AS THEY EXIST TODAY, DON'T CATCH THIS SPECIFIC CASE
+
+- Quota (10/hour) checks VOLUME. 5 reports across 5 cities in 15 minutes is
+  comfortably inside that quota. Volume-capping alone doesn't know or care
+  where those reports were.
+- Reputation (as it exists) checks WHO, but a fresh account starts at the
+  same trust level as the app's most seasoned user (100), so it provides
+  zero extra scrutiny for exactly the account type most likely to be
+  abusive: one with no track record at all.
+
+Neither axis encodes the thing that actually makes the scenario obviously
+fake: it's PHYSICALLY IMPOSSIBLE. That's a third, independent signal.
+
+------------------------------------------------------------
+WORKED EXAMPLE 1 — "impossible travel" between consecutive reports
+
+Real distances between Cameroonian cities already in VILLES_DISPONIBLES
+(accounts/config_data.py), computed via haversine:
+
+    Douala   -> Yaounde     : 201 km
+    Yaounde  -> Bafoussam   : 217 km
+    Bafoussam-> Garoua      : 537 km
+
+If the same account files these four minutes apart each:
+
+    09:05  report in Douala      (4.0483, 9.7043)
+    09:09  report in Yaounde     (3.8480, 11.5021)   201 km in 4 min
+    09:14  report in Bafoussam   (5.4737, 10.4176)   217 km in 5 min
+    09:20  report in Garoua      (9.3014, 13.3922)   537 km in 6 min
+
+...the implied speed between each consecutive pair, from the SAME author:
+
+    Douala   -> Yaounde   : 201 km / 4 min  =  3,010 km/h
+    Yaounde  -> Bafoussam : 217 km / 5 min  =  2,605 km/h
+    Bafoussam-> Garoua    : 537 km / 6 min  =  5,373 km/h
+
+For comparison: a fast intercity bus on Cameroonian roads averages maybe
+60-80 km/h; even a small aircraft cruises around 250-350 km/h. A threshold
+somewhere around 150-200 km/h between two consecutive reports from the same
+account is already generous (accounts for GPS jitter, a passenger on a bus
+reporting from a moving vehicle, etc.) and every one of the three pairs
+above is 10-25x over even that generous line.
+
+Mechanically: on each new report, look up the author's most recent PRIOR
+report (regardless of type/location), compute distance (haversine, same
+math already used for the 150m dedup radius) and elapsed time since that
+prior report, derive implied km/h. If it exceeds the threshold, the new
+report doesn't get auto-published — same EN_ATTENTE path that already
+exists for low-reputation accounts, not a hard block. This is cheap (one
+extra query: "this author's last report"), doesn't need new infrastructure,
+and directly targets the scenario rather than a proxy for it.
+
+Edge cases worth deciding on, not solving here:
+  - A real passenger on an intercity bus/taxi genuinely covers real
+    distance in real time — but road speeds cap out well under 150 km/h
+    even on a fast highway, so the threshold has headroom.
+  - GPS jitter/spoofing on a stationary phone can occasionally report a
+    jump of a few hundred meters in a few seconds — implied speed from
+    THAT would also be absurd (e.g. 500m in 5s = 360 km/h) but for a
+    different, more sympathetic reason. Flagging-for-review rather than
+    hard-blocking handles both cases the same way without needing to tell
+    them apart up front.
+
+------------------------------------------------------------
+WORKED EXAMPLE 2 — a reputation score that actually moves
+
+Concept: score_reputation stops being a static default and starts
+reflecting a rolling track record. Sketch of one plausible rule (numbers
+are illustrative, not tuned):
+
+  - Each of the author's reports that reaches ACTIF and later expires
+    with confirmations > infirmations: score_reputation += 2 (small, since
+    most reports are mundane and this should be a slow climb)
+  - Each report a moderator marks REJETE, or that expires with
+    infirmations > confirmations: score_reputation -= 10 (larger and
+    faster than the reward, because a bad report is more costly to the
+    community than a good one is valuable — asymmetric on purpose)
+  - Clamp to [0, 200] so the 0.2x-2.0x vote-weight formula
+    (poids_de_vote) keeps behaving sanely at the extremes
+
+Worked progression for a NEW account, starting at reputation 100 today
+(would start lower under the "earned, not granted" fix — see below):
+
+  Day 0   register                                        rep = 100
+  Day 1   1st report, later confirmed net-positive         rep = 102
+  Day 3   2nd report, disputed net-negative (bad report)   rep =  92
+  Day 3   3rd report same day, also flagged impossible-     -- blocked before
+          travel per Example 1, never reaches ACTIF          it can affect rep
+  Day 10  4th report, confirmed                            rep =  94
+  Day 20  5th-9th reports, all confirmed over time          rep = 104
+
+Compare a SOCKPUPPET pattern under the same rule: an account that only
+ever gets confirmed by 2-3 OTHER new accounts (also at low starting trust,
+see the cold-start fix below) contributes very little vote weight each
+time (poids_de_vote near the 0.2x floor for all of them), so the ring's
+combined "confirmations" barely move the reported incident past EN_ATTENTE,
+and even if it does, each confirming vote is worth little, so it doesn't
+inflate any of their reputations quickly either. The ring only becomes
+effective once its members individually accumulate real reputation from
+being confirmed by ESTABLISHED accounts outside the ring — which is the
+whole point.
+
+------------------------------------------------------------
+THE COLD-START FIX THIS DEPENDS ON
+
+For Example 2's math to mean anything, new accounts can't start at the
+same trust level as established ones. Two ways to do it, not mutually
+exclusive:
+
+  (a) Lower the default. New accounts start at, say, 20-40 (below the
+      EN_ATTENTE threshold) instead of 100. Simple, one field default
+      change. Downside: a brand-new but perfectly legitimate user has
+      every one of their early reports sit in EN_ATTENTE, which is a worse
+      first-time experience.
+
+  (b) Separate "account age / track record" from "reputation score" as two
+      different gates that both have to pass for auto-ACTIF: e.g. "reports
+      only auto-publish if score_reputation >= 30 AND account is older
+      than 24h AND has at least 1 prior report that wasn't disputed." More
+      moving parts, but avoids punishing new users on day one for things
+      that have nothing to do with them personally (a first report can
+      still auto-publish if the account itself doesn't look suspicious —
+      e.g. no impossible-travel flags yet — while a genuinely spammy new
+      account gets caught by the SAME signals as before, they just aren't
+      the ONLY gate).
+
+Either way, the underlying idea is the same: trust should be a function of
+observed behavior over time, and "just created 5 minutes ago" is a data
+point in itself, not neutral.
+
+------------------------------------------------------------
+WORKED EXAMPLE 3 — a quota that scales with trust instead of one flat number
+
+Today: everyone gets 10 reports/hour, full stop. A flat number is wrong in
+both directions — too generous for a 5-minute-old account, probably a bit
+tight for a long-standing power user who drives for a living and
+legitimately encounters more incidents than average.
+
+Illustrative tiers (numbers again illustrative, this needs real usage data
+before being tuned for real):
+
+  score_reputation        reports allowed / hour   reports allowed / day
+  ----------------------- ----------------------- -----------------------
+  < 30 (low/new)                    2                       5
+  30-99 (building trust)            5                       15
+  100-149 (established)            10                       30
+  150+  (highly trusted)            15                       50
+
+A day-old account hitting a 5/day ceiling is a much smaller blast radius
+than the current 10/hour x 24h = up to 240/day theoretical ceiling for
+that same fresh account today.
+
+------------------------------------------------------------
+HOW THE THREE PIECES RELATE (not three separate features, one system)
+
+  1. Impossible-travel check -> gates ANY single report, regardless of
+     who's filing it. Catches the scenario outright, immediately,
+     no history needed.
+  2. Reputation feedback loop -> makes trust something EARNED over many
+     reports, so the EN_ATTENTE gate and vote-weighting actually mean
+     something over time instead of everyone sitting at the same default.
+  3. Adaptive quota -> limits blast radius for accounts that haven't
+     earned trust yet, without permanently punishing accounts that have.
+
+(1) is the direct fix for the scenario as described and is cheap/isolated
+enough to ship alone. (2) and (3) are the longer-term structural fix that
+makes the EN_ATTENTE/vote-weighting machinery (which already exists!)
+actually do what it looks like it's supposed to do.
+
+------------------------------------------------------------
+OPEN QUESTIONS (product decisions, not technical ones)
+
+  - Impossible-travel threshold: hard block vs. flag-for-review (EN_ATTENTE)?
+    Leaning EN_ATTENTE, per the GPS-jitter false-positive note above.
+  - Reputation reward/penalty magnitudes (+2 / -10 above are placeholders) —
+    needs either real usage data or a considered guess, not a random pick.
+  - Cold-start: lower default (a) vs. separate age+track-record gate (b)?
+    (b) is friendlier to legitimate new users but is more to build and reason
+    about; (a) is one line but costs new-user experience.
+  - Does a moderator/admin review queue exist yet for EN_ATTENTE reports, or
+    does "2 independent confirmations" remain the only path out of it? Worth
+    checking before leaning harder on EN_ATTENTE as the catch-all response.
+
+Not decided yet. Continue this conversation when ready to pick a starting
+point — impossible-travel is the one with the most direct line to the
+original scenario and the smallest footprint to build first.

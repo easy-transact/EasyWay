@@ -16,7 +16,7 @@ from accounts.tests import connecter
 from .exceptions import TransitionInvalide
 from .models import FUSEAU_TRAFIC, EchantillonVitesse, NiveauTrafic, StatutTrajet, Trajet
 from .polyline import decoder_polyline6, encoder_polyline6
-from .services import service_trafic
+from .services import client_locate, service_trafic
 from .services.client_meili import ErreurMeili
 from .services.client_routage import ClientRoutage
 from .services.client_valhalla import ClientValhalla
@@ -113,9 +113,11 @@ class MachineAEtatsTests(TestCase):
 class ClientFactice(ClientRoutage):
     def __init__(self):
         self.appels = 0
+        self.dernieres_options = None
 
     def calculer_itineraires(self, depart, arrivee, options):
         self.appels += 1
+        self.dernieres_options = options
         return [trip_factice()['trip']]
 
     def replier(self, depart, arrivee):
@@ -195,6 +197,34 @@ class ServiceItineraireTests(TestCase):
         self.assertIsNone(candidat['duree_avec_trafic'])
         self.assertEqual(candidat['niveau_trafic'], NiveauTrafic.NORMAL)
 
+    def test_eviter_est_transmis_a_valhalla_en_exclude_locations(self):
+        client = ClientFactice()
+        service = ServiceItineraire(client=client)
+        service.calculer(
+            (4.0483, 9.7043), (4.0469, 9.6970), self.utilisateur,
+            eviter=[(4.05, 9.70), (4.06, 9.71)],
+        )
+        self.assertEqual(
+            client.dernieres_options['exclude_locations'],
+            [{'lat': 4.05, 'lon': 9.70}, {'lat': 4.06, 'lon': 9.71}],
+        )
+
+    def test_sans_eviter_pas_dexclude_locations(self):
+        client = ClientFactice()
+        service = ServiceItineraire(client=client)
+        service.calculer((4.0483, 9.7043), (4.0469, 9.6970), self.utilisateur)
+        self.assertNotIn('exclude_locations', client.dernieres_options)
+
+    def test_eviter_differencie_la_cle_de_cache(self):
+        client = ClientFactice()
+        service = ServiceItineraire(client=client)
+        depart, arrivee = (4.0483, 9.7043), (4.0469, 9.6970)
+
+        service.calculer(depart, arrivee, self.utilisateur)
+        service.calculer(depart, arrivee, self.utilisateur, eviter=[(4.05, 9.70)])
+
+        self.assertEqual(client.appels, 2)  # deux entrees de cache distinctes, pas un hit sur la premiere
+
 
 class DisjoncteurValhallaTests(TestCase):
     def setUp(self):
@@ -235,6 +265,53 @@ class DisjoncteurValhallaTests(TestCase):
         self.assertEqual(len(candidats), 1)
         self.assertTrue(candidats[0]['degrade'])
         self.assertGreater(candidats[0]['distance'], 0)
+
+
+class ClientLocateTests(TestCase):
+    def setUp(self):
+        cache.clear()
+
+    def _reponse(self, edges):
+        reponse_simulee = Mock(status_code=200)
+        reponse_simulee.json.return_value = [{'input_lat': 4.0, 'input_lon': 9.7, 'nodes': [], 'edges': edges}]
+        reponse_simulee.raise_for_status = lambda: None
+        return reponse_simulee
+
+    def test_distance_calculee_depuis_le_point_correle(self):
+        reponse_simulee = self._reponse([{'correlated_lat': 4.0, 'correlated_lon': 9.7, 'way_id': 1}])
+        with patch('trips.services.client_locate.requests.post', return_value=reponse_simulee):
+            distance = client_locate.distance_a_la_route_m(4.0, 9.7)
+        self.assertEqual(distance, 0)
+
+    def test_aucune_arete_retourne_none(self):
+        reponse_simulee = self._reponse([])
+        with patch('trips.services.client_locate.requests.post', return_value=reponse_simulee):
+            distance = client_locate.distance_a_la_route_m(4.0, 9.7)
+        self.assertIsNone(distance)
+
+    def test_panne_reseau_leve_erreurlocate(self):
+        with patch(
+            'trips.services.client_locate.requests.post',
+            side_effect=requests.exceptions.ConnectionError('down'),
+        ):
+            with self.assertRaises(client_locate.ErreurLocate):
+                client_locate.distance_a_la_route_m(4.0, 9.7)
+
+    def test_disjoncteur_partage_avec_valhalla(self):
+        # Le disjoncteur est partage (meme conteneur) : des echecs de
+        # ClientValhalla doivent aussi bloquer client_locate sans nouvel appel reseau.
+        with patch(
+            'trips.services.client_valhalla.requests.post',
+            side_effect=requests.exceptions.ConnectionError('down'),
+        ):
+            client = ClientValhalla()
+            for _ in range(SEUIL_ECHECS):
+                client.calculer_itineraires((4.0, 9.7), (4.01, 9.71), {'costing': 'auto'})
+
+        with patch('trips.services.client_locate.requests.post') as post_simule:
+            with self.assertRaises(DisjoncteurOuvert):
+                client_locate.distance_a_la_route_m(4.0, 9.7)
+            post_simule.assert_not_called()
 
 
 def _trajet_actif_pour(utilisateur, **overrides):
@@ -281,6 +358,25 @@ class TrajetApiTests(TestCase):
         self.assertEqual(reponse.status_code, 200)
         self.assertEqual(len(reponse.json()), 1)
         self.assertTrue(reponse.json()[0]['is_recommended'])
+
+    def test_calcul_itineraire_avec_avoid_atteint_valhalla(self):
+        with patch(
+            'trips.services.client_valhalla.ClientValhalla.calculer_itineraires',
+        ) as calculer_simule:
+            calculer_simule.return_value = [trip_factice()['trip']]
+            reponse = self.client.post(
+                reverse('trips:calculer-itineraire'),
+                {
+                    'origin_lat': 4.0483, 'origin_lon': 9.7043,
+                    'destination_lat': 4.0469, 'destination_lon': 9.6970,
+                    'avoid': [{'lat': 4.05, 'lon': 9.70}],
+                },
+                content_type='application/json',
+                **self.jetons,
+            )
+        self.assertEqual(reponse.status_code, 200)
+        options_recues = calculer_simule.call_args.kwargs.get('options') or calculer_simule.call_args.args[2]
+        self.assertEqual(options_recues['exclude_locations'], [{'lat': 4.05, 'lon': 9.70}])
 
     def test_calcul_itineraire_non_authentifie_rejete(self):
         reponse = self.client.post(

@@ -36,7 +36,10 @@ DUREE_PERIODE = {
     summary="Calculer des candidats d'itineraire",
     description=(
         'view -> ServiceItineraire -> ClientValhalla. Ne persiste rien -- le client '
-        "renvoie l'itineraire choisi tel quel a POST /api/trips/ pour le faire persister."
+        "renvoie l'itineraire choisi tel quel a POST /api/trips/ pour le faire persister. "
+        "'avoid' (optionnel) exclut reellement les points donnes du graphe de routage "
+        "(ex. position d'un incident) -- Valhalla replanifie autour, ce n'est pas un "
+        'simple reclassement des candidats existants.'
     ),
     request=CalculItineraireSerializer,
     responses={200: ItineraireCandidatSerializer(many=True)},
@@ -54,6 +57,7 @@ class CalculItineraireView(APIView):
             depart=(donnees['origine_lat'], donnees['origine_lon']),
             arrivee=(donnees['destination_lat'], donnees['destination_lon']),
             utilisateur=request.user,
+            eviter=[(p['lat'], p['lon']) for p in donnees['eviter']],
         )
         return Response(ItineraireCandidatSerializer(candidats, many=True).data)
 

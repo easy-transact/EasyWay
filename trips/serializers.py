@@ -14,11 +14,20 @@ from .polyline import decoder_polyline6
 # instances de modele -- DRF resout `source` par cle ou attribut indifferemment.
 
 
+class PointEvitementSerializer(serializers.Serializer):
+    lat = serializers.FloatField()
+    lon = serializers.FloatField()
+
+
 class CalculItineraireSerializer(serializers.Serializer):
     origin_lat = serializers.FloatField(source='origine_lat')
     origin_lon = serializers.FloatField(source='origine_lon')
     destination_lat = serializers.FloatField()
     destination_lon = serializers.FloatField()
+    avoid = PointEvitementSerializer(
+        many=True, required=False, default=list, source='eviter',
+        help_text="Points a exclure du graphe de routage (ex. position d'un incident).",
+    )
 
 
 class ManoeuvreCandidatSerializer(serializers.Serializer):

@@ -8,10 +8,13 @@ from django.utils import timezone
 
 from accounts.models import Parametres, Utilisateur
 from accounts.tests import connecter
+from trips.polyline import encoder_polyline6
+from trips.services import client_locate
+from trips.services.disjoncteur import DisjoncteurOuvert
 
 from .cache_incidents import cle_cache_cellule
 from .models import Incident, StatutIncident, TypeIncident, Vote
-from .services import QuotaDepasse, ServiceIncident
+from .services import PositionHorsRoute, QuotaDepasse, ServiceIncident
 from .tasks import expirer_incidents
 
 MOT_DE_PASSE = 'CorrectHorse9!'
@@ -45,6 +48,20 @@ def patcher_nominatim_incident(test_case, libelle=None):
     test_case.addCleanup(patcheur.stop)
 
 
+def patcher_locate_incident(test_case, distance_m=0, effet_de_bord=None):
+    """Par defaut simule une position sur la route (distance 0m) pour ne pas
+    perturber les tests qui ne portent pas sur cette verification -- cf.
+    patcher_nominatim_incident ci-dessus, meme logique."""
+    patcheur = patch('community.services.client_locate.distance_a_la_route_m')
+    fonction_simulee = patcheur.start()
+    if effet_de_bord is not None:
+        fonction_simulee.side_effect = effet_de_bord
+    else:
+        fonction_simulee.return_value = distance_m
+    test_case.addCleanup(patcheur.stop)
+    return fonction_simulee
+
+
 class H3IndexationTests(TestCase):
     def test_cellules_calculees_a_la_creation(self):
         incident = creer_incident(creer_utilisateur())
@@ -63,6 +80,7 @@ class H3IndexationTests(TestCase):
 class ServiceIncidentSignalerTests(TestCase):
     def setUp(self):
         patcher_nominatim_incident(self)
+        patcher_locate_incident(self)
         cache.clear()
 
     def _point(self, decalage_lat=0, decalage_lon=0):
@@ -131,10 +149,37 @@ class ServiceIncidentSignalerTests(TestCase):
         incident, _ = ServiceIncident().signaler(creer_utilisateur(), TypeIncident.EMBOUTEILLAGE, self._point())
         self.assertEqual(incident.nom_voie, '')
 
+    def test_position_loin_de_la_route_rejetee(self):
+        patcher_locate_incident(self, distance_m=51)
+        with self.assertRaises(PositionHorsRoute):
+            ServiceIncident().signaler(creer_utilisateur(), TypeIncident.EMBOUTEILLAGE, self._point())
+        self.assertEqual(Incident.objects.count(), 0)
+
+    def test_position_juste_sous_le_seuil_acceptee(self):
+        patcher_locate_incident(self, distance_m=49)
+        incident, _ = ServiceIncident().signaler(creer_utilisateur(), TypeIncident.EMBOUTEILLAGE, self._point())
+        self.assertIsNotNone(incident.id)
+
+    def test_locate_ne_trouve_aucune_route_pas_derreur(self):
+        patcher_locate_incident(self, distance_m=None)
+        incident, _ = ServiceIncident().signaler(creer_utilisateur(), TypeIncident.EMBOUTEILLAGE, self._point())
+        self.assertIsNotNone(incident.id)
+
+    def test_valhalla_indisponible_ne_bloque_pas_le_signalement(self):
+        patcher_locate_incident(self, effet_de_bord=client_locate.ErreurLocate('panne'))
+        incident, _ = ServiceIncident().signaler(creer_utilisateur(), TypeIncident.EMBOUTEILLAGE, self._point())
+        self.assertIsNotNone(incident.id)
+
+    def test_disjoncteur_ouvert_ne_bloque_pas_le_signalement(self):
+        patcher_locate_incident(self, effet_de_bord=DisjoncteurOuvert())
+        incident, _ = ServiceIncident().signaler(creer_utilisateur(), TypeIncident.EMBOUTEILLAGE, self._point())
+        self.assertIsNotNone(incident.id)
+
 
 class IncidentCreationApiTests(TestCase):
     def setUp(self):
         patcher_nominatim_incident(self)
+        patcher_locate_incident(self)
         cache.clear()
         self.utilisateur = creer_utilisateur()
         self.jetons = connecter(self.client, self.utilisateur.email)
@@ -171,6 +216,15 @@ class IncidentCreationApiTests(TestCase):
         self.assertEqual(premiere.json()['id'], deuxieme.json()['id'])
         self.assertEqual(Incident.objects.count(), 1)
 
+    def test_position_hors_route_rejetee_en_400(self):
+        patcher_locate_incident(self, distance_m=200)
+        reponse = self.client.post(
+            reverse('community:incidents'), self._payload(), content_type='application/json',
+            HTTP_IDEMPOTENCY_KEY='cle-hors-route', **self.jetons,
+        )
+        self.assertEqual(reponse.status_code, 400)
+        self.assertEqual(Incident.objects.count(), 0)
+
 
 class IncidentsProchesApiTests(TestCase):
     def setUp(self):
@@ -195,6 +249,162 @@ class IncidentsProchesApiTests(TestCase):
         cellule_hex = h3.latlng_to_cell(0.0, 0.0, 8)
         reponse = self.client.get(reverse('community:incidents-proches'), {'cells': cellule_hex})
         self.assertEqual(reponse.json(), [])
+
+    def test_trop_de_cellules_rejete(self):
+        from community.views import MAX_CELLULES
+        cellules = ','.join(f'fake{i}' for i in range(MAX_CELLULES + 1))
+        reponse = self.client.get(reverse('community:incidents-proches'), {'cells': cellules})
+        self.assertEqual(reponse.status_code, 400)
+
+    def test_pile_a_la_limite_de_cellules_accepte(self):
+        from community.views import MAX_CELLULES
+        import h3
+        cellules = ','.join(h3.latlng_to_cell(0.0, float(i), 8) for i in range(MAX_CELLULES))
+        reponse = self.client.get(reverse('community:incidents-proches'), {'cells': cellules})
+        self.assertEqual(reponse.status_code, 200)
+
+    def test_lat_sans_lon_rejete(self):
+        import h3
+        cellule_hex = h3.latlng_to_cell(DOUALA_LAT, DOUALA_LON, 8)
+        reponse = self.client.get(reverse('community:incidents-proches'), {'cells': cellule_hex, 'lat': '4.05'})
+        self.assertEqual(reponse.status_code, 400)
+
+    def test_plafond_de_resultats_applique(self):
+        from community.views import MAX_RESULTATS
+        import h3
+        utilisateur = creer_utilisateur()
+        for _ in range(MAX_RESULTATS + 5):
+            creer_incident(utilisateur)
+        cellule_hex = h3.latlng_to_cell(DOUALA_LAT, DOUALA_LON, 8)
+        reponse = self.client.get(reverse('community:incidents-proches'), {'cells': cellule_hex})
+        self.assertEqual(len(reponse.json()), MAX_RESULTATS)
+
+    def test_tri_par_gravite_sans_position_de_reference(self):
+        utilisateur = creer_utilisateur()
+        import h3
+        faible = creer_incident(utilisateur, severite=1)
+        forte = creer_incident(utilisateur, severite=5)
+        cellule_hex = h3.latlng_to_cell(DOUALA_LAT, DOUALA_LON, 8)
+
+        reponse = self.client.get(reverse('community:incidents-proches'), {'cells': cellule_hex})
+        corps = reponse.json()
+        self.assertEqual([corps[0]['id'], corps[1]['id']], [str(forte.id), str(faible.id)])
+
+    def test_tri_par_proximite_quand_lat_lon_fournis(self):
+        import h3
+        utilisateur = creer_utilisateur()
+        proche = creer_incident(utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON)
+        loin = creer_incident(utilisateur, lat=DOUALA_LAT + 0.02, lon=DOUALA_LON + 0.02)  # ~2-3km
+        cellules = ','.join({
+            h3.int_to_str(proche.cellule_h3_res8),
+            h3.int_to_str(loin.cellule_h3_res8),
+        })
+
+        reponse = self.client.get(
+            reverse('community:incidents-proches'),
+            {'cells': cellules, 'lat': str(DOUALA_LAT), 'lon': str(DOUALA_LON)},
+        )
+        corps = reponse.json()
+        self.assertEqual(corps[0]['id'], str(proche.id))
+
+        # Inverse la position de reference -- l'ordre doit s'inverser aussi,
+        # preuve que le tri suit reellement la distance et non un ordre fixe.
+        reponse_inverse = self.client.get(
+            reverse('community:incidents-proches'),
+            {'cells': cellules, 'lat': str(DOUALA_LAT + 0.02), 'lon': str(DOUALA_LON + 0.02)},
+        )
+        corps_inverse = reponse_inverse.json()
+        self.assertEqual(corps_inverse[0]['id'], str(loin.id))
+
+
+class IncidentsSurTrajetApiTests(TestCase):
+    """POST /api/incidents/along-route/ : geometrie en corps de requete,
+    couloir autour du trace -- cf. discussion frontend (URL H3 ingerable
+    sur un trajet long)."""
+
+    def setUp(self):
+        # Segment rectiligne d'environ 800m -- assez pour placer un incident
+        # "sur" le trace et un autre nettement hors du couloir par defaut (300m).
+        self.geometrie = encoder_polyline6([
+            (DOUALA_LON, DOUALA_LAT),
+            (DOUALA_LON - 0.007, DOUALA_LAT),
+        ])
+        self.utilisateur = creer_utilisateur()
+
+    def test_geometrie_tronquee_fait_planter_le_decodeur_rejetee(self):
+        # decoder_polyline6 est un decodeur permissif (pas un validateur) :
+        # la plupart des chaines "au hasard" produisent quand meme des points
+        # (faux mais bien formes). Ce qui declenche vraiment une exception,
+        # c'est un varint coupe en plein milieu -- '~' (0x7e-0x3f=0x3f >= 0x20)
+        # pose le bit de continuation puis la chaine s'arrete, IndexError sur
+        # le caractere suivant qui n'existe pas.
+        reponse = self.client.post(
+            reverse('community:incidents-sur-trajet'), {'geometry': '~'},
+            content_type='application/json',
+        )
+        self.assertEqual(reponse.status_code, 400)
+
+    def test_geometrie_un_seul_point_rejetee(self):
+        un_point = encoder_polyline6([(DOUALA_LON, DOUALA_LAT)])
+        reponse = self.client.post(
+            reverse('community:incidents-sur-trajet'), {'geometry': un_point},
+            content_type='application/json',
+        )
+        self.assertEqual(reponse.status_code, 400)
+
+    def test_incident_sur_le_trace_est_retourne(self):
+        incident = creer_incident(self.utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON)
+        reponse = self.client.post(
+            reverse('community:incidents-sur-trajet'), {'geometry': self.geometrie},
+            content_type='application/json',
+        )
+        self.assertEqual(reponse.status_code, 200)
+        corps = reponse.json()
+        self.assertEqual([i['id'] for i in corps], [str(incident.id)])
+
+    def test_incident_loin_du_trace_est_exclu(self):
+        creer_incident(self.utilisateur, lat=DOUALA_LAT + 0.05, lon=DOUALA_LON + 0.05)  # ~7km, hors couloir
+        reponse = self.client.post(
+            reverse('community:incidents-sur-trajet'), {'geometry': self.geometrie},
+            content_type='application/json',
+        )
+        self.assertEqual(reponse.json(), [])
+
+    def test_buffer_personnalise_elargit_le_couloir(self):
+        # A ~600m perpendiculaire du segment -- hors du buffer par defaut (300m),
+        # dans un buffer elargi (800m).
+        loin_lateral = creer_incident(self.utilisateur, lat=DOUALA_LAT + 0.0055, lon=DOUALA_LON - 0.0035)
+
+        etroit = self.client.post(
+            reverse('community:incidents-sur-trajet'), {'geometry': self.geometrie},
+            content_type='application/json',
+        )
+        self.assertEqual(etroit.json(), [])
+
+        large = self.client.post(
+            reverse('community:incidents-sur-trajet'),
+            {'geometry': self.geometrie, 'buffer_m': 800},
+            content_type='application/json',
+        )
+        self.assertEqual([i['id'] for i in large.json()], [str(loin_lateral.id)])
+
+    def test_buffer_hors_bornes_rejete(self):
+        reponse = self.client.post(
+            reverse('community:incidents-sur-trajet'),
+            {'geometry': self.geometrie, 'buffer_m': 5000},
+            content_type='application/json',
+        )
+        self.assertEqual(reponse.status_code, 400)
+
+    def test_tri_par_gravite(self):
+        faible = creer_incident(self.utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON, severite=1)
+        forte = creer_incident(self.utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON - 0.005, severite=5)
+        reponse = self.client.post(
+            reverse('community:incidents-sur-trajet'), {'geometry': self.geometrie},
+            content_type='application/json',
+        )
+        corps = reponse.json()
+        self.assertEqual([corps[0]['id'], corps[1]['id']], [str(forte.id), str(faible.id)])
 
 
 class InvalidationCacheProchesTests(TestCase):
