@@ -12,6 +12,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from places.services.client_nominatim import ClientNominatim
+from places.utils import normaliser
 from trips.services import client_locate
 from trips.services.disjoncteur import DisjoncteurOuvert
 
@@ -57,13 +58,16 @@ class ServiceIncident:
                 self._corroborer(doublon, utilisateur)
                 incident, est_doublon = doublon, True
             else:
+                geocodage = self._geocoder_inverse(position)
                 incident = Incident.objects.create(
                     auteur=utilisateur,
                     type=type_incident,
                     sous_type=sous_type,
                     position=position,
                     cap=cap,
-                    nom_voie=self._nom_voie(position),
+                    nom_voie=geocodage['label'] if geocodage else '',
+                    ville=geocodage['city'] if geocodage else '',
+                    ville_normalisee=normaliser(geocodage['city']) if geocodage and geocodage['city'] else '',
                     statut=(
                         StatutIncident.EN_ATTENTE if utilisateur.score_reputation < SEUIL_REPUTATION_AUTO_ACTIF
                         else StatutIncident.ACTIF
@@ -128,9 +132,11 @@ class ServiceIncident:
         )
         incident.confirmer(vote)
 
-    def _nom_voie(self, position):
-        # Circuit breaker deja dans ClientNominatim (P2b) : un Nominatim en
-        # panne renvoie None ici, jamais une exception -- la creation de
-        # l'incident ne doit jamais bloquer sur un champ secondaire.
-        resultat = ClientNominatim().inverser(position.y, position.x)
-        return resultat['label'] if resultat else ''
+    def _geocoder_inverse(self, position):
+        # Un seul appel Nominatim pour nom_voie et ville (pas deux) -- meme
+        # reponse, pas de raison de doubler la charge sur un service externe
+        # deja partage. Circuit breaker deja dans ClientNominatim (P2b) : un
+        # Nominatim en panne renvoie None ici, jamais une exception -- la
+        # creation de l'incident ne doit jamais bloquer sur des champs
+        # secondaires.
+        return ClientNominatim().inverser(position.y, position.x)

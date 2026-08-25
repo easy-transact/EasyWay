@@ -8,6 +8,7 @@ from django.utils import timezone
 
 from accounts.models import Parametres, Utilisateur
 from accounts.tests import connecter
+from places.utils import normaliser
 from trips.polyline import encoder_polyline6
 from trips.services import client_locate
 from trips.services.disjoncteur import DisjoncteurOuvert
@@ -39,11 +40,11 @@ def creer_incident(auteur, type_incident=TypeIncident.EMBOUTEILLAGE, lat=DOUALA_
     return Incident.objects.create(**valeurs)
 
 
-def patcher_nominatim_incident(test_case, libelle=None):
+def patcher_nominatim_incident(test_case, libelle=None, ville=None):
     patcheur = patch('community.services.ClientNominatim')
     classe_simulee = patcheur.start()
     classe_simulee.return_value.inverser.return_value = (
-        {'label': libelle, 'source': 'nominatim'} if libelle else None
+        {'label': libelle, 'city': ville or '', 'source': 'nominatim'} if libelle else None
     )
     test_case.addCleanup(patcheur.stop)
 
@@ -148,6 +149,14 @@ class ServiceIncidentSignalerTests(TestCase):
     def test_nominatim_indisponible_nom_voie_vide_pas_derreur(self):
         incident, _ = ServiceIncident().signaler(creer_utilisateur(), TypeIncident.EMBOUTEILLAGE, self._point())
         self.assertEqual(incident.nom_voie, '')
+        self.assertEqual(incident.ville, '')
+        self.assertEqual(incident.ville_normalisee, '')
+
+    def test_ville_depuis_nominatim_normalisee_sans_accents(self):
+        patcher_nominatim_incident(self, libelle='Avenue Test', ville='Yaoundé')
+        incident, _ = ServiceIncident().signaler(creer_utilisateur(), TypeIncident.EMBOUTEILLAGE, self._point())
+        self.assertEqual(incident.ville, 'Yaoundé')
+        self.assertEqual(incident.ville_normalisee, 'yaounde')
 
     def test_position_loin_de_la_route_rejetee(self):
         patcher_locate_incident(self, distance_m=51)
@@ -317,6 +326,99 @@ class IncidentsProchesApiTests(TestCase):
         self.assertEqual(corps_inverse[0]['id'], str(loin.id))
 
 
+class IncidentsProchesParRayonApiTests(TestCase):
+    """GET /api/incidents/nearby/?lat=&lon=&radius_km= : mode alternatif a
+    cells=, requete geographique directe (pas de cache par cellule)."""
+
+    def setUp(self):
+        cache.clear()
+        self.utilisateur = creer_utilisateur()
+
+    def test_radius_km_sans_lat_lon_rejete(self):
+        reponse = self.client.get(reverse('community:incidents-proches'), {'radius_km': '5'})
+        self.assertEqual(reponse.status_code, 400)
+
+    def test_retourne_incident_dans_le_rayon(self):
+        proche = creer_incident(self.utilisateur, lat=DOUALA_LAT + 0.01, lon=DOUALA_LON)  # ~1.1km
+        reponse = self.client.get(
+            reverse('community:incidents-proches'),
+            {'lat': str(DOUALA_LAT), 'lon': str(DOUALA_LON), 'radius_km': '5'},
+        )
+        self.assertEqual(reponse.status_code, 200)
+        self.assertEqual([i['id'] for i in reponse.json()], [str(proche.id)])
+
+    def test_exclut_incident_hors_du_rayon(self):
+        creer_incident(self.utilisateur, lat=DOUALA_LAT + 0.2, lon=DOUALA_LON)  # ~22km
+        reponse = self.client.get(
+            reverse('community:incidents-proches'),
+            {'lat': str(DOUALA_LAT), 'lon': str(DOUALA_LON), 'radius_km': '5'},
+        )
+        self.assertEqual(reponse.json(), [])
+
+    def test_rayon_par_defaut_dix_km(self):
+        from community.views import RAYON_KM_DEFAUT
+        self.assertEqual(RAYON_KM_DEFAUT, 10)
+        dans_les_dix_km = creer_incident(self.utilisateur, lat=DOUALA_LAT + 0.08, lon=DOUALA_LON)  # ~8.9km
+        reponse = self.client.get(
+            reverse('community:incidents-proches'), {'lat': str(DOUALA_LAT), 'lon': str(DOUALA_LON)},
+        )
+        self.assertEqual([i['id'] for i in reponse.json()], [str(dans_les_dix_km.id)])
+
+    def test_rayon_hors_bornes_rejete(self):
+        from community.views import RAYON_KM_MAX
+        reponse = self.client.get(
+            reverse('community:incidents-proches'),
+            {'lat': str(DOUALA_LAT), 'lon': str(DOUALA_LON), 'radius_km': str(RAYON_KM_MAX + 1)},
+        )
+        self.assertEqual(reponse.status_code, 400)
+
+    def test_rayon_nul_rejete(self):
+        reponse = self.client.get(
+            reverse('community:incidents-proches'),
+            {'lat': str(DOUALA_LAT), 'lon': str(DOUALA_LON), 'radius_km': '0'},
+        )
+        self.assertEqual(reponse.status_code, 400)
+
+    def test_rayon_non_numerique_rejete(self):
+        reponse = self.client.get(
+            reverse('community:incidents-proches'),
+            {'lat': str(DOUALA_LAT), 'lon': str(DOUALA_LON), 'radius_km': 'loin'},
+        )
+        self.assertEqual(reponse.status_code, 400)
+
+    def test_tri_par_proximite(self):
+        proche = creer_incident(self.utilisateur, lat=DOUALA_LAT + 0.01, lon=DOUALA_LON)
+        loin = creer_incident(self.utilisateur, lat=DOUALA_LAT + 0.05, lon=DOUALA_LON)
+        reponse = self.client.get(
+            reverse('community:incidents-proches'),
+            {'lat': str(DOUALA_LAT), 'lon': str(DOUALA_LON), 'radius_km': '10'},
+        )
+        corps = reponse.json()
+        self.assertEqual([corps[0]['id'], corps[1]['id']], [str(proche.id), str(loin.id)])
+
+    def test_plafond_de_resultats_applique(self):
+        from community.views import MAX_RESULTATS
+        for _ in range(MAX_RESULTATS + 5):
+            creer_incident(self.utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON)
+        reponse = self.client.get(
+            reverse('community:incidents-proches'),
+            {'lat': str(DOUALA_LAT), 'lon': str(DOUALA_LON), 'radius_km': '10'},
+        )
+        self.assertEqual(len(reponse.json()), MAX_RESULTATS)
+
+    def test_cells_prioritaire_sur_radius_km(self):
+        import h3
+        dans_la_cellule = creer_incident(self.utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON)
+        creer_incident(self.utilisateur, lat=DOUALA_LAT + 0.02, lon=DOUALA_LON + 0.02)  # hors cellule, dans le rayon
+        cellule_hex = h3.int_to_str(dans_la_cellule.cellule_h3_res8)
+
+        reponse = self.client.get(
+            reverse('community:incidents-proches'), {'cells': cellule_hex, 'radius_km': '50'},
+        )
+        # cells prioritaire : radius_km est ignore silencieusement.
+        self.assertEqual([i['id'] for i in reponse.json()], [str(dans_la_cellule.id)])
+
+
 class IncidentsSurTrajetApiTests(TestCase):
     """POST /api/incidents/along-route/ : geometrie en corps de requete,
     couloir autour du trace -- cf. discussion frontend (URL H3 ingerable
@@ -403,6 +505,59 @@ class IncidentsSurTrajetApiTests(TestCase):
             reverse('community:incidents-sur-trajet'), {'geometry': self.geometrie},
             content_type='application/json',
         )
+        corps = reponse.json()
+        self.assertEqual([corps[0]['id'], corps[1]['id']], [str(forte.id), str(faible.id)])
+
+
+class IncidentsParVilleApiTests(TestCase):
+    """GET /api/incidents/city/?name=<ville> : filtre sur Incident.ville_normalisee
+    (denormalise a la creation depuis Nominatim, cf. ServiceIncident._geocoder_inverse)."""
+
+    def setUp(self):
+        self.utilisateur = creer_utilisateur()
+
+    def _incident_a(self, ville, **extra):
+        return creer_incident(self.utilisateur, ville=ville, ville_normalisee=normaliser(ville), **extra)
+
+    def test_sans_name_rejete(self):
+        reponse = self.client.get(reverse('community:incidents-par-ville'))
+        self.assertEqual(reponse.status_code, 400)
+
+    def test_retourne_les_incidents_de_la_ville(self):
+        yaounde = self._incident_a('Yaoundé')
+        self._incident_a('Douala')
+        reponse = self.client.get(reverse('community:incidents-par-ville'), {'name': 'Yaoundé'})
+        self.assertEqual(reponse.status_code, 200)
+        self.assertEqual([i['id'] for i in reponse.json()], [str(yaounde.id)])
+
+    def test_insensible_a_la_casse_et_aux_accents(self):
+        yaounde = self._incident_a('Yaoundé')
+        reponse = self.client.get(reverse('community:incidents-par-ville'), {'name': 'yaounde'})
+        self.assertEqual([i['id'] for i in reponse.json()], [str(yaounde.id)])
+
+    def test_ville_avec_granularite_administrative_matchee_par_sous_chaine(self):
+        # Reproduit un cas reel observe en verification live : Nominatim
+        # renvoie parfois "Douala I" (arrondissement) au lieu du nom usuel --
+        # cf. NormalisationVilleNominatimTests dans places/tests.py. Le
+        # filtre par sous-chaine (pas exact) absorbe cette variation.
+        incident = self._incident_a('Douala I')
+        reponse = self.client.get(reverse('community:incidents-par-ville'), {'name': 'Douala'})
+        self.assertEqual([i['id'] for i in reponse.json()], [str(incident.id)])
+
+    def test_incident_sans_ville_absent_de_toute_recherche(self):
+        creer_incident(self.utilisateur)  # ville='' (Nominatim indisponible au signalement)
+        reponse = self.client.get(reverse('community:incidents-par-ville'), {'name': 'Yaounde'})
+        self.assertEqual(reponse.json(), [])
+
+    def test_incident_expire_exclu(self):
+        self._incident_a('Yaoundé', statut=StatutIncident.EXPIRE, expire_le=timezone.now() - timezone.timedelta(minutes=1))
+        reponse = self.client.get(reverse('community:incidents-par-ville'), {'name': 'Yaoundé'})
+        self.assertEqual(reponse.json(), [])
+
+    def test_tri_par_gravite(self):
+        faible = self._incident_a('Yaoundé', severite=1)
+        forte = self._incident_a('Yaoundé', lon=DOUALA_LON - 0.01, severite=5)
+        reponse = self.client.get(reverse('community:incidents-par-ville'), {'name': 'Yaoundé'})
         corps = reponse.json()
         self.assertEqual([corps[0]['id'], corps[1]['id']], [str(forte.id), str(faible.id)])
 

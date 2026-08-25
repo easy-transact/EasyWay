@@ -69,6 +69,11 @@ class Incident(models.Model):
     cellule_h3_res7 = models.BigIntegerField(editable=False)
     cap = models.IntegerField(null=True, blank=True, help_text='degres, 0-359')
     nom_voie = models.CharField(max_length=255, blank=True)
+    ville = models.CharField(max_length=255, blank=True)
+    # Minuscules/sans accents (places.utils.normaliser) -- meme principe que
+    # Lieu.nom_normalise : permet un filtre par ville insensible a la casse
+    # et aux accents sans extension Postgres (unaccent) supplementaire.
+    ville_normalisee = models.CharField(max_length=255, blank=True)
 
     confirmations = models.IntegerField(default=0)
     infirmations = models.IntegerField(default=0)
@@ -90,6 +95,7 @@ class Incident(models.Model):
         indexes = [
             models.Index(fields=['cellule_h3_res8', 'statut']),
             models.Index(fields=['statut', 'expire_le']),
+            models.Index(fields=['ville_normalisee', 'statut']),
             gis_models.Index(fields=['position']),
         ]
 

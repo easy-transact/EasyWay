@@ -16,6 +16,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.serializers import MessageSerializer
+from places.utils import normaliser
 
 from .cache_incidents import DUREE_CACHE_CELLULE_S, cle_cache_cellule, invalider_cache_cellule
 from .models import Incident, SensVote, StatutIncident, Vote
@@ -38,6 +39,14 @@ DUREE_IDEMPOTENCE_S = 24 * 3600
 MAX_CELLULES = 50
 MAX_RESULTATS = 50
 
+# Mode rayon (lat/lon/radius_km, sans cells) : requete geographique directe,
+# ne passe pas par le cache par cellule H3 -- un rayon de plusieurs km couvre
+# trop de cellules pour que ce cache reste pertinent (cf. discussion, un
+# simple passage par grid_disk() a ce rayon produirait des milliers de
+# cellules). Valeurs pas mesurees sur donnees reelles.
+RAYON_KM_DEFAUT = 10
+RAYON_KM_MAX = 20
+
 
 def _distance_m(lat1, lon1, lat2, lon2):
     rayon_terre_m = 6_371_000
@@ -50,34 +59,58 @@ def _distance_m(lat1, lon1, lat2, lon2):
 
 @extend_schema(
     tags=['Incidents'],
-    summary='Lister les incidents actifs sur des cellules H3',
+    summary='Lister les incidents actifs a proximite',
     description=(
-        'Endpoint le plus sollicite du module. Cache par cellule H3 resolution 8 '
-        "(~0.74km²), invalide a l'ecriture (creation/vote/expiration/retrait) plutot "
-        'que de compter sur le seul TTL -- cf. cache_incidents.py.'
+        "Deux modes, au choix : `cells` (cellules H3 resolution 8, mode habituel du "
+        "client en conduite -- cache par cellule, invalide a l'ecriture plutot que "
+        "de compter sur le seul TTL, cf. cache_incidents.py) ou `lat`+`lon`+"
+        f"`radius_km` (requete geographique directe dans un rayon, sans passer par "
+        f"le cache par cellule -- pas adapte a un rayon de plusieurs km. Defaut "
+        f"{RAYON_KM_DEFAUT}km, maximum {RAYON_KM_MAX}km). Exactement un des deux "
+        "modes doit etre fourni."
     ),
     parameters=[
         OpenApiParameter(
-            'cells', OpenApiTypes.STR, required=True,
-            description=f'Cellules H3 (resolution 8) en hexadecimal, separees par des virgules. Maximum {MAX_CELLULES}.',
+            'cells', OpenApiTypes.STR, required=False,
+            description=(
+                f'Mode cellules H3 (resolution 8) en hexadecimal, separees par des virgules. '
+                f'Maximum {MAX_CELLULES}. Incompatible avec radius_km.'
+            ),
+        ),
+        OpenApiParameter(
+            'radius_km', OpenApiTypes.FLOAT, required=False,
+            description=(
+                f"Mode rayon : distance en km autour de lat/lon (defaut {RAYON_KM_DEFAUT}, "
+                f"maximum {RAYON_KM_MAX}). Ignore un `cells` fourni en meme temps."
+            ),
         ),
         OpenApiParameter(
             'lat', OpenApiTypes.FLOAT, required=False,
-            description="Position de reference pour le tri par pertinence (optionnel). Sans elle, tri par gravite/confiance seules.",
+            description=(
+                "Mode cells : position de reference pour le tri par pertinence (optionnel). "
+                "Mode rayon : centre de la recherche (obligatoire avec lon)."
+            ),
         ),
         OpenApiParameter(
             'lon', OpenApiTypes.FLOAT, required=False,
-            description="Position de reference pour le tri par pertinence (optionnel).",
+            description="Meme role que lat selon le mode -- cf. description de lat.",
         ),
     ],
     responses={200: IncidentSerializer(many=True), 400: MessageSerializer},
 )
 class IncidentsProchesView(APIView):
-    """GET /api/incidents/nearby/?cells=<hex,hex,...>&lat=&lon= : endpoint le
-    plus sollicite du module. Cache par cellule H3 res8 (~0.74km², cf. l'index
+    """GET /api/incidents/nearby/ : deux modes.
+    ?cells=<hex,hex,...>&lat=&lon= -- endpoint le plus sollicite du module en
+    conduite. Cache par cellule H3 res8 (~0.74km², cf. l'index
     cellule_h3_res8+statut du modele), invalide a l'ecriture (creation/vote/
     expiration/retrait) plutot que de compter sur le seul TTL -- cf.
     cache_incidents.py.
+
+    ?lat=&lon=&radius_km= -- requete geographique directe (pas de cache par
+    cellule : un rayon de plusieurs km couvrirait trop de cellules H3 pour
+    que ce cache reste pertinent). Pense pour un "que se passe-t-il autour de
+    moi" ponctuel, pas pour l'appel repete pendant la conduite (cells reste
+    le mode a preferer dans ce cas, deja optimise pour ca).
 
     MAX_CELLULES/MAX_RESULTATS : le decoupage H3 cote client n'a pas de
     limite fiable (viewport dezoome, bug de calcul) -- c'est le serveur qui
@@ -88,20 +121,6 @@ class IncidentsProchesView(APIView):
 
     def get(self, request):
         cellules_hex = [c for c in request.query_params.get('cells', '').split(',') if c]
-        if not cellules_hex:
-            return Response(
-                {'detail': "'cells' is required (comma-separated H3 hex cells)."}, status=400
-            )
-        if len(cellules_hex) > MAX_CELLULES:
-            return Response(
-                {
-                    'detail': (
-                        f"Too many cells requested ({len(cellules_hex)}), maximum {MAX_CELLULES}. "
-                        "Narrow the request to the area actually visible to the user."
-                    )
-                },
-                status=400,
-            )
 
         lat = request.query_params.get('lat')
         lon = request.query_params.get('lon')
@@ -112,6 +131,25 @@ class IncidentsProchesView(APIView):
                 lat, lon = float(lat), float(lon)
             except ValueError:
                 return Response({'detail': "'lat'/'lon' must be numbers."}, status=400)
+
+        if not cellules_hex:
+            if lat is None:
+                return Response(
+                    {'detail': "Provide either 'cells' or 'lat'+'lon' (optionally with 'radius_km')."},
+                    status=400,
+                )
+            return self._recherche_par_rayon(request, lat, lon)
+
+        if len(cellules_hex) > MAX_CELLULES:
+            return Response(
+                {
+                    'detail': (
+                        f"Too many cells requested ({len(cellules_hex)}), maximum {MAX_CELLULES}. "
+                        "Narrow the request to the area actually visible to the user."
+                    )
+                },
+                status=400,
+            )
 
         resultats_par_cellule = {}
         manquantes = []
@@ -154,6 +192,28 @@ class IncidentsProchesView(APIView):
         fusion.sort(key=cle_tri)
         return Response(fusion[:MAX_RESULTATS])
 
+    def _recherche_par_rayon(self, request, lat, lon):
+        radius_km = request.query_params.get('radius_km', RAYON_KM_DEFAUT)
+        try:
+            radius_km = float(radius_km)
+        except ValueError:
+            return Response({'detail': "'radius_km' must be a number."}, status=400)
+        if not (0 < radius_km <= RAYON_KM_MAX):
+            return Response(
+                {'detail': f"'radius_km' must be between 0 and {RAYON_KM_MAX}."}, status=400
+            )
+
+        centre = Point(lon, lat, srid=4326)
+        incidents = Incident.objects.filter(
+            statut__in=[StatutIncident.ACTIF, StatutIncident.EN_ATTENTE],
+            expire_le__gt=timezone.now(),
+            position__distance_lte=(centre, D(km=radius_km)),
+        )
+
+        donnees = IncidentSerializer(incidents, many=True).data
+        donnees.sort(key=lambda i: _distance_m(lat, lon, i['lat'], i['lon']))
+        return Response(donnees[:MAX_RESULTATS])
+
 
 @extend_schema(
     tags=['Incidents'],
@@ -194,6 +254,53 @@ class IncidentsSurTrajetView(APIView):
         # (aucune ici -- le trajet entier est demande, pas un point) :
         # gravite puis confiance, et un plafond identique pour ne jamais
         # renvoyer un trajet tres long en entier sans limite.
+        donnees = IncidentSerializer(incidents, many=True).data
+        donnees.sort(key=lambda i: (-i['severity'], -float(i['confidence_score'])))
+        return Response(donnees[:MAX_RESULTATS])
+
+
+@extend_schema(
+    tags=['Incidents'],
+    summary="Lister les incidents actifs d'une ville",
+    description=(
+        "Filtre sur `city`, denormalise sur l'incident au moment du signalement "
+        "(meme reverse-geocodage Nominatim que street_name, un seul appel pour les "
+        "deux -- cf. ServiceIncident._geocoder_inverse). Comparaison insensible a "
+        "la casse et aux accents, par sous-chaine plutot qu'exacte ('Yaounde' "
+        "matche aussi bien 'Yaounde' que 'Yaounde I' ou une ville dont city "
+        "n'a pas ete nettoyee de son granularite administrative -- cf. discussion "
+        "sur l'incoherence 'Douala I' vs 'Communaute urbaine de Douala' dans les "
+        "donnees OSM du Cameroun). Un signalement cree pendant une panne de "
+        "Nominatim n'a pas de ville renseignee et n'apparait dans aucun resultat "
+        "de cet endpoint."
+    ),
+    parameters=[
+        OpenApiParameter(
+            'name', OpenApiTypes.STR, required=True,
+            description='Nom de la ville (ex. "Yaounde", "Douala").',
+        ),
+    ],
+    responses={200: IncidentSerializer(many=True), 400: MessageSerializer},
+)
+class IncidentsParVilleView(APIView):
+    """GET /api/incidents/city/?name=<ville> : incidents actifs/en attente
+    dont la ville denormalisee correspond (insensible casse/accents)."""
+
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        nom_ville = request.query_params.get('name', '').strip()
+        if not nom_ville:
+            return Response({'detail': "'name' is required."}, status=400)
+
+        incidents = Incident.objects.filter(
+            ville_normalisee__contains=normaliser(nom_ville),
+            statut__in=[StatutIncident.ACTIF, StatutIncident.EN_ATTENTE],
+            expire_le__gt=timezone.now(),
+        )
+
+        # Meme logique de pertinence que /nearby/ et /along-route/ sans
+        # position de reference : gravite puis confiance, plafond identique.
         donnees = IncidentSerializer(incidents, many=True).data
         donnees.sort(key=lambda i: (-i['severity'], -float(i['confidence_score'])))
         return Response(donnees[:MAX_RESULTATS])

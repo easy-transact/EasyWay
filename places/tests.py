@@ -333,6 +333,37 @@ class InverseNominatimTests(TestCase):
         self.assertEqual(reponse.json()['place']['source'], 'local')
 
 
+class NormalisationVilleNominatimTests(TestCase):
+    """Cas reels observes en verifiant l'endpoint incidents/city/ : sur les
+    donnees OSM du Cameroun, la granularite de `address.city` varie d'une
+    ville a l'autre -- cf. PREFIXE_COMMUNAUTE_URBAINE dans client_nominatim.py."""
+
+    def _inverser_avec_adresse(self, adresse):
+        reponse_simulee = Mock(status_code=200)
+        reponse_simulee.json.return_value = {
+            'place_id': 1, 'name': 'Test', 'lat': '4.0', 'lon': '9.7', 'address': adresse,
+        }
+        reponse_simulee.raise_for_status = lambda: None
+        with patch('places.services.client_nominatim.requests.get', return_value=reponse_simulee):
+            return ClientNominatim().inverser(4.0, 9.7)
+
+    def test_yaounde_city_directement_prefixe_communaute_urbaine(self):
+        resultat = self._inverser_avec_adresse({'city_district': 'Yaounde I', 'city': 'Communauté urbaine de Yaoundé'})
+        self.assertEqual(resultat['city'], 'Yaoundé')
+
+    def test_douala_nom_usuel_dans_municipality_pas_city(self):
+        resultat = self._inverser_avec_adresse({'city': 'Douala I', 'municipality': 'Communauté urbaine de Douala'})
+        self.assertEqual(resultat['city'], 'Douala')
+
+    def test_sans_municipality_ni_prefixe_city_garde_tel_quel(self):
+        resultat = self._inverser_avec_adresse({'city': 'Bafoussam'})
+        self.assertEqual(resultat['city'], 'Bafoussam')
+
+    def test_aucun_champ_ville_renvoie_chaine_vide(self):
+        resultat = self._inverser_avec_adresse({})
+        self.assertEqual(resultat['city'], '')
+
+
 class DisjoncteurNominatimTests(TestCase):
     def setUp(self):
         cache.clear()

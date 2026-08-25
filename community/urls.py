@@ -7,6 +7,7 @@ app_name = 'community'
 urlpatterns = [
     path('incidents/nearby/', views.IncidentsProchesView.as_view(), name='incidents-proches'),
     path('incidents/along-route/', views.IncidentsSurTrajetView.as_view(), name='incidents-sur-trajet'),
+    path('incidents/city/', views.IncidentsParVilleView.as_view(), name='incidents-par-ville'),
     path('incidents/', views.IncidentCreationView.as_view(), name='incidents'),
     path('incidents/<uuid:id>/', views.IncidentDetailView.as_view(), name='incident-detail'),
     path('incidents/<uuid:id>/vote/', views.VoterIncidentView.as_view(), name='incident-vote'),

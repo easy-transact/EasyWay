@@ -15,6 +15,7 @@ class IncidentSerializer(serializers.ModelSerializer):
     subtype = serializers.CharField(source='sous_type', read_only=True)
     heading = serializers.IntegerField(source='cap', read_only=True)
     street_name = serializers.CharField(source='nom_voie', read_only=True)
+    city = serializers.CharField(source='ville', read_only=True)
     disputes = serializers.IntegerField(source='infirmations', read_only=True)
     confidence_score = serializers.DecimalField(source='score_confiance', max_digits=6, decimal_places=2, read_only=True)
     estimated_impact = serializers.SerializerMethodField()
@@ -26,7 +27,7 @@ class IncidentSerializer(serializers.ModelSerializer):
     class Meta:
         model = Incident
         fields = [
-            'id', 'type', 'subtype', 'lat', 'lon', 'heading', 'street_name',
+            'id', 'type', 'subtype', 'lat', 'lon', 'heading', 'street_name', 'city',
             'confirmations', 'disputes', 'confidence_score', 'estimated_impact',
             'status', 'severity', 'expires_at', 'created_at',
         ]

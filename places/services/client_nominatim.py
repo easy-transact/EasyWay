@@ -4,6 +4,7 @@ ClientValhalla (etat dans Redis, ouvre apres des echecs repetes, se
 reinitialise sur succes) -- meme discipline, service different.
 """
 
+import re
 import time
 
 import requests
@@ -11,6 +12,14 @@ from django.conf import settings
 from django.core.cache import cache
 
 from .client_geocodeur import ClientInverse, ClientRecherche, ErreurGeocodage
+
+# Sur les donnees OSM du Cameroun, la granularite de `address.city` varie
+# selon la ville : pour Yaounde, city="Communaute urbaine de Yaounde"
+# directement ; pour Douala, city="Douala I" (arrondissement) et le nom
+# usuel est dans `municipality`="Communaute urbaine de Douala". D'ou l'ordre
+# de priorite ci-dessous et le retrait du prefixe administratif -- verifie
+# en direct sur ces deux villes, pas garanti pour le reste du pays.
+PREFIXE_COMMUNAUTE_URBAINE = re.compile(r'^communaut[ée] urbaine de\s+', re.IGNORECASE)
 
 CLE_ECHECS = 'nominatim:disjoncteur:echecs'
 CLE_OUVERT_JUSQU_A = 'nominatim:disjoncteur:ouvert_jusqu_a'
@@ -26,10 +35,15 @@ class DisjoncteurOuvert(Exception):
 
 def _normaliser(objet: dict) -> dict:
     adresse = objet.get('address', {})
+    ville = (
+        adresse.get('municipality') or adresse.get('city')
+        or adresse.get('town') or adresse.get('village') or ''
+    )
+    ville = PREFIXE_COMMUNAUTE_URBAINE.sub('', ville).strip()
     libelle = objet.get('name') or objet.get('display_name', '').split(',')[0]
     sous_libelle = ', '.join(filter(None, [
         adresse.get('suburb') or adresse.get('quarter'),
-        adresse.get('city') or adresse.get('town') or adresse.get('village'),
+        ville,
     ]))
     return {
         'id': f"nominatim:{objet.get('place_id')}",
@@ -40,6 +54,7 @@ def _normaliser(objet: dict) -> dict:
         'lon': float(objet['lon']),
         'distance_m': None,
         'source': 'nominatim',
+        'city': ville,
     }
 
 
