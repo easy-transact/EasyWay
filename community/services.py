@@ -6,6 +6,7 @@ verrouillee.
 """
 
 import h3
+from django.conf import settings
 from django.contrib.gis.db.models.functions import Distance
 from django.contrib.gis.measure import D
 from django.db import transaction
@@ -82,6 +83,10 @@ class ServiceIncident:
         return incident, est_doublon
 
     def _verifier_quota(self, utilisateur):
+        # Desactivable via QUOTA_SIGNALEMENTS_ACTIF (settings.py) -- coupe
+        # pour le moment pour ne pas bloquer les tests manuels repetes.
+        if not settings.QUOTA_SIGNALEMENTS_ACTIF:
+            return
         depuis = timezone.now() - timezone.timedelta(hours=1)
         recents = Incident.objects.filter(auteur=utilisateur, cree_le__gte=depuis).count()
         if recents >= QUOTA_SIGNALEMENTS_PAR_HEURE:

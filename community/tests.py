@@ -2,7 +2,7 @@ from unittest.mock import patch
 
 from django.contrib.gis.geos import Point
 from django.core.cache import cache
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
@@ -100,12 +100,23 @@ class ServiceIncidentSignalerTests(TestCase):
         )
         self.assertEqual(incident.statut, StatutIncident.EN_ATTENTE)
 
+    @override_settings(QUOTA_SIGNALEMENTS_ACTIF=True)
     def test_quota_horaire_depasse(self):
         utilisateur = creer_utilisateur()
         for i in range(10):
             creer_incident(utilisateur, type_incident=TypeIncident.DANGER, lat=DOUALA_LAT + i * 0.05)
         with self.assertRaises(QuotaDepasse):
             ServiceIncident().signaler(utilisateur, TypeIncident.EMBOUTEILLAGE, self._point())
+
+    @override_settings(QUOTA_SIGNALEMENTS_ACTIF=False)
+    def test_quota_desactive_ne_bloque_pas(self):
+        # QUOTA_SIGNALEMENTS_ACTIF=False (defaut actuel, cf. settings.py) --
+        # desactive temporairement pour ne pas bloquer les tests manuels.
+        utilisateur = creer_utilisateur()
+        for i in range(15):
+            creer_incident(utilisateur, type_incident=TypeIncident.DANGER, lat=DOUALA_LAT + i * 0.05)
+        incident, _ = ServiceIncident().signaler(utilisateur, TypeIncident.EMBOUTEILLAGE, self._point())
+        self.assertIsNotNone(incident.id)
 
     def test_doublon_meme_type_proche_corrobore_sans_creer(self):
         existant = creer_incident(creer_utilisateur('a@easyway.local'), type_incident=TypeIncident.EMBOUTEILLAGE)

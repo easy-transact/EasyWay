@@ -180,6 +180,11 @@ NOMINATIM_URL = env('NOMINATIM_URL', default='http://localhost:8003')
 # geocodage inverse cote Photon, Nominatim garde ce role (P2b).
 PHOTON_URL = env('PHOTON_URL', default='http://localhost:2322')
 
+# Quota horaire de signalements (ServiceIncident._verifier_quota) -- desactive
+# temporairement (2026-08-25) pour ne pas bloquer les tests manuels repetes
+# pendant le developpement. A remettre a True avant un usage reel.
+QUOTA_SIGNALEMENTS_ACTIF = env.bool('QUOTA_SIGNALEMENTS_ACTIF', default=False)
+
 # Cache du calcul d'itineraire (ServiceItineraire, 3 min) et compteurs du
 # disjoncteur ClientValhalla. IGNORE_EXCEPTIONS : un Redis indisponible degrade
 # en cache-miss (recalcul a chaque appel) plutot que de faire planter l'API --
