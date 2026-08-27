@@ -171,6 +171,11 @@ services:
     restart: unless-stopped
     entrypoint: []
     command: celery -A config worker -l info
+    # Le HEALTHCHECK du Dockerfile teste curl localhost:8000 (web) -- ce
+    # service ne sert jamais de HTTP, echouerait toujours sinon (marque
+    # "unhealthy" en permanence sans que rien ne soit reellement casse).
+    healthcheck:
+      disable: true
     depends_on:
       db:
         condition: service_healthy
@@ -193,6 +198,8 @@ services:
     restart: unless-stopped
     entrypoint: []
     command: celery -A config beat -l info
+    healthcheck:
+      disable: true
     depends_on:
       db:
         condition: service_healthy
