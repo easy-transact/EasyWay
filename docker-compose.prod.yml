@@ -1,0 +1,198 @@
+# Fichier de production autonome (pas un override de docker-compose.yml) :
+# les regles de fusion de Compose pour `ports` concatenent les listes plutot
+# que de les remplacer -- un override qui tenterait de "retirer" une
+# publication 0.0.0.0 laisserait en realite les deux en place. Plus simple
+# et plus sur de maintenir un fichier complet et independant pour la prod.
+#
+# Usage :
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Difference cle avec docker-compose.yml (dev) : seul `web` est joignable
+# depuis l'exterieur. db/redis/valhalla/nominatim/photon sont lies a
+# 127.0.0.1 uniquement -- ce serveur n'a aucun pare-feu actif (verifie avant
+# ce deploiement), donc tout ce qui est publie sur 0.0.0.0 serait directement
+# joignable depuis internet.
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: easyway
+      POSTGRES_USER: easyway
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U easyway -d easyway"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # cf. docker-compose.yml pour les commentaires sur le premier build/import
+  # (peut prendre plusieurs dizaines de minutes pour valhalla/nominatim).
+  valhalla:
+    image: ghcr.io/gis-ops/docker-valhalla/valhalla:latest
+    container_name: valhalla
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8002:8002"
+    volumes:
+      - ./valhalla/custom_files:/custom_files
+    environment:
+      - tile_urls=
+      - use_tiles_ignore_pbf=False
+      - force_rebuild=False
+      - build_elevation=False
+      - build_admins=True
+      - build_time_zones=False
+      - build_transit=False
+      - server_threads=2
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8002/status || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 5m
+
+  nominatim:
+    image: mediagis/nominatim:4.4
+    container_name: nominatim
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8003:8080"
+    environment:
+      PBF_PATH: /data/cameroon-latest.osm.pbf
+      IMPORT_WIKIPEDIA: false
+      IMPORT_US_POSTCODES: false
+      IMPORT_GB_POSTCODES: false
+      IMPORT_TIGER_ADDRESSES: false
+      NOMINATIM_PASSWORD: nominatim
+      FREEZE: true
+    volumes:
+      - ./valhalla/custom_files/cameroon-latest.osm.pbf:/data/cameroon-latest.osm.pbf:ro
+      - nominatim_data:/var/lib/postgresql/14
+    shm_size: 1gb
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/status.php || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 60
+      start_period: 45m
+
+  photon:
+    build: ./photon
+    container_name: photon
+    restart: unless-stopped
+    depends_on:
+      nominatim:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:2322:2322"
+    environment:
+      NOMINATIM_HOST: nominatim
+      NOMINATIM_PORT: 5432
+      NOMINATIM_DB: nominatim
+      NOMINATIM_USER: nominatim
+      NOMINATIM_PASSWORD: nominatim
+      PHOTON_LANGUAGES: fr,en
+    volumes:
+      - photon_data:/photon/photon_data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:2322/api?q=test || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 60
+      start_period: 30m
+
+  # Seul service publiquement joignable -- sur ce port directement (pas de
+  # TLS) tant que le reverse-proxy nginx + domaine ne sont pas branches
+  # (cf. discussion). SECURE_SSL_REDIRECT=False etc. doivent rester dans ce
+  # .env tant que ce port est expose directement sans HTTPS devant.
+  web:
+    build: .
+    container_name: web
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      DATABASE_URL: postgis://easyway:${POSTGRES_PASSWORD}@db:5432/easyway
+      REDIS_URL: redis://redis:6379/1
+      CELERY_BROKER_URL: redis://redis:6379/2
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      TELEMETRIE_REDIS_URL: redis://redis:6379/3
+      VALHALLA_URL: http://valhalla:8002
+      NOMINATIM_URL: http://nominatim:8080
+      PHOTON_URL: http://photon:2322
+    volumes:
+      - static_data:/app/staticfiles
+      - media_data:/app/media
+
+  celery_worker:
+    build: .
+    container_name: celery_worker
+    restart: unless-stopped
+    entrypoint: []
+    command: celery -A config worker -l info
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgis://easyway:${POSTGRES_PASSWORD}@db:5432/easyway
+      REDIS_URL: redis://redis:6379/1
+      CELERY_BROKER_URL: redis://redis:6379/2
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      TELEMETRIE_REDIS_URL: redis://redis:6379/3
+      VALHALLA_URL: http://valhalla:8002
+      NOMINATIM_URL: http://nominatim:8080
+      PHOTON_URL: http://photon:2322
+
+  celery_beat:
+    build: .
+    container_name: celery_beat
+    restart: unless-stopped
+    entrypoint: []
+    command: celery -A config beat -l info
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgis://easyway:${POSTGRES_PASSWORD}@db:5432/easyway
+      REDIS_URL: redis://redis:6379/1
+      CELERY_BROKER_URL: redis://redis:6379/2
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      TELEMETRIE_REDIS_URL: redis://redis:6379/3
+      VALHALLA_URL: http://valhalla:8002
+      NOMINATIM_URL: http://nominatim:8080
+      PHOTON_URL: http://photon:2322
+
+volumes:
+  postgres_data:
+  nominatim_data:
+  photon_data:
+  static_data:
+  media_data:

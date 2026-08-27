@@ -26,10 +26,16 @@ CSRF_TRUSTED_ORIGINS = env.list('CSRF_TRUSTED_ORIGINS', default=[])
 
 if not DEBUG:
     # Durcissement releve par `manage.py check --deploy` -- desactive en dev
-    # (DEBUG=True) pour ne pas casser le HTTP simple en local/ngrok.
+    # (DEBUG=True) pour ne pas casser le HTTP simple en local/ngrok. Les
+    # trois flags TLS sont explicitement desactivables (pas juste
+    # SECURE_SSL_REDIRECT) pour une phase transitoire sans HTTPS devant
+    # l'appli (ex. premier deploiement, port expose directement le temps
+    # qu'un nom de domaine + reverse-proxy TLS soit branche) -- sans ca,
+    # SECURE_SSL_REDIRECT redirigerait vers un HTTPS qui n'existe pas encore,
+    # rendant l'appli injoignable.
     SECURE_SSL_REDIRECT = env.bool('SECURE_SSL_REDIRECT', default=True)
-    SESSION_COOKIE_SECURE = True
-    CSRF_COOKIE_SECURE = True
+    SESSION_COOKIE_SECURE = env.bool('SESSION_COOKIE_SECURE', default=True)
+    CSRF_COOKIE_SECURE = env.bool('CSRF_COOKIE_SECURE', default=True)
     # Valeur prudente au premier deploiement (1h, pas le 1 an usuel) : HSTS
     # est mis en cache par le navigateur, une erreur de config HTTPS
     # deviendrait difficile a corriger rapidement. A augmenter une fois
