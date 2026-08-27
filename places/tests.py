@@ -3,12 +3,15 @@ from unittest.mock import Mock, patch
 import requests
 from django.contrib.gis.geos import Point
 from django.core.cache import cache
+from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.test import TestCase
 from django.urls import reverse
 
 from accounts.models import Droits, Formule, Parametres, Utilisateur
 from accounts.tests import connecter
-from .models import AdresseEnregistree, Lieu, RechercheRecente, SourceLieu, StatutLieu
+from .models import AdresseEnregistree, Lieu, RechercheRecente, SourceLieu, StatutLieu, Ville
+from .views import LIMITE_VILLES
 from .services.client_nominatim import (
     CLE_ECHECS as CLE_ECHECS_NOMINATIM,
     CLE_OUVERT_JUSQU_A as CLE_OUVERT_JUSQU_A_NOMINATIM,
@@ -58,6 +61,14 @@ def creer_lieu(nom, lat, lon, ville='Douala', statut=StatutLieu.APPROUVE, **extr
         nom=nom, nom_normalise=normaliser(nom), categorie=extra.pop('categorie', 'restaurant'),
         ville=ville, position=Point(lon, lat, srid=4326),
         source=SourceLieu.OPENSTREETMAP, statut=statut, **extra,
+    )
+
+
+def creer_ville(nom, lat, lon, osm_id=None, type='city', population=0):
+    return Ville.objects.create(
+        osm_id=osm_id or hash(nom) % 2_000_000_000,
+        nom=nom, nom_normalise=normaliser(nom), type=type, population=population,
+        position=Point(lon, lat, srid=4326),
     )
 
 
@@ -313,6 +324,50 @@ class RechercheFusionPhotonTests(TestCase):
         self.assertEqual(reponse.json()[0]['source'], 'photon')
 
 
+class RechercheFusionVilleTests(TestCase):
+    """Ville (referentiel villes/villages, cf. import_villes_gpkg) est une
+    troisieme source fusionnee dans /places/search/, au meme titre que Lieu
+    et Photon -- dedupliquee et classee dans le meme pipeline."""
+
+    def setUp(self):
+        patcher_photon(self, rechercher=[])
+
+    def test_ville_correspondante_apparait_avec_sa_source(self):
+        creer_ville('Douala', 4.0483, 9.7043, type='city', population=2_000_000)
+        reponse = self.client.get(reverse('places:recherche'), {'q': 'Douala'})
+        sources = {(r['label'], r['source']) for r in reponse.json()}
+        self.assertIn(('Douala', 'ville'), sources)
+
+    def test_ville_dedupliquee_avec_un_lieu_du_meme_nom(self):
+        creer_lieu('Douala', 4.0483, 9.7043)
+        creer_ville('Douala', 4.0483, 9.7043, type='city')
+        reponse = self.client.get(reverse('places:recherche'), {'q': 'Douala'})
+        corps = reponse.json()
+        self.assertEqual(sum(1 for r in corps if r['label'] == 'Douala'), 1)
+        self.assertEqual(corps[0]['source'], 'local')  # Lieu passe en premier dans la fusion
+
+    def test_ville_dedupliquee_avec_un_resultat_photon(self):
+        patcher_photon(self, rechercher=[_resultat_photon_factice('Douala')])
+        creer_ville('Douala', 4.0483, 9.7043, type='city')
+        reponse = self.client.get(reverse('places:recherche'), {'q': 'Douala'})
+        corps = reponse.json()
+        self.assertEqual(sum(1 for r in corps if r['label'] == 'Douala'), 1)
+        self.assertEqual(corps[0]['source'], 'ville')  # Ville passe avant Photon dans la fusion
+
+    def test_ville_avec_position_annote_la_distance(self):
+        creer_ville('Douala', 4.0483, 9.7043, type='city')
+        reponse = self.client.get(reverse('places:recherche'), {'q': 'Douala', 'lat': '4.05', 'lon': '9.70'})
+        resultats = reponse.json()
+        self.assertIsInstance(resultats[0]['distance_m'], (int, float))
+
+    def test_plafond_villes_applique(self):
+        for i in range(LIMITE_VILLES + 3):
+            creer_ville(f'Doualaville{i}', 4.05 + i * 0.01, 9.70, type='village')
+        reponse = self.client.get(reverse('places:recherche'), {'q': 'Doualaville'})
+        sources_ville = [r for r in reponse.json() if r['source'] == 'ville']
+        self.assertEqual(len(sources_ville), LIMITE_VILLES)
+
+
 class InverseNominatimTests(TestCase):
     def setUp(self):
         self.palais = creer_lieu('Palais des Congres', 3.8690, 11.5174, ville='Yaounde')
@@ -437,3 +492,66 @@ class DisjoncteurPhotonTests(TestCase):
         self.assertEqual(len(resultats), 1)
         self.assertEqual(resultats[0]['label'], 'Marche Central')
         self.assertIsNone(cache.get(CLE_ECHECS_PHOTON))
+
+
+class ImportVillesGpkgTests(TestCase):
+    """La commande passe par ogr2ogr (subprocess) plutot que de decoder le
+    binaire GeoPackage -- simule ici en interceptant l'appel et en ecrivant
+    le CSV attendu au chemin temporaire que la commande lui passe, pas
+    besoin d'un vrai fichier .gpkg pour ces tests."""
+
+    def _simuler_ogr2ogr(self, contenu_csv):
+        def _side_effect(args, **kwargs):
+            chemin_tmp = args[3]  # ['ogr2ogr', '-f', 'CSV', <tmp.name>, chemin, couche, ...]
+            with open(chemin_tmp, 'w', encoding='utf-8') as f:
+                f.write(contenu_csv)
+            return Mock(returncode=0, stderr='')
+        return _side_effect
+
+    def test_importe_les_villes_du_csv(self):
+        contenu = (
+            'X,Y,osm_id,code,fclass,population,name\n'
+            '9.7043,4.0483,"111",1001,city,2000000,Douala\n'
+            '11.5167,3.8667,"222",1001,city,1817524,Yaound\xe9\n'
+        )
+        with patch(
+            'places.management.commands.import_villes_gpkg.subprocess.run',
+            side_effect=self._simuler_ogr2ogr(contenu),
+        ):
+            call_command('import_villes_gpkg', 'fake.gpkg')
+
+        self.assertEqual(Ville.objects.count(), 2)
+        douala = Ville.objects.get(osm_id=111)
+        self.assertEqual(douala.nom, 'Douala')
+        self.assertEqual(douala.nom_normalise, 'douala')
+        self.assertEqual(douala.type, 'city')
+        self.assertEqual(douala.population, 2000000)
+        self.assertAlmostEqual(douala.position.x, 9.7043)
+        self.assertAlmostEqual(douala.position.y, 4.0483)
+
+    def test_lignes_sans_nom_ignorees(self):
+        contenu = 'X,Y,osm_id,code,fclass,population,name\n9.7043,4.0483,"111",1050,locality,0,\n'
+        with patch(
+            'places.management.commands.import_villes_gpkg.subprocess.run',
+            side_effect=self._simuler_ogr2ogr(contenu),
+        ):
+            call_command('import_villes_gpkg', 'fake.gpkg')
+        self.assertEqual(Ville.objects.count(), 0)
+
+    def test_reimport_met_a_jour_plutot_que_dupliquer(self):
+        contenu = 'X,Y,osm_id,code,fclass,population,name\n9.7043,4.0483,"111",1001,city,2000000,Douala\n'
+        with patch(
+            'places.management.commands.import_villes_gpkg.subprocess.run',
+            side_effect=self._simuler_ogr2ogr(contenu),
+        ):
+            call_command('import_villes_gpkg', 'fake.gpkg')
+            call_command('import_villes_gpkg', 'fake.gpkg')
+        self.assertEqual(Ville.objects.count(), 1)
+
+    def test_echec_ogr2ogr_leve_commanderror(self):
+        with patch(
+            'places.management.commands.import_villes_gpkg.subprocess.run',
+            return_value=Mock(returncode=1, stderr='fichier introuvable'),
+        ):
+            with self.assertRaises(CommandError):
+                call_command('import_villes_gpkg', 'fake.gpkg')

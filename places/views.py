@@ -21,7 +21,7 @@ from rest_framework.views import APIView
 
 from accounts.serializers import MessageSerializer
 
-from .models import AdresseEnregistree, Lieu, RechercheRecente, StatutLieu
+from .models import AdresseEnregistree, Lieu, RechercheRecente, StatutLieu, Ville
 from .serializers import (
     AdresseEnregistreeSerializer,
     LieuDetailSerializer,
@@ -38,6 +38,10 @@ from .utils import normaliser
 # 0.25 coupe le bruit sans perdre les correspondances partielles legitimes.
 SEUIL_SIMILARITE = 0.25
 LIMITE_LOCALE = 12  # reserve toujours au moins 8 places a Nominatim sur les 20
+# Plafond distinct et volontairement bas : une ville est une suggestion large
+# (toute une agglomeration), pas un lieu precis -- ne doit pas noyer des
+# correspondances Lieu/Photon plus specifiques si plusieurs villes matchent.
+LIMITE_VILLES = 3
 LIMITE_TOTALE = 20
 RAYON_INVERSE_M = 50
 NB_RECHERCHES_RECENTES_MAX = 10
@@ -47,8 +51,11 @@ NB_RECHERCHES_RECENTES_MAX = 10
     tags=['Places'],
     summary='Rechercher un lieu (autocompletion)',
     description=(
-        "Trigram local (nom_normalise) fusionne avec Photon (P2b) -- source='local'|'photon' "
-        'par resultat. Photon, pas Nominatim, pour la recherche : autocompletion rapide ; '
+        "Trois sources fusionnees -- source='local'|'ville'|'photon' par resultat : "
+        'trigram sur Lieu (nom_normalise), trigram sur le referentiel Ville '
+        '(villes/villages du Cameroun, cf. import_villes_gpkg -- plafonne bas, '
+        'une ville est une suggestion large, pas un lieu precis), puis Photon (P2b). '
+        'Photon, pas Nominatim, pour la recherche : autocompletion rapide ; '
         "Nominatim reste dedie au geocodage inverse (voir /places/reverse/). "
         'lat/lon, si fournis, influencent uniquement le classement -- jamais un filtre '
         "qui exclurait un resultat pertinent situe loin de l'utilisateur."
@@ -62,7 +69,8 @@ NB_RECHERCHES_RECENTES_MAX = 10
 )
 class RechercheView(APIView):
     """GET /api/places/search/?q=&lat=&lon= : trigram local (nom_normalise)
-    fusionne avec Photon (P2b) -- source='local'|'photon' par resultat.
+    sur Lieu, trigram sur Ville (referentiel villes/villages, plafonne bas),
+    fusionne avec Photon (P2b) -- source='local'|'ville'|'photon' par resultat.
     Photon, pas Nominatim, pour la recherche : c'est son role (autocompletion
     rapide) ; Nominatim reste dedie a l'inverse (InverseView), le seul des
     deux a exposer un endpoint de geocodage inverse.
@@ -102,6 +110,8 @@ class RechercheView(APIView):
         resultats_locaux = LieuRechercheSerializer(requete[:LIMITE_LOCALE], many=True).data
         noms_vus = {normaliser(r['label']) for r in resultats_locaux}
 
+        resultats_locaux += self._chercher_villes(q, position, noms_vus)
+
         # Deduplique aussi entre resultats externes : une rue mappee en
         # plusieurs troncons OSM (donc plusieurs osm_id) revient sinon comme
         # autant de doublons portant exactement le meme nom affiche.
@@ -129,6 +139,40 @@ class RechercheView(APIView):
 
         fusion = sorted(resultats_locaux + resultats_externes, key=cle_tri)
         return Response(fusion[:LIMITE_TOTALE])
+
+    def _chercher_villes(self, q, position, noms_vus):
+        """Meme logique que la requete Lieu ci-dessus (trigram sur
+        nom_normalise, seuil partage), plafond distinct et bas
+        (LIMITE_VILLES) -- une ville est une suggestion large (toute une
+        agglomeration), pas un lieu precis. noms_vus est mute directement :
+        les resultats externes (Photon) doivent eviter ces noms aussi."""
+        requete = Ville.objects.annotate(
+            similarite=TrigramSimilarity('nom_normalise', normaliser(q))
+        ).filter(similarite__gt=SEUIL_SIMILARITE)
+
+        if position is not None:
+            point = Point(position[1], position[0], srid=4326)
+            requete = requete.annotate(distance=Distance('position', point)).order_by('-similarite', 'distance')
+        else:
+            requete = requete.order_by('-similarite', '-population')
+
+        resultats = []
+        for ville in requete[:LIMITE_VILLES]:
+            nom = normaliser(ville.nom)
+            if nom in noms_vus:
+                continue
+            noms_vus.add(nom)
+            resultats.append({
+                'id': f'ville:{ville.id}',
+                'label': ville.nom,
+                'sublabel': '',
+                'category': ville.type,
+                'lat': ville.position.y,
+                'lon': ville.position.x,
+                'distance_m': ville.distance.m if position is not None else None,
+                'source': 'ville',
+            })
+        return resultats
 
 
 @extend_schema(

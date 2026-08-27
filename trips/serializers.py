@@ -22,6 +22,15 @@ class PointEvitementSerializer(serializers.Serializer):
 class CalculItineraireSerializer(serializers.Serializer):
     origin_lat = serializers.FloatField(source='origine_lat')
     origin_lon = serializers.FloatField(source='origine_lon')
+    origin_heading = serializers.IntegerField(
+        required=False, allow_null=True, min_value=0, max_value=359, default=None, source='cap_origine',
+        help_text=(
+            'Cap du vehicule au point de depart (degres, 0-359 -- ex. telemetrie recente). '
+            "Sans lui, Valhalla peut choisir l'arete routiere la plus proche dans le mauvais "
+            "sens de circulation et faire demarrer l'itineraire par un demi-tour, typiquement "
+            'sur une voie a sens unique ou une chaussee separee.'
+        ),
+    )
     destination_lat = serializers.FloatField()
     destination_lon = serializers.FloatField()
     avoid = PointEvitementSerializer(

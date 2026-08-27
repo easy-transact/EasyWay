@@ -114,10 +114,12 @@ class ClientFactice(ClientRoutage):
     def __init__(self):
         self.appels = 0
         self.dernieres_options = None
+        self.dernier_cap_origine = None
 
-    def calculer_itineraires(self, depart, arrivee, options):
+    def calculer_itineraires(self, depart, arrivee, options, cap_origine=None):
         self.appels += 1
         self.dernieres_options = options
+        self.dernier_cap_origine = cap_origine
         return [trip_factice()['trip']]
 
     def replier(self, depart, arrivee):
@@ -225,6 +227,58 @@ class ServiceItineraireTests(TestCase):
 
         self.assertEqual(client.appels, 2)  # deux entrees de cache distinctes, pas un hit sur la premiere
 
+    def test_cap_origine_transmis_au_client(self):
+        client = ClientFactice()
+        service = ServiceItineraire(client=client)
+        service.calculer((4.0483, 9.7043), (4.0469, 9.6970), self.utilisateur, cap_origine=90)
+        self.assertEqual(client.dernier_cap_origine, 90)
+
+    def test_sans_cap_origine_transmet_none(self):
+        client = ClientFactice()
+        service = ServiceItineraire(client=client)
+        service.calculer((4.0483, 9.7043), (4.0469, 9.6970), self.utilisateur)
+        self.assertIsNone(client.dernier_cap_origine)
+
+    def test_cap_origine_differencie_la_cle_de_cache(self):
+        client = ClientFactice()
+        service = ServiceItineraire(client=client)
+        depart, arrivee = (4.0483, 9.7043), (4.0469, 9.6970)
+
+        service.calculer(depart, arrivee, self.utilisateur)
+        service.calculer(depart, arrivee, self.utilisateur, cap_origine=90)
+
+        self.assertEqual(client.appels, 2)
+
+
+class CapOrigineValhallaTests(TestCase):
+    def setUp(self):
+        cache.clear()
+
+    def _reponse(self):
+        reponse_simulee = Mock(status_code=200)
+        reponse_simulee.json.return_value = trip_factice()
+        reponse_simulee.raise_for_status = lambda: None
+        return reponse_simulee
+
+    def test_cap_origine_ajoute_heading_sur_la_premiere_location(self):
+        client = ClientValhalla()
+        with patch(
+            'trips.services.client_valhalla.requests.post', return_value=self._reponse()
+        ) as post_simule:
+            client.calculer_itineraires((4.0, 9.7), (4.01, 9.71), {'costing': 'auto'}, cap_origine=90)
+        locations = post_simule.call_args.kwargs['json']['locations']
+        self.assertEqual(locations[0]['heading'], 90)
+        self.assertNotIn('heading', locations[1])
+
+    def test_sans_cap_origine_pas_de_heading(self):
+        client = ClientValhalla()
+        with patch(
+            'trips.services.client_valhalla.requests.post', return_value=self._reponse()
+        ) as post_simule:
+            client.calculer_itineraires((4.0, 9.7), (4.01, 9.71), {'costing': 'auto'})
+        locations = post_simule.call_args.kwargs['json']['locations']
+        self.assertNotIn('heading', locations[0])
+
 
 class DisjoncteurValhallaTests(TestCase):
     def setUp(self):
@@ -267,6 +321,18 @@ class DisjoncteurValhallaTests(TestCase):
         self.assertGreater(candidats[0]['distance'], 0)
 
 
+def _arete_factice(correlated_lat=4.0, correlated_lon=9.7, destination_only=False, use='road'):
+    return {
+        'correlated_lat': correlated_lat,
+        'correlated_lon': correlated_lon,
+        'way_id': 1,
+        'edge': {
+            'destination_only': destination_only,
+            'classification': {'use': use},
+        },
+    }
+
+
 class ClientLocateTests(TestCase):
     def setUp(self):
         cache.clear()
@@ -278,16 +344,32 @@ class ClientLocateTests(TestCase):
         return reponse_simulee
 
     def test_distance_calculee_depuis_le_point_correle(self):
-        reponse_simulee = self._reponse([{'correlated_lat': 4.0, 'correlated_lon': 9.7, 'way_id': 1}])
+        reponse_simulee = self._reponse([_arete_factice(4.0, 9.7)])
         with patch('trips.services.client_locate.requests.post', return_value=reponse_simulee):
-            distance = client_locate.distance_a_la_route_m(4.0, 9.7)
-        self.assertEqual(distance, 0)
+            arete = client_locate.localiser(4.0, 9.7)
+        self.assertEqual(arete['distance_m'], 0)
+        self.assertEqual((arete['lat'], arete['lon']), (4.0, 9.7))
+
+    def test_expose_destination_only_et_use(self):
+        reponse_simulee = self._reponse([_arete_factice(destination_only=True, use='driveway')])
+        with patch('trips.services.client_locate.requests.post', return_value=reponse_simulee):
+            arete = client_locate.localiser(4.0, 9.7)
+        self.assertTrue(arete['destination_only'])
+        self.assertEqual(arete['use'], 'driveway')
+
+    def test_requete_en_mode_verbose(self):
+        # verbose=True est necessaire pour recevoir edge.classification/
+        # destination_only -- sans ca /locate ne renvoie que correlated_lat/lon.
+        reponse_simulee = self._reponse([_arete_factice()])
+        with patch('trips.services.client_locate.requests.post', return_value=reponse_simulee) as post_simule:
+            client_locate.localiser(4.0, 9.7)
+        self.assertTrue(post_simule.call_args.kwargs['json']['verbose'])
 
     def test_aucune_arete_retourne_none(self):
         reponse_simulee = self._reponse([])
         with patch('trips.services.client_locate.requests.post', return_value=reponse_simulee):
-            distance = client_locate.distance_a_la_route_m(4.0, 9.7)
-        self.assertIsNone(distance)
+            arete = client_locate.localiser(4.0, 9.7)
+        self.assertIsNone(arete)
 
     def test_panne_reseau_leve_erreurlocate(self):
         with patch(
@@ -295,7 +377,7 @@ class ClientLocateTests(TestCase):
             side_effect=requests.exceptions.ConnectionError('down'),
         ):
             with self.assertRaises(client_locate.ErreurLocate):
-                client_locate.distance_a_la_route_m(4.0, 9.7)
+                client_locate.localiser(4.0, 9.7)
 
     def test_disjoncteur_partage_avec_valhalla(self):
         # Le disjoncteur est partage (meme conteneur) : des echecs de
@@ -310,7 +392,7 @@ class ClientLocateTests(TestCase):
 
         with patch('trips.services.client_locate.requests.post') as post_simule:
             with self.assertRaises(DisjoncteurOuvert):
-                client_locate.distance_a_la_route_m(4.0, 9.7)
+                client_locate.localiser(4.0, 9.7)
             post_simule.assert_not_called()
 
 
@@ -377,6 +459,50 @@ class TrajetApiTests(TestCase):
         self.assertEqual(reponse.status_code, 200)
         options_recues = calculer_simule.call_args.kwargs.get('options') or calculer_simule.call_args.args[2]
         self.assertEqual(options_recues['exclude_locations'], [{'lat': 4.05, 'lon': 9.70}])
+
+    def test_calcul_itineraire_avec_origin_heading_atteint_valhalla(self):
+        with patch(
+            'trips.services.client_valhalla.ClientValhalla.calculer_itineraires',
+        ) as calculer_simule:
+            calculer_simule.return_value = [trip_factice()['trip']]
+            reponse = self.client.post(
+                reverse('trips:calculer-itineraire'),
+                {
+                    'origin_lat': 4.0483, 'origin_lon': 9.7043,
+                    'destination_lat': 4.0469, 'destination_lon': 9.6970,
+                    'origin_heading': 90,
+                },
+                content_type='application/json',
+                **self.jetons,
+            )
+        self.assertEqual(reponse.status_code, 200)
+        self.assertEqual(calculer_simule.call_args.kwargs['cap_origine'], 90)
+
+    def test_calcul_itineraire_sans_origin_heading_transmet_none(self):
+        with patch(
+            'trips.services.client_valhalla.ClientValhalla.calculer_itineraires',
+        ) as calculer_simule:
+            calculer_simule.return_value = [trip_factice()['trip']]
+            self.client.post(
+                reverse('trips:calculer-itineraire'),
+                {'origin_lat': 4.0483, 'origin_lon': 9.7043, 'destination_lat': 4.0469, 'destination_lon': 9.6970},
+                content_type='application/json',
+                **self.jetons,
+            )
+        self.assertIsNone(calculer_simule.call_args.kwargs['cap_origine'])
+
+    def test_origin_heading_hors_bornes_rejete(self):
+        reponse = self.client.post(
+            reverse('trips:calculer-itineraire'),
+            {
+                'origin_lat': 4.0483, 'origin_lon': 9.7043,
+                'destination_lat': 4.0469, 'destination_lon': 9.6970,
+                'origin_heading': 360,
+            },
+            content_type='application/json',
+            **self.jetons,
+        )
+        self.assertEqual(reponse.status_code, 400)
 
     def test_calcul_itineraire_non_authentifie_rejete(self):
         reponse = self.client.post(

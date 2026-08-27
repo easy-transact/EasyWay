@@ -1,14 +1,22 @@
 """
 ClientLocate : appelle /locate (position -> arete du graphe routier la plus
-proche), pas /route ni /trace_attributes -- meme conteneur Valhalla, partage
-son disjoncteur (disjoncteur.py) : si Valhalla est en panne, tous les clients
-de ce module le savent en meme temps.
+proche), en mode verbose (classification de l'arete) -- pas /route ni
+/trace_attributes -- meme conteneur Valhalla, partage son disjoncteur
+(disjoncteur.py) : si Valhalla est en panne, tous les clients de ce module
+le savent en meme temps.
 
-Usage principal : verifier qu'un signalement d'incident est bien sur/pres
-d'une route (cf. community/services.py) plutot qu'a l'interieur d'un
-batiment ou d'un parc. Valhalla renvoie toujours l'arete la plus proche,
-aussi loin soit-elle -- /locate ne leve jamais d'erreur "rien trouve", c'est
-a l'appelant de juger la distance retournee.
+Usage principal : verifier qu'un signalement d'incident est bien sur une
+route publique (cf. community/services.py). Deux pieges trouves en
+verification live (screenshot frontend, marqueurs "flottant" hors de la
+route) :
+  - Valhalla renvoie toujours l'arete la plus proche, aussi loin ou non
+    pertinente soit-elle -- y compris une allee privee/un parking
+    (classification.use="driveway", destination_only=True) a quelques
+    metres d'une vraie route. La distance seule ne suffit pas a rejeter ca.
+  - Meme sur un bon appariement, le point brut soumis (GPS client ou choix
+    Nominatim) peut etre a 10-20m du centre de la route -- visible a
+    l'affichage carte. D'ou correlated_lat/lon renvoyes ici : l'appelant
+    cale la position stockee dessus plutot que de garder le point brut.
 """
 
 import math
@@ -27,18 +35,22 @@ class ErreurLocate(Exception):
     meme principe que ClientNominatim/ClientMeili."""
 
 
-def distance_a_la_route_m(lat: float, lon: float) -> float | None:
-    """Distance (metres) entre (lat, lon) et l'arete routiere connue de
-    Valhalla la plus proche. None si Valhalla ne connait aucune route dans
-    la zone (tres rare -- meme un point isole trouve generalement l'arete
-    la moins lointaine). Leve ErreurLocate/DisjoncteurOuvert si Valhalla est
-    indisponible -- a l'appelant de decider du repli."""
+def localiser(lat: float, lon: float) -> dict | None:
+    """None si Valhalla ne connait aucune route dans la zone (tres rare --
+    meme un point isole trouve generalement l'arete la moins lointaine).
+    Sinon {'distance_m', 'lat', 'lon', 'destination_only', 'use'} pour
+    l'arete routiere connue de Valhalla la plus proche : distance_m et
+    lat/lon du point correle sur cette arete, destination_only (True pour
+    une allee privee/un parking -- jamais une route publique) et use
+    (classification Valhalla, ex. 'road', 'driveway', 'footway'). Leve
+    ErreurLocate/DisjoncteurOuvert si Valhalla est indisponible -- a
+    l'appelant de decider du repli."""
     disjoncteur.verifier()
 
     try:
         reponse = requests.post(
             f'{settings.VALHALLA_URL}/locate',
-            json={'locations': [{'lat': lat, 'lon': lon}], 'costing': 'auto'},
+            json={'locations': [{'lat': lat, 'lon': lon}], 'costing': 'auto', 'verbose': True},
             timeout=TIMEOUT_S,
         )
         reponse.raise_for_status()
@@ -52,7 +64,13 @@ def distance_a_la_route_m(lat: float, lon: float) -> float | None:
         return None
 
     arete = resultats[0]['edges'][0]
-    return _distance_haversine_m(lat, lon, arete['correlated_lat'], arete['correlated_lon'])
+    return {
+        'distance_m': _distance_haversine_m(lat, lon, arete['correlated_lat'], arete['correlated_lon']),
+        'lat': arete['correlated_lat'],
+        'lon': arete['correlated_lon'],
+        'destination_only': arete['edge']['destination_only'],
+        'use': arete['edge']['classification']['use'],
+    }
 
 
 def _distance_haversine_m(lat1, lon1, lat2, lon2):

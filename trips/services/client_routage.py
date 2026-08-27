@@ -12,9 +12,14 @@ class ClientRoutage(ABC):
     reponse degradee et laisser ServiceItineraire planter en silence."""
 
     @abstractmethod
-    def calculer_itineraires(self, depart: tuple[float, float], arrivee: tuple[float, float], options: dict) -> list[dict]:
-        """depart/arrivee : (lat, lon). Retourne une liste de trips au format
-        Valhalla (summary.length/time, legs[].shape, legs[].maneuvers)."""
+    def calculer_itineraires(
+        self, depart: tuple[float, float], arrivee: tuple[float, float], options: dict,
+        cap_origine: int | None = None,
+    ) -> list[dict]:
+        """depart/arrivee : (lat, lon). cap_origine (0-359, optionnel) : cap
+        du vehicule au depart, a transmettre comme heading sur la premiere
+        location si le moteur le supporte. Retourne une liste de trips au
+        format Valhalla (summary.length/time, legs[].shape, legs[].maneuvers)."""
 
     @abstractmethod
     def replier(self, depart: tuple[float, float], arrivee: tuple[float, float]) -> list[dict]:

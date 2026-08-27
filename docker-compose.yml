@@ -125,7 +125,93 @@ services:
       retries: 60
       start_period: 30m  # nominatim-import avant le premier demarrage du serveur
 
+  # App Django (Dockerfile a la racine). Ne depend au demarrage que de
+  # db/redis (migrate, cache, sessions) -- pas de valhalla/nominatim/photon :
+  # tout le code qui les appelle degrade deja gracieusement (disjoncteurs,
+  # cf. trips/services/disjoncteur.py) quand ils sont indisponibles, les
+  # attendre ici bloquerait web potentiellement 45 min (premier import
+  # Nominatim) pour rien. Healthcheck : celui deja defini dans le Dockerfile,
+  # pas duplique ici.
+  web:
+    build: .
+    container_name: web
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      # Alias reseau internes au reseau docker-compose (nom de service) --
+      # pas les URL de .env, ecrites pour un Django qui tourne sur l'hote et
+      # rejoint ce reseau par les ports publies, different d'ici ou web est
+      # lui-meme un conteneur du reseau.
+      DATABASE_URL: postgis://easyway:easyway@db:5432/easyway
+      REDIS_URL: redis://redis:6379/1
+      CELERY_BROKER_URL: redis://redis:6379/2
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      TELEMETRIE_REDIS_URL: redis://redis:6379/3
+      VALHALLA_URL: http://valhalla:8002
+      NOMINATIM_URL: http://nominatim:8080
+      PHOTON_URL: http://photon:2322
+    volumes:
+      - static_data:/app/staticfiles
+      - media_data:/app/media
+
+  # Meme image que web (Dockerfile a la racine), commande differente.
+  # entrypoint: [] court-circuite docker/entrypoint.sh (migrate/collectstatic) :
+  # web s'en charge deja, le refaire ici serait inutile et potentiellement
+  # concurrent au demarrage si les deux services migraient en meme temps.
+  celery_worker:
+    build: .
+    container_name: celery_worker
+    restart: unless-stopped
+    entrypoint: []
+    command: celery -A config worker -l info
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgis://easyway:easyway@db:5432/easyway
+      REDIS_URL: redis://redis:6379/1
+      CELERY_BROKER_URL: redis://redis:6379/2
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      TELEMETRIE_REDIS_URL: redis://redis:6379/3
+      VALHALLA_URL: http://valhalla:8002
+      NOMINATIM_URL: http://nominatim:8080
+      PHOTON_URL: http://photon:2322
+
+  celery_beat:
+    build: .
+    container_name: celery_beat
+    restart: unless-stopped
+    entrypoint: []
+    command: celery -A config beat -l info
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgis://easyway:easyway@db:5432/easyway
+      REDIS_URL: redis://redis:6379/1
+      CELERY_BROKER_URL: redis://redis:6379/2
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      TELEMETRIE_REDIS_URL: redis://redis:6379/3
+      VALHALLA_URL: http://valhalla:8002
+      NOMINATIM_URL: http://nominatim:8080
+      PHOTON_URL: http://photon:2322
+
 volumes:
   postgres_data:
   nominatim_data:
   photon_data:
+  static_data:
+  media_data:

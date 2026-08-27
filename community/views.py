@@ -316,8 +316,11 @@ class IncidentsParVilleView(APIView):
         "incident existant a proximite, 'duplicate_of_existing' vaut true et le "
         "statut HTTP est 200 au lieu de 201. La position est verifiee contre le "
         "graphe routier de Valhalla (/locate) : trop loin de toute route connue "
-        "(> 50m), le signalement est rejete en 400 -- verification desactivee "
-        "sans bloquer le signalement si Valhalla est indisponible."
+        "(> 50m) ou sur une allee privee/un parking (destination_only), le "
+        "signalement est rejete en 400 -- verification desactivee sans bloquer "
+        "le signalement si Valhalla est indisponible. La position enregistree "
+        "(lat/lon de la reponse) est calee sur l'arete routiere trouvee, pas "
+        "forcement identique au point soumis."
     ),
     parameters=[
         OpenApiParameter(
@@ -375,7 +378,17 @@ class IncidentCreationView(APIView):
 
 
 @extend_schema_view(
-    get=extend_schema(tags=['Incidents'], summary="Detail d'un incident", responses={200: IncidentSerializer}),
+    get=extend_schema(
+        tags=['Incidents'],
+        summary="Detail d'un incident",
+        description=(
+            "404 si l'incident n'est plus actif/en attente ou si sa periode de "
+            "validite est expiree -- meme regle que /nearby/, /along-route/ et "
+            "/city/, pour qu'aucun endpoint ne puisse faire reapparaitre un "
+            "signalement que ces listes ont deja exclu."
+        ),
+        responses={200: IncidentSerializer},
+    ),
     delete=extend_schema(
         tags=['Incidents'],
         summary="Retirer son propre signalement",
@@ -387,7 +400,12 @@ class IncidentDetailView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request, id):
-        incident = get_object_or_404(Incident, id=id)
+        incident = get_object_or_404(
+            Incident,
+            id=id,
+            statut__in=[StatutIncident.ACTIF, StatutIncident.EN_ATTENTE],
+            expire_le__gt=timezone.now(),
+        )
         return Response(IncidentSerializer(incident).data)
 
     def delete(self, request, id):

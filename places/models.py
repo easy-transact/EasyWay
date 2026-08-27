@@ -175,3 +175,35 @@ class RechercheRecente(models.Model):
 
     def __str__(self):
         return self.libelle
+
+
+class Ville(models.Model):
+    """Referentiel de villes/villages du Cameroun, importe depuis la couche
+    gis_osm_places_free d'un export GeoPackage Geofabrik (cf. management
+    command import_villes_gpkg) -- cette couche pre-agregee n'existe pas dans
+    l'extrait .osm.pbf utilise par seed_places/Valhalla, d'ou une source et
+    un import distincts. Ne remplace pas Lieu.ville (texte libre par lieu,
+    issu de Nominatim/OSM) : sert de liste canonique pour normaliser/valider
+    des recherches par ville (ex. GET /api/incidents/city/)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    osm_id = models.BigIntegerField(unique=True)
+
+    nom = models.CharField(max_length=255)
+    nom_normalise = models.CharField(max_length=255, db_index=True)
+    # Valeurs Geofabrik telles quelles (city/town/village/hamlet/locality/
+    # suburb/national_capital/...) -- vocabulaire externe, pas un choix de
+    # domaine controle par cette appli.
+    type = models.CharField(max_length=30)
+    population = models.IntegerField(default=0)
+    position = gis_models.PointField(srid=4326, geography=True)
+
+    class Meta:
+        db_table = 'ville'
+        indexes = [
+            gis_models.Index(fields=['position']),
+            GinIndex(fields=['nom_normalise'], name='ville_nom_normalise_trgm', opclasses=['gin_trgm_ops']),
+        ]
+
+    def __str__(self):
+        return self.nom

@@ -1,0 +1,36 @@
+# Secrets/etat local -- jamais dans l'image (config vient des variables
+# d'environnement du conteneur, cf. docker-compose.yml/deploiement).
+.env
+.env.*
+!.env.example
+
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Regeneres au demarrage du conteneur (docker/entrypoint.sh), jamais a
+# copier depuis l'hote -- un STATIC_ROOT/media local perimes ne doit pas
+# ecraser silencieusement ce que collectstatic produirait.
+staticfiles/
+media/
+
+db.sqlite3
+*.sqlite3
+
+.git/
+.gitignore
+
+# Extraits OSM/tuiles Valhalla : plusieurs centaines de Mo a quelques Go,
+# utilises par les services valhalla/nominatim (docker-compose.yml), jamais
+# par l'image Django elle-meme.
+valhalla/custom_files/*
+!valhalla/custom_files/.gitkeep
+cameroon-260825-free.gpkg/
+
+# Frontend de test, deploye/servi separement.
+test-ui/node_modules/
+test-ui/dist/
+
+*.md

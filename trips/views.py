@@ -39,7 +39,9 @@ DUREE_PERIODE = {
         "renvoie l'itineraire choisi tel quel a POST /api/trips/ pour le faire persister. "
         "'avoid' (optionnel) exclut reellement les points donnes du graphe de routage "
         "(ex. position d'un incident) -- Valhalla replanifie autour, ce n'est pas un "
-        'simple reclassement des candidats existants.'
+        "simple reclassement des candidats existants. 'origin_heading' (optionnel) evite "
+        "qu'un recalcul en cours de route demarre par un demi-tour immediat sur une voie "
+        'a sens unique ou une chaussee separee.'
     ),
     request=CalculItineraireSerializer,
     responses={200: ItineraireCandidatSerializer(many=True)},
@@ -58,6 +60,7 @@ class CalculItineraireView(APIView):
             arrivee=(donnees['destination_lat'], donnees['destination_lon']),
             utilisateur=request.user,
             eviter=[(p['lat'], p['lon']) for p in donnees['eviter']],
+            cap_origine=donnees['cap_origine'],
         )
         return Response(ItineraireCandidatSerializer(candidats, many=True).data)
 

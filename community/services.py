@@ -8,6 +8,7 @@ verrouillee.
 import h3
 from django.conf import settings
 from django.contrib.gis.db.models.functions import Distance
+from django.contrib.gis.geos import Point
 from django.contrib.gis.measure import D
 from django.db import transaction
 from django.utils import timezone
@@ -43,7 +44,9 @@ class QuotaDepasse(Exception):
 
 class PositionHorsRoute(Exception):
     """Leve quand la position du signalement est trop loin de toute route
-    connue de Valhalla (RAYON_MAX_HORS_ROUTE_M)."""
+    connue de Valhalla (RAYON_MAX_HORS_ROUTE_M), ou quand l'arete la plus
+    proche est une allee privee/un parking (destination_only) -- jamais une
+    route publique, meme a distance nulle."""
 
 
 class ServiceIncident:
@@ -51,7 +54,9 @@ class ServiceIncident:
         """Retourne (incident, est_doublon). est_doublon=True signifie qu'aucun
         nouvel Incident n'a ete cree -- le signalement a corrobore un existant."""
         self._verifier_quota(utilisateur)
-        self._verifier_position_routiere(position)
+        # Position calee sur l'arete routiere trouvee (cf. _verifier_position_routiere)
+        # si la verification reussit -- sinon garde le point brut soumis.
+        position = self._verifier_position_routiere(position) or position
 
         with transaction.atomic():
             doublon = self._chercher_doublon(type_incident, position, cap)
@@ -93,17 +98,37 @@ class ServiceIncident:
             raise QuotaDepasse()
 
     def _verifier_position_routiere(self, position):
+        """None si la verification est ignoree (Valhalla indisponible, ou
+        aucune route connue dans la zone) -- l'appelant garde alors le point
+        brut. Sinon la position calee sur l'arete trouvee (correlated_lat/
+        lon) : meme un bon appariement peut avoir quelques metres d'ecart
+        entre le point soumis et le centre reel de la route (precision GPS
+        cote client, ou choix de Nominatim en amont) -- visible a l'affichage
+        carte si on garde le point brut (cf. capture d'ecran frontend, un
+        marqueur "a cote" de la route plutot que dessus)."""
         try:
-            distance = client_locate.distance_a_la_route_m(position.y, position.x)
+            arete = client_locate.localiser(position.y, position.x)
         except (client_locate.ErreurLocate, DisjoncteurOuvert):
             # Meme principe que _nom_voie() : un Valhalla en panne ne doit
             # jamais bloquer un signalement -- on renonce juste a la
             # verification pour cette fois.
-            return
-        if distance is not None and distance > RAYON_MAX_HORS_ROUTE_M:
+            return None
+        if arete is None:
+            return None
+        if arete['destination_only']:
+            # Allee privee/parking (use=driveway typiquement) : Valhalla la
+            # considere routable (on peut y conduire) mais ce n'est jamais
+            # une route publique -- trouve en verification live, un
+            # signalement "radar" s'etait cale sur une allee a 16m d'une
+            # vraie route, jugee la plus proche par simple distance.
             raise PositionHorsRoute(
-                f'Reported position is {round(distance)}m from the nearest known road.'
+                'Reported position matches a private driveway/parking access, not a public road.'
             )
+        if arete['distance_m'] > RAYON_MAX_HORS_ROUTE_M:
+            raise PositionHorsRoute(
+                f"Reported position is {round(arete['distance_m'])}m from the nearest known road."
+            )
+        return Point(arete['lon'], arete['lat'], srid=4326)
 
     def _chercher_doublon(self, type_incident, position, cap):
         # select_for_update() verrouille les candidats pour la duree de la
@@ -113,9 +138,17 @@ class ServiceIncident:
         cellule = h3.latlng_to_cell(position.y, position.x, RESOLUTION_H3_FIN)
         cellules_voisines = [h3.str_to_int(c) for c in h3.grid_disk(cellule, 1)]
 
+        # expire_le__gt en plus du statut : `statut` ne passe a EXPIRE que via
+        # la tache periodique expirer_incidents (jusqu'a 60s de retard, ou
+        # indefiniment si cette tache est en panne) -- sans ce filtre, un
+        # signalement deja perime mais encore marque ACTIF en base peut etre
+        # "corrobore" au lieu qu'un nouveau soit cree, et corroborer() ne fait
+        # que prolonger son expire_le deja passe de 10 minutes plutot que de
+        # le faire repartir de maintenant -- il reste invisible partout.
         candidats = Incident.objects.select_for_update().filter(
             type=type_incident,
             statut__in=[StatutIncident.ACTIF, StatutIncident.EN_ATTENTE],
+            expire_le__gt=timezone.now(),
             cellule_h3_res8__in=cellules_voisines,
         ).annotate(distance=Distance('position', position)).filter(distance__lte=D(m=RAYON_DOUBLON_M))
 

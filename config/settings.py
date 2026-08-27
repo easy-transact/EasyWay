@@ -24,6 +24,23 @@ ALLOWED_HOSTS = env.list('DJANGO_ALLOWED_HOSTS', default=['localhost', '127.0.0.
 # domaine autre que ALLOWED_HOSTS local (ex : tunnel ngrok). Vide par defaut.
 CSRF_TRUSTED_ORIGINS = env.list('CSRF_TRUSTED_ORIGINS', default=[])
 
+if not DEBUG:
+    # Durcissement releve par `manage.py check --deploy` -- desactive en dev
+    # (DEBUG=True) pour ne pas casser le HTTP simple en local/ngrok.
+    SECURE_SSL_REDIRECT = env.bool('SECURE_SSL_REDIRECT', default=True)
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    # Valeur prudente au premier deploiement (1h, pas le 1 an usuel) : HSTS
+    # est mis en cache par le navigateur, une erreur de config HTTPS
+    # deviendrait difficile a corriger rapidement. A augmenter une fois
+    # le HTTPS confirme stable.
+    SECURE_HSTS_SECONDS = env.int('SECURE_HSTS_SECONDS', default=3600)
+    # Suppose un reverse-proxy (nginx/Traefik/LB) qui termine le TLS et
+    # transmet X-Forwarded-Proto -- a verifier avant activation : un proxy
+    # qui ne pose pas cet en-tete (ou qui laisse passer celui du client)
+    # romprait la detection HTTPS, voire ouvrirait une usurpation.
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
 
 # Application definition
 
@@ -52,6 +69,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -274,6 +292,16 @@ TELEMETRIE_REDIS_URL = env('TELEMETRIE_REDIS_URL', default='redis://localhost:63
 # https://docs.djangoproject.com/en/6.1/howto/static-files/
 
 STATIC_URL = 'static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+
+# WhiteNoise : le conteneur Django sert lui-meme son admin/Swagger UI sans
+# nginx/reverse-proxy dedie aux fichiers statiques -- collectstatic (fait par
+# docker/entrypoint-web.sh au demarrage) remplit STATIC_ROOT, WhiteNoise sert
+# depuis la, compresse et hashe les noms de fichiers (cache long terme sur).
+STORAGES = {
+    'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+    'staticfiles': {'BACKEND': 'whitenoise.storage.CompressedManifestStaticFilesStorage'},
+}
 
 # Dev only : FileSystemStorage local. A remplacer par django-storages/S3
 # (ou R2) avant la mise en production.

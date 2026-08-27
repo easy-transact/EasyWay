@@ -49,16 +49,29 @@ def patcher_nominatim_incident(test_case, libelle=None, ville=None):
     test_case.addCleanup(patcheur.stop)
 
 
-def patcher_locate_incident(test_case, distance_m=0, effet_de_bord=None):
-    """Par defaut simule une position sur la route (distance 0m) pour ne pas
-    perturber les tests qui ne portent pas sur cette verification -- cf.
-    patcher_nominatim_incident ci-dessus, meme logique."""
-    patcheur = patch('community.services.client_locate.distance_a_la_route_m')
+def patcher_locate_incident(test_case, distance_m=0, destination_only=False, lat=None, lon=None, effet_de_bord=None):
+    """Par defaut simule une position sur la route (distance 0m, calee sur le
+    meme point que celui teste) pour ne pas perturber les tests qui ne
+    portent pas sur cette verification -- cf. patcher_nominatim_incident
+    ci-dessus, meme logique. distance_m=None simule "aucune route connue
+    dans la zone" (localiser() renvoie None). lat/lon : force le point
+    correle renvoye (sinon identique au point soumis -- pas de correction)."""
+    patcheur = patch('community.services.client_locate.localiser')
     fonction_simulee = patcheur.start()
     if effet_de_bord is not None:
         fonction_simulee.side_effect = effet_de_bord
+    elif distance_m is None:
+        fonction_simulee.return_value = None
     else:
-        fonction_simulee.return_value = distance_m
+        def _repondre(lat_in, lon_in):
+            return {
+                'distance_m': distance_m,
+                'lat': lat_in if lat is None else lat,
+                'lon': lon_in if lon is None else lon,
+                'destination_only': destination_only,
+                'use': 'driveway' if destination_only else 'road',
+            }
+        fonction_simulee.side_effect = _repondre
     test_case.addCleanup(patcheur.stop)
     return fonction_simulee
 
@@ -130,6 +143,25 @@ class ServiceIncidentSignalerTests(TestCase):
         self.assertEqual(Incident.objects.count(), 1)
         self.assertTrue(Vote.objects.filter(incident=existant, votant=auteur2).exists())
 
+    def test_candidat_statut_actif_mais_deja_expire_ne_dedoublonne_pas(self):
+        # Reproduit un cas trouve en verification live : statut='ACTIF' en
+        # base ne veut rien dire si expire_le est deja passe -- la tache
+        # periodique qui le repasserait a EXPIRE n'a pas forcement encore
+        # tourne (jusqu'a 60s de retard, ou plus si elle est en panne).
+        # Corroborer un tel candidat le laisserait invisible partout (son
+        # expire_le resterait dans le passe, +10 minutes ne suffisant pas a
+        # le faire revenir apres maintenant).
+        perime = creer_incident(
+            creer_utilisateur('a@easyway.local'), type_incident=TypeIncident.EMBOUTEILLAGE,
+            expire_le=timezone.now() - timezone.timedelta(minutes=5),
+        )
+        incident, doublon = ServiceIncident().signaler(
+            creer_utilisateur('b@easyway.local'), TypeIncident.EMBOUTEILLAGE, self._point(0.0005, 0.0005)
+        )
+        self.assertFalse(doublon)
+        self.assertNotEqual(incident.id, perime.id)
+        self.assertEqual(Incident.objects.count(), 2)
+
     def test_type_different_ne_dedoublonne_pas(self):
         creer_incident(creer_utilisateur('a@easyway.local'), type_incident=TypeIncident.EMBOUTEILLAGE)
         incident, doublon = ServiceIncident().signaler(
@@ -184,6 +216,34 @@ class ServiceIncidentSignalerTests(TestCase):
         patcher_locate_incident(self, distance_m=None)
         incident, _ = ServiceIncident().signaler(creer_utilisateur(), TypeIncident.EMBOUTEILLAGE, self._point())
         self.assertIsNotNone(incident.id)
+
+    def test_allee_privee_rejetee_meme_a_distance_nulle(self):
+        # Reproduit le cas trouve en verification live : un point cale sur
+        # une allee privee/un parking (destination_only=True) doit etre
+        # rejete, meme si la distance a cette arete est nulle/faible --
+        # la distance seule ne dit rien sur la nature publique de la route.
+        patcher_locate_incident(self, distance_m=0, destination_only=True)
+        with self.assertRaises(PositionHorsRoute):
+            ServiceIncident().signaler(creer_utilisateur(), TypeIncident.EMBOUTEILLAGE, self._point())
+        self.assertEqual(Incident.objects.count(), 0)
+
+    def test_position_calee_sur_larete_routiere_trouvee(self):
+        # Le point stocke n'est pas force le point brut soumis : cale sur
+        # correlated_lat/lon pour que le marqueur tombe exactement sur la
+        # route, pas a quelques metres a cote (cf. capture d'ecran frontend).
+        lat_corrige, lon_corrige = DOUALA_LAT + 0.0001, DOUALA_LON + 0.0001
+        patcher_locate_incident(self, distance_m=15, lat=lat_corrige, lon=lon_corrige)
+        incident, _ = ServiceIncident().signaler(creer_utilisateur(), TypeIncident.EMBOUTEILLAGE, self._point())
+        self.assertAlmostEqual(incident.position.y, lat_corrige, places=6)
+        self.assertAlmostEqual(incident.position.x, lon_corrige, places=6)
+
+    def test_position_gardee_brute_si_verification_ignoree(self):
+        # Valhalla indisponible : la position n'est pas alteree.
+        patcher_locate_incident(self, effet_de_bord=client_locate.ErreurLocate('panne'))
+        point = self._point()
+        incident, _ = ServiceIncident().signaler(creer_utilisateur(), TypeIncident.EMBOUTEILLAGE, point)
+        self.assertEqual(incident.position.y, point.y)
+        self.assertEqual(incident.position.x, point.x)
 
     def test_valhalla_indisponible_ne_bloque_pas_le_signalement(self):
         patcher_locate_incident(self, effet_de_bord=client_locate.ErreurLocate('panne'))
@@ -624,6 +684,27 @@ class IncidentDetailApiTests(TestCase):
     def test_detail_inclut_impact_estime(self):
         reponse = self.client.get(reverse('community:incident-detail', kwargs={'id': self.incident.id}))
         self.assertEqual(reponse.json()['estimated_impact'], 2)
+
+    def test_incident_expire_introuvable(self):
+        # Meme regle que /nearby/, /along-route/, /city/ : un incident dont la
+        # periode de validite est passee ne doit reapparaitre nulle part,
+        # meme via son id direct -- cf. discussion frontend.
+        self.incident.expire_le = timezone.now() - timezone.timedelta(minutes=1)
+        self.incident.save(update_fields=['expire_le'])
+        reponse = self.client.get(reverse('community:incident-detail', kwargs={'id': self.incident.id}))
+        self.assertEqual(reponse.status_code, 404)
+
+    def test_incident_retire_introuvable(self):
+        self.incident.statut = StatutIncident.RETIRE
+        self.incident.save(update_fields=['statut'])
+        reponse = self.client.get(reverse('community:incident-detail', kwargs={'id': self.incident.id}))
+        self.assertEqual(reponse.status_code, 404)
+
+    def test_incident_en_attente_non_expire_visible(self):
+        self.incident.statut = StatutIncident.EN_ATTENTE
+        self.incident.save(update_fields=['statut'])
+        reponse = self.client.get(reverse('community:incident-detail', kwargs={'id': self.incident.id}))
+        self.assertEqual(reponse.status_code, 200)
 
     def test_retrait_par_lauteur(self):
         jetons = connecter(self.client, self.auteur.email)

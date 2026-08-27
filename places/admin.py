@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import AdresseEnregistree, Lieu, RechercheRecente
+from .models import AdresseEnregistree, Lieu, RechercheRecente, Ville
 
 
 @admin.action(description='Approuver les lieux selectionnes')
@@ -25,3 +25,11 @@ class LieuAdmin(admin.ModelAdmin):
 
 admin.site.register(AdresseEnregistree)
 admin.site.register(RechercheRecente)
+
+
+@admin.register(Ville)
+class VilleAdmin(admin.ModelAdmin):
+    list_display = ['nom', 'type', 'population']
+    list_filter = ['type']
+    search_fields = ['nom', 'nom_normalise']
+    ordering = ['-population']
