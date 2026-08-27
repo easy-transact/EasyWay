@@ -145,6 +145,11 @@ services:
     volumes:
       - static_data:/app/staticfiles
       - media_data:/app/media
+      # Lecture seule : donnees de reference pour seed_places/
+      # import_villes_gpkg (one-off, pas besoin en fonctionnement normal --
+      # cf. .pbf deja utilise par valhalla/nominatim, .gpkg pas la par
+      # defaut, a deposer manuellement dans ce dossier avant l'import).
+      - ./valhalla/custom_files:/custom_files:ro
 
   celery_worker:
     build: .
