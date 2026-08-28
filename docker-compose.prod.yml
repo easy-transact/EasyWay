@@ -142,6 +142,10 @@ services:
       VALHALLA_URL: http://valhalla:8002
       NOMINATIM_URL: http://nominatim:8080
       PHOTON_URL: http://photon:2322
+      # Desactive l'envoi d'email tant qu'aucun SMTP n'est configure --
+      # a remplacer par smtp.EmailBackend + variables EMAIL_HOST/PORT/etc.
+      # quand un fournisseur sera en place.
+      EMAIL_BACKEND: django.core.mail.backends.dummy.EmailBackend
     volumes:
       - static_data:/app/staticfiles
       - media_data:/app/media
