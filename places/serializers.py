@@ -130,6 +130,31 @@ class AdresseEnregistreeSerializer(serializers.ModelSerializer):
     def get_position_lon(self, adresse):
         return adresse.position.x
 
+    def validate(self, attrs):
+        request = self.context.get('request')
+        if not request or not request.user:
+            return attrs
+
+        user = request.user
+        libelle = attrs.get('libelle')
+
+        if libelle in [LibelleAdresse.DOMICILE, LibelleAdresse.TRAVAIL]:
+            query = AdresseEnregistree.objects.filter(
+                utilisateur=user,
+                libelle=libelle
+            )
+            if self.instance:
+                query = query.exclude(pk=self.instance.pk)
+
+            if query.exists():
+                # On leve une erreur de validation DRF (HTTP 400) plutot que de
+                # laisser passer et provoquer une IntegrityError en DB (HTTP 500).
+                raise serializers.ValidationError(
+                    {'label': f"An address with the label '{libelle}' already exists for this account."}
+                )
+
+        return attrs
+
     def create(self, validated_data):
         from django.contrib.gis.geos import Point
 
