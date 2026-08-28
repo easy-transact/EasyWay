@@ -12,7 +12,7 @@ from django.core.cache import cache
 
 from accounts.models import TypeVehicule
 
-from ..models import NiveauTrafic
+from ..models import NiveauTrafic, RoadClass
 from . import service_trafic
 from .client_valhalla import ClientValhalla
 
@@ -85,22 +85,32 @@ class ServiceItineraire:
         )
         return 'itineraire:' + hashlib.sha256(brut.encode()).hexdigest()
 
+    # Pattern de detection des routes nationales camerounaises dans les noms
+    # de voies OSM -- couvre : N1, N3, RN4, N-1, Nationale 1, etc.
+    # Intentionnellement large : un faux positif (NATIONALE sur une rue
+    # ordinaire nommee par coincidence) est moins grave qu'un faux negatif
+    # (URBAIN sur la N3 Douala-Yaounde). Repli toujours vers URBAIN.
+    _NATIONALE_RE = __import__('re').compile(
+        r'\b(R?N[-\s]?\d+|[Nn]ationale\s*\d*)\b'
+    )
+
     def _traduire_road_class(self, manoeuvre: dict) -> str:
         """Deduit la classe de route a partir des champs disponibles dans
-        les manoeuvres Valhalla. L'API route ne renvoie pas de road_class
-        direct -- on s'appuie sur :
-          - highway (bool) : present et True uniquement sur autoroute/2x2 voies.
-          - street_names   : les routes nationales camerounaises portent
-            systematiquement un identifiant du type 'N1', 'N3', 'RN4'...
+        les manoeuvres Valhalla. L'API /route ne renvoie pas de road_class
+        direct par manoeuvre -- on s'appuie sur :
+          - highway (bool) : True uniquement sur voies express / 2x2 voies
+            tagguees highway=motorway|motorway_link dans OSM.
+          - street_names   : les nationales camerounaises portent un ref OSM
+            (N3, RN1…) systematiquement remonte dans ce champ par Valhalla.
+        Repli conservateur vers URBAIN pour toute valeur non reconnue --
+        le client ne doit jamais annoncer une limite superieure par defaut.
         """
         if manoeuvre.get('highway'):
-            return 'AUTOROUTE'
-        import re
-        nationale_re = re.compile(r'\bR?N\d+\b', re.IGNORECASE)
+            return RoadClass.AUTOROUTE
         for nom in manoeuvre.get('street_names', []):
-            if nationale_re.search(nom):
-                return 'NATIONALE'
-        return 'URBAIN'
+            if self._NATIONALE_RE.search(nom):
+                return RoadClass.NATIONALE
+        return RoadClass.URBAIN
 
     def _normaliser_trip(self, trip: dict, index: int) -> dict:
         manoeuvres = [

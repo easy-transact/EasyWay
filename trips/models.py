@@ -30,6 +30,15 @@ class NiveauTrafic(models.TextChoices):
     DENSE = 'DENSE', 'Dense'
 
 
+class RoadClass(models.TextChoices):
+    # Enumeration declaree cote backend pour garantir le vocabulaire -- le
+    # client doit traiter une valeur inconnue comme URBAIN (repli le plus
+    # conservateur) afin d'absorber d'eventuels ajouts futurs sans rupture.
+    URBAIN = 'URBAIN', 'Urbain'
+    NATIONALE = 'NATIONALE', 'Nationale'
+    AUTOROUTE = 'AUTOROUTE', 'Autoroute'
+
+
 class Trajet(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     utilisateur = models.ForeignKey(
@@ -169,7 +178,9 @@ class Manoeuvre(models.Model):
     distance = models.IntegerField(help_text='metres')
     duree = models.IntegerField(help_text='secondes')
     nom_voie = models.CharField(max_length=255, blank=True)
-    road_class = models.CharField(max_length=50, blank=True)
+    road_class = models.CharField(
+        max_length=20, choices=RoadClass.choices, default=RoadClass.URBAIN
+    )
 
     class Meta:
         db_table = 'manoeuvre'
