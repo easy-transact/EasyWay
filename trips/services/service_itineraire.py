@@ -85,6 +85,14 @@ class ServiceItineraire:
         )
         return 'itineraire:' + hashlib.sha256(brut.encode()).hexdigest()
 
+    def _traduire_road_class(self, valhalla_class) -> str:
+        c = str(valhalla_class).lower() if valhalla_class else ''
+        if 'motorway' in c:
+            return 'AUTOROUTE'
+        elif c in ('trunk', 'primary', 'secondary'):
+            return 'NATIONALE'
+        return 'URBAIN'
+
     def _normaliser_trip(self, trip: dict, index: int) -> dict:
         manoeuvres = [
             m for leg in trip['legs'] for m in leg['maneuvers']
@@ -118,6 +126,7 @@ class ServiceItineraire:
                     'distance': round(m.get('length', 0) * 1000),
                     'duree': round(m.get('time', 0)),
                     'nom_voie': ', '.join(m.get('street_names', [])),
+                    'road_class': self._traduire_road_class(m.get('road_class')),
                 }
                 for m in manoeuvres
             ],

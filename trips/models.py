@@ -169,6 +169,7 @@ class Manoeuvre(models.Model):
     distance = models.IntegerField(help_text='metres')
     duree = models.IntegerField(help_text='secondes')
     nom_voie = models.CharField(max_length=255, blank=True)
+    road_class = models.CharField(max_length=50, blank=True)
 
     class Meta:
         db_table = 'manoeuvre'

@@ -46,6 +46,7 @@ class ManoeuvreCandidatSerializer(serializers.Serializer):
     distance = serializers.IntegerField()
     duration = serializers.IntegerField(source='duree')
     street_name = serializers.CharField(allow_blank=True, source='nom_voie')
+    road_class = serializers.CharField(allow_blank=True, required=False)
 
 
 class ItineraireCandidatSerializer(serializers.Serializer):
@@ -73,7 +74,7 @@ class ManoeuvreSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Manoeuvre
-        fields = ['order', 'type', 'instruction', 'voice_instruction', 'distance', 'duration', 'street_name']
+        fields = ['order', 'type', 'instruction', 'voice_instruction', 'distance', 'duration', 'street_name', 'road_class']
         read_only_fields = fields
 
 
