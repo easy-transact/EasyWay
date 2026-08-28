@@ -1,0 +1,839 @@
+EASYWAY API — FULL FRONTEND INTEGRATION REFERENCE
+Verified against the actual code (views.py/serializers.py/models.py of every
+app) on 2026-08-27, right after the first production deployment. If this
+drifts from the code over time, verify against the live Swagger UI
+(/api/docs/) or the raw OpenAPI schema (/api/schema/) — those are generated
+straight from the code and are always the source of truth.
+
+============================================================
+BASE URL / GENERAL CONVENTIONS
+============================================================
+Production : https://easyway-api.easy-transact.net/api/
+Local dev  : http://localhost:8000/api/
+
+All paths below are relative to that base (e.g. "auth/login/" means
+POST https://easyway-api.easy-transact.net/api/auth/login/).
+
+- Content-Type: application/json for every request with a body, unless
+  noted otherwise (avatar upload is multipart/form-data).
+- Auth header, only on endpoints marked "Auth: required":
+    Authorization: Bearer <access>
+- Idempotency-Key header is required specifically on POST incidents/ — see
+  that section, nowhere else in the API uses this pattern.
+- Field NAMES and free-text error messages are English everywhere. Enum
+  VALUES (status/type/plan/vehicle_type/etc.) are NOT translated — they're
+  still the original French model choice values (e.g. "ACTIF", "VOITURE",
+  "GRATUITE"). Full enum reference near the bottom of this file.
+- UUIDs are strings everywhere (ids, foreign keys).
+- Lat/lon are always separate float fields (lat, lon or origin_lat/
+  origin_lon/destination_lat/destination_lon etc.) — never a nested
+  {lat, lon} object in a request or response body, except inside "avoid"
+  (routes/calculate) and "positions" (telemetry), which are arrays of
+  {lat, lon, ...} objects for a different reason (batched points).
+- Route/trip geometry is always an encoded polyline6 string (same format
+  Google's Polyline Algorithm uses, but 1e6 precision instead of the usual
+  1e5) — decode with a standard polyline library configured for precision 6.
+
+GENERAL ERROR-SHAPE RULES
+- A plain "field required / invalid format" DRF validation error:
+    { "<field_name>": ["message", ...] }
+- A validation error NOT tied to one specific field (raised from a
+  serializer's validate() method):
+    { "non_field_errors": ["message"] }
+- Endpoints that build their own Response() directly instead of relying on
+  serializer validation return: { "detail": "message" } — no
+  non_field_errors wrapper. This is the shape for most business-rule
+  rejections (quota exceeded, wrong state transition, not found, etc.)
+  across every module, not just auth.
+- Every 429 (throttled) response:
+    { "detail": "Request was throttled. Expected available in N seconds." }
+- Every 401 from a missing/expired/invalid access token on an
+  "Auth: required" endpoint: { "detail": "...", "code": "..." } (standard
+  SimpleJWT/DRF shape).
+- Endpoints with permission_classes = [AllowAny] work with or without the
+  Authorization header — every other endpoint requires it (returns 401
+  without it). This is called out per-endpoint below only where it's
+  surprising (e.g. incident read endpoints are public, but voting/reporting
+  need auth).
+
+
+============================================================
+1. AUTHENTICATION  (base: auth/)
+============================================================
+
+------------------------------------------------------------
+1.1 POST auth/check-existence/             Auth: none
+Body:
+  { "email": "user@example.com" }
+Success 200:
+  { "exists": true }
+Errors:
+  400  { "email": ["This field is required."] }   (or invalid email format)
+
+------------------------------------------------------------
+1.2 POST auth/register/                    Auth: none   (throttled: 10/hour)
+Body:
+  {
+    "email": "user@example.com",
+    "full_name": "Jean Dupont",
+    "password": "...",
+    "password_confirmation": "...",
+    "phone": "...",              // optional
+    "city": "...",               // optional
+    "vehicle_type": "VOITURE",   // optional — see ENUMS below
+    "accepts_terms": true
+  }
+Success 201:
+  { "user": {...USER OBJECT...}, "tokens": { "access": "...", "refresh": "..." } }
+Errors (400, field-keyed):
+  "email": ["Email already in use."]
+  "password_confirmation": ["Passwords do not match."]
+  "accepts_terms": ["You must accept the terms and conditions."]
+  "password": [Django password-validator messages, e.g. "This password is too short."]
+  429 if throttled.
+
+------------------------------------------------------------
+1.3 POST auth/login/                       Auth: none   (throttled: 20/hour)
+Body:
+  { "email": "user@example.com", "password": "..." }
+Success 200:
+  { "user": {...}, "tokens": { "access": "...", "refresh": "..." } }
+Errors:
+  400  { "non_field_errors": ["Incorrect credentials."] }
+  400  { "non_field_errors": ["This account is banned."] }
+
+------------------------------------------------------------
+1.4 POST auth/google-login/                Auth: none   (throttled: 20/hour)
+Body:
+  { "id_token": "<Google ID token from the mobile SDK>" }
+Success 200:
+  { "user": {...}, "tokens": {...} }
+  (Links to an existing account if the verified Google email matches one;
+  otherwise creates a new account.)
+Errors:
+  400  { "non_field_errors": ["<message from Google token verification failure>"] }
+  403  { "detail": "This account is banned." }
+
+Web OAuth client ID (pass as serverClientId on the mobile SDK — see
+google_sign_in setup docs elsewhere in this repo, AUTH_API_FRONTEND.txt has
+the full per-platform walkthrough):
+  776686983052-3n9e6kustjnhm371mmg3p9av1173o25s.apps.googleusercontent.com
+
+------------------------------------------------------------
+1.5 POST auth/refresh/                     Auth: none
+   Stock SimpleJWT TokenRefreshView.
+Body:
+  { "refresh": "<refresh token from login/signup>" }
+Success 200:
+  { "access": "<new access token>", "refresh": "<new refresh token>" }
+  (ROTATE_REFRESH_TOKENS is on: you get a new refresh token too, and the
+  old one is blacklisted — save the new one and discard the old one.)
+Errors:
+  401  { "detail": "Token is invalid or expired", "code": "token_not_valid" }
+
+------------------------------------------------------------
+1.6 POST auth/logout/                      Auth: required
+Body:
+  { "refresh": "<refresh token>" }
+Success 204: (empty body)
+Errors:
+  400  { "detail": "Refresh token is required." }
+  400  { "detail": "Invalid token." }
+
+------------------------------------------------------------
+1.7 GET auth/verify-email/<uidb64>/<token>/    Auth: none
+   uidb64 and token are path segments from the link in the verification
+   email — no body, no query params.
+Success 200:
+  { "detail": "Email address verified." }
+Errors:
+  400  { "detail": "Invalid or expired link." }
+
+------------------------------------------------------------
+1.8 POST auth/password/reset/              Auth: none   (throttled: 5/hour)
+Body:
+  { "email": "user@example.com" }
+Success 200 (ALWAYS 200, whether or not the account exists — deliberate,
+do not treat as confirmation the email is registered):
+  { "detail": "If this account exists, an email has been sent." }
+
+------------------------------------------------------------
+1.9 POST auth/password/confirm/            Auth: none
+Body:
+  { "uid": "<from reset-password email link>", "token": "<from same link>", "new_password": "..." }
+Success 200:
+  { "detail": "Password reset." }
+Errors:
+  400  { "detail": "Invalid or expired link." }
+  400  { "new_password": [Django password-validator messages] }
+
+------------------------------------------------------------
+USER OBJECT (returned inside "user" above):
+{
+  "id": "<uuid>",
+  "email": "...",
+  "full_name": "...",
+  "phone": "..." or null,
+  "city": "..." or null,
+  "vehicle_type": "VOITURE" | "MOTO" | "TAXI" | "CAMION" | "BUS" | "UTILITAIRE" | null,
+  "avatar_url": "..." or null,
+  "email_verified": true | false,
+  "plan": "GRATUITE" | "PREMIUM",
+  "reputation_score": 0,
+  "points": 0,
+  "invisible_mode": false,
+  "plan_limits": {
+    "plan": "GRATUITE" | "PREMIUM",
+    "max_saved_addresses": <int or null>,
+    "ads_enabled": true | false,
+    "advanced_routing": true | false,
+    "offline_packs": true | false,
+    "history_retention_days": <int or null>
+  }
+}
+All fields in "user"/"plan_limits" are read-only from the client's
+perspective. reputation_score is currently write-once (set at account
+creation, no live feedback loop from votes yet — flagged as a known gap
+during an earlier design discussion, not implemented).
+
+
+============================================================
+2. ACCOUNT  (base: users/me/, devices/)   — all Auth: required
+============================================================
+
+------------------------------------------------------------
+2.1 GET users/me/
+Success 200: ...USER OBJECT (same shape as auth responses)...
+
+------------------------------------------------------------
+2.2 PATCH users/me/
+Body (all optional, partial update):
+  {
+    "full_name": "...",
+    "city": "..." or null,
+    "vehicle_type": "VOITURE" | ... or null,
+    "invisible_mode": true | false
+  }
+Success 200: ...USER OBJECT...
+Note: email/password/plan/reputation are never editable through this
+endpoint — email has no change-endpoint at all currently, password change
+goes through the reset-password flow (1.8/1.9) even for a logged-in user.
+
+------------------------------------------------------------
+2.3 DELETE users/me/
+Logical delete only (soft): sets a "deletion requested" timestamp, no
+scheduled purge task exists yet to actually remove the account after the
+30-day grace period mentioned in the design — the account stays queryable
+server-side, just flagged.
+Success 204: (empty body)
+
+------------------------------------------------------------
+2.4 POST users/me/avatar/
+Content-Type: multipart/form-data
+Body: form field "avatar" = image file, max 5 MB.
+Success 200: ...USER OBJECT... (avatar_url now points at the new image)
+Errors:
+  400  { "avatar": ["Image must not exceed 5 MB."] }
+Note: no separate DELETE to remove an avatar — upload a new one to replace it.
+
+------------------------------------------------------------
+2.5 GET users/me/settings/
+Success 200:
+{
+  "avoid_tolls": false,
+  "avoid_unpaved_roads": false,
+  "avoid_difficult_intersections": false,
+  "map_style": "...",
+  "voice_guidance_enabled": true,
+  "voice_language": "fr",
+  "units": "KM" | "MI",
+  "speedometer_enabled": true,
+  "speed_alert_enabled": true,
+  "notifications_enabled": true,
+  "notify_announcements": true,
+  "notify_frequent_incidents": true,
+  "notify_police_alerts": true,
+  "notify_route_change": true,
+  "notify_news": true
+}
+Note: avoid_tolls/avoid_unpaved_roads feed directly into route calculation
+(routes/calculate — see 5.1). avoid_difficult_intersections is stored but
+has NO effect on routing — Valhalla has no equivalent lever, flagged as a
+deliberate no-op rather than a fake mapping.
+
+------------------------------------------------------------
+2.6 PATCH users/me/settings/
+Body: any subset of the fields in 2.5.
+Success 200: full settings object (same shape as 2.5).
+
+------------------------------------------------------------
+2.7 GET users/me/statistics/
+Success 200:
+  { "completed_trips": 0, "total_distance_km": 0, "reported_incidents": 0, "time_saved_minutes": 0 }
+*** STUB — always returns zeros. Not wired to real trip data yet. Shape is
+stable to build the UI against, but don't expect real numbers. ***
+
+------------------------------------------------------------
+2.8 POST devices/
+Register or update a push-notification device (upsert on push_token — a
+device that re-registers, e.g. after reinstall, updates its row instead of
+duplicating).
+Body:
+  {
+    "push_token": "...",
+    "platform": "IOS" | "ANDROID",
+    "app_version": "1.2.3",
+    "os_version": "17.0",
+    "language": "fr"   // optional
+  }
+Success 201:
+  { "id": "<uuid>", "push_token": "...", "platform": "...", "app_version": "...", "os_version": "...", "language": "..." }
+Note: nothing currently sends push notifications to a registered device —
+storage only at this point, no notification-dispatch code exists yet.
+
+------------------------------------------------------------
+2.9 DELETE devices/<id>/
+Success 204: (empty body)
+Errors:
+  404 if the device doesn't exist or belongs to another user.
+
+
+============================================================
+3. CONFIGURATION  (base: config/)          Auth: none
+============================================================
+
+------------------------------------------------------------
+3.1 GET config/
+Meant to be read by the mobile app on every launch — lets cities/vehicle
+types/minimum version evolve without an app-store release.
+Success 200:
+{
+  "cities": ["Douala", "Yaoundé", ...],           // static hardcoded list, NOT the Ville table (13k+ rows) — see note below
+  "vehicle_types": {"VOITURE": "Voiture", "MOTO": "Moto", ...},
+  "incident_types": {"DANGER": "Danger", "POLICE": "Police", ...},
+  "minimum_app_version": "1.0.0"
+}
+Note: "cities" here is a short, hand-maintained list (accounts/config_data.py)
+for things like a city picker on a signup form — completely separate from
+the Ville reference table (places app, 13k+ imported villages/towns) that
+powers places/search's "ville" result source (section 4.1). Don't confuse
+the two if you need an exhaustive city list — that's a places/search query,
+not this endpoint.
+
+
+============================================================
+4. PLACES  (base: places/)
+============================================================
+
+------------------------------------------------------------
+4.1 GET places/search/?q=&lat=&lon=        Auth: none
+Autocomplete. q required (min 2 chars). lat/lon optional — influence
+ranking only, never filter out a result far from the user (e.g. typing an
+exact place name in another city still returns it, just ranked lower).
+
+Three sources merged into one ranked list, deduplicated by normalized name
+— "source" tells you which:
+  - "local"  : Lieu table (POIs imported from OSM .pbf + user-submitted
+               approved places)
+  - "ville"  : Ville reference table (13k+ Cameroon villages/towns/cities,
+               imported separately — see project notes). Capped at 3
+               results per search so it never crowds out more specific
+               matches.
+  - "photon" : live Photon geocoder call (P2b), only for names not already
+               covered by local/ville.
+Success 200: array of:
+  {
+    "id": "<uuid>" | "ville:<uuid>" | "photon:<...>",
+    "label": "...",
+    "sublabel": "...",       // neighborhood/address/city for "local"; empty for "ville"; city-ish for "photon"
+    "category": "...",       // free-text OSM-ish category for local/photon; Ville.type (city/town/village/hamlet/locality/...) for "ville"
+    "lat": 4.05,
+    "lon": 9.70,
+    "distance_m": 1234 | null,   // null if lat/lon weren't passed
+    "source": "local" | "ville" | "photon"
+  }
+Errors:
+  400  { "detail": "The 'q' parameter must contain at least 2 characters." }
+
+------------------------------------------------------------
+4.2 GET places/reverse/?lat=&lon=          Auth: none
+Nominatim first (P2b), falls back to the nearest approved local Lieu within
+50m if Nominatim is down/returns nothing.
+Success 200:
+  { "label": "...", "place": {...same shape as a places/search result...} | null }
+  (place is null and label is "Current position" when nothing is found
+  anywhere — genuinely no address available at that point, not an error.)
+Errors:
+  400  { "detail": "'lat' and 'lon' are required." }
+
+------------------------------------------------------------
+4.3 GET places/<id>/                       Auth: none
+Success 200:
+  {
+    "id": "<uuid>", "name": "...", "category": "...", "address": "...",
+    "neighborhood": "...", "city": "...", "lat": 4.05, "lon": 9.70,
+    "source": "OPENSTREETMAP" | "UTILISATEUR", "status": "APPROUVE",
+    "popularity_score": 0
+  }
+Errors:
+  404 if the place doesn't exist or isn't approved (a pending
+  user-submitted place is invisible here until moderated).
+
+------------------------------------------------------------
+4.4 POST places/propose/                   Auth: required
+Submits a missing place for moderation (status EN_ATTENTE — invisible in
+search/detail until approved by an admin; no moderation endpoint exposed
+yet, admin-only via Django admin).
+Body:
+  {
+    "name": "...", "category": "...",
+    "address": "...",       // optional
+    "neighborhood": "...",  // optional
+    "city": "...", "lat": 4.05, "lon": 9.70
+  }
+Success 201: same shape as 4.3, status will be "EN_ATTENTE".
+
+------------------------------------------------------------
+4.5 GET places/saved/                      Auth: required
+List the caller's saved addresses (home/work/custom).
+Success 200: array of:
+  {
+    "id": "<uuid>",
+    "place": "<uuid of a Lieu>" | null,
+    "label": "DOMICILE" | "TRAVAIL" | "PERSONNALISE",
+    "custom_name": "..." | null,
+    "address": "...",
+    "position_lat": 4.05,
+    "position_lon": 9.70
+  }
+
+------------------------------------------------------------
+4.6 POST places/saved/                     Auth: required
+Body:
+  {
+    "place": "<uuid>",       // optional, link to an existing Lieu
+    "label": "DOMICILE" | "TRAVAIL" | "PERSONNALISE",
+    "custom_name": "...",    // optional
+    "address": "...",
+    "lat": 4.05, "lon": 9.70
+  }
+Success 201: same shape as 4.5.
+Errors:
+  403  { "detail": "Limit of N saved addresses reached for your plan." }
+  (N = plan_limits.max_saved_addresses from the USER object — free plan is
+  capped, premium may be unlimited i.e. this error never fires for them.)
+Note: only one DOMICILE and one TRAVAIL address allowed per user (DB
+constraint) — a second POST with label=DOMICILE when one already exists
+will fail; PERSONNALISE has no such limit beyond the plan-wide max.
+
+------------------------------------------------------------
+4.7 PATCH places/saved/<id>/               Auth: required
+Body: any subset of the fields in 4.6 (partial).
+Success 200: same shape as 4.5.
+Errors: 404 if not the caller's address.
+
+------------------------------------------------------------
+4.8 DELETE places/saved/<id>/              Auth: required
+Success 204: (empty body)
+
+------------------------------------------------------------
+4.9 GET places/recent/                     Auth: required
+Up to 10 most recent searches for the caller.
+Success 200: array of:
+  { "id": "<uuid>", "label": "...", "sublabel": "..." | null, "searched_at": "2026-08-27T12:00:00Z" }
+
+------------------------------------------------------------
+4.10 POST places/recent/                   Auth: required
+Body:
+  { "label": "...", "sublabel": "...", "lat": 4.05, "lon": 9.70 }
+Success 201: same shape as one item in 4.9.
+Note: automatically purges beyond the 10 most recent — no need to manage
+this list size client-side, just keep POSTing on every search selection.
+
+------------------------------------------------------------
+4.11 DELETE places/recent/                 Auth: required
+Clears the caller's entire recent-search history.
+Success 204: (empty body)
+
+
+============================================================
+5. ROUTES  (base: routes/)
+============================================================
+
+------------------------------------------------------------
+5.1 POST routes/calculate/                 Auth: required
+Computes up to 3 route candidates. Does NOT persist anything — the client
+sends the chosen candidate back verbatim to POST trips/ (6.2) to persist it.
+Body:
+  {
+    "origin_lat": 4.05, "origin_lon": 9.70,
+    "origin_heading": 180,          // optional, 0-359 — see note below
+    "destination_lat": 4.06, "destination_lon": 9.71,
+    "avoid": [ { "lat": 4.055, "lon": 9.705 }, ... ]   // optional, default []
+  }
+origin_heading: pass the vehicle's current heading (e.g. from recent GPS
+telemetry) when recalculating mid-trip. Without it, Valhalla can snap to
+the nearest road edge in the wrong direction and start the route with an
+immediate U-turn — most visible on one-way streets/divided highways.
+Effect is Valhalla-dependent (only matters where there are two directional
+edge candidates near the point); harmless to always pass it if you track
+heading anyway.
+avoid: real exclusion — Valhalla replans around these points, not a
+post-hoc reranking of candidates already computed. Use this to route away
+from a specific incident position.
+Success 200: array (1-3 items) of:
+  {
+    "route_id": "<opaque id, stable for this exact request>",
+    "label": "Itineraire recommande" | "Itineraire 2" | "Itineraire 3",
+    "distance": 12500,           // meters
+    "duration": 900,             // seconds, no traffic
+    "duration_with_traffic": 950 | null,   // null if degraded (see below)
+    "traffic_level": "NORMAL" | "MODERE" | "DENSE",
+    "geometry": "<encoded polyline6>",
+    "is_recommended": true,      // only the first item
+    "maneuvers": [
+      {
+        "type": "...",                    // Valhalla maneuver type, numeric-as-string
+        "instruction": "Tournez à gauche sur Boulevard de la Liberté.",   // HARDCODED FRENCH, see note
+        "voice_instruction": "...",
+        "distance": 150, "duration": 12,
+        "street_name": "Boulevard de la Liberté"
+      }, ...
+    ],
+    "degraded": false    // true = Valhalla was unreachable, this is a
+                          // straight-line haversine fallback, not a real
+                          // route — geometry is just start->end, no
+                          // maneuvers, duration_with_traffic is null
+  }
+*** Turn-by-turn instruction text (maneuvers[].instruction/voice_instruction)
+is hardcoded French regardless of any Accept-Language header or user
+setting — Valhalla is called with language: 'fr-FR' server-side. If you
+need English/other-language turn-by-turn text, that's a backend change to
+discuss, not something you can influence per-request today. ***
+Errors:
+  400 standard field validation (missing lat/lon, origin_heading out of
+  0-359 range, etc.)
+
+
+============================================================
+6. TRIPS  (base: trips/)                   — all Auth: required
+============================================================
+
+------------------------------------------------------------
+6.1 GET trips/?period=week|month|all
+Success 200:
+  {
+    "results": [ ...TRIP OBJECT... ],
+    "truncated_at": "2026-07-01T00:00:00Z" | null
+  }
+period defaults to "all". Plan retention (plan_limits — no direct field
+name, backend enforces Droits.retention_historique_jours) always wins over
+a longer requested period — "all" never returns more than the plan allows.
+truncated_at is non-null only when retention actually excluded something
+(not just because a limit theoretically exists).
+Errors:
+  400  { "detail": "period must be 'week', 'month' or 'all'." }
+
+------------------------------------------------------------
+6.2 POST trips/
+Persists a trip from a route candidate returned by 5.1 — send that object
+back under "route", verbatim, plus origin/destination labels.
+Body:
+  {
+    "origin_label": "...", "origin_lat": 4.05, "origin_lon": 9.70,
+    "destination_label": "...", "destination_lat": 4.06, "destination_lon": 9.71,
+    "destination_place": "<uuid of a Lieu>",   // optional
+    "route": { ...exact object from routes/calculate response... }
+  }
+Success 201: ...TRIP OBJECT... (status is already "ACTIF" — creating a
+trip starts it immediately, there's no separate "start" call).
+Note: only the ONE route you send is persisted — the other 1-2 candidates
+from routes/calculate are gone unless you keep them client-side. The
+"degraded" flag from the candidate is also not persisted (lost once saved).
+
+------------------------------------------------------------
+6.3 GET trips/<id>/
+Success 200: ...TRIP OBJECT...
+Errors: 404 if not the caller's trip.
+
+------------------------------------------------------------
+6.4 PATCH trips/<id>/
+Body (all optional, partial):
+  {
+    "status": "ACTIF" | "TERMINE" | "ANNULE",     // see state machine below
+    "actual_distance": 12800,     // meters — YOU must compute/track this, never auto-filled
+    "actual_duration": 950,       // seconds — same, client-tracked
+    "incidents_avoided": 2        // same, client-tracked
+  }
+State machine (changer_statut): PLANIFIE -> ACTIF -> TERMINE, or ANNULE
+from ACTIF. Since POST trips/ already starts at ACTIF, the only statuses
+you'll realistically PATCH to are TERMINE or ANNULE.
+Success 200: ...TRIP OBJECT...
+Errors:
+  400  { "detail": "<transition error message>" } for an illegal status
+  transition (e.g. TERMINE -> ACTIF).
+*** KNOWN BACKEND BUG, not yet fixed: actual_distance/actual_duration/
+incidents_avoided are saved to the DB BEFORE the status-transition check
+runs. A PATCH combining an illegal status transition with metric updates
+returns 400 (as expected) but the metric fields get persisted anyway. If
+you send status and metrics together and get a 400, the metrics you sent
+may still have applied — worth a defensive re-GET after a 400 on this
+endpoint specifically. ***
+
+------------------------------------------------------------
+6.5 DELETE trips/<id>/
+Success 204: (empty body)
+
+------------------------------------------------------------
+6.6 POST trips/<id>/rate/
+Body:
+  { "rating": 5, "comment": "..." }     // rating 1-5, comment optional
+Success 200: ...TRIP OBJECT... (rating/comment now set)
+Errors:
+  400  { "detail": "Only a completed trip can be rated." } (status must be TERMINE)
+
+------------------------------------------------------------
+TRIP OBJECT:
+{
+  "id": "<uuid>",
+  "origin_label": "...", "origin_lat": 4.05, "origin_lon": 9.70,
+  "destination_label": "...", "destination_lat": 4.06, "destination_lon": 9.71,
+  "destination_place": "<uuid>" | null,
+  "chosen_route_id": "...",
+  "planned_distance": 12500, "planned_duration": 900,
+  "actual_distance": null, "actual_duration": null,
+  "status": "PLANIFIE" | "ACTIF" | "TERMINE" | "ANNULE",
+  "incidents_avoided": 0,
+  "rating": null, "comment": null,
+  "started_at": "2026-08-27T12:00:00Z", "ended_at": null,
+  "routes": [ ...ROUTE OBJECT, same shape as a routes/calculate candidate
+              minus "degraded" (always the persisted one, index 0)... ]
+}
+
+
+============================================================
+7. TELEMETRY  (base: telemetry/)           Auth: required
+============================================================
+
+------------------------------------------------------------
+7.1 POST telemetry/positions/
+Ingest a batch of GPS positions for the caller's own ACTIVE trip. Fire-and-
+forget by design: positions are validated and published to an internal
+stream, NEVER written to the database as raw points — only a 5-minute
+speed aggregate is persisted later, server-side. Don't expect to read these
+positions back anywhere.
+Body:
+  {
+    "trip": "<uuid, must be the caller's own ACTIVE trip>",
+    "positions": [
+      {
+        "lat": 4.05, "lon": 9.70,
+        "speed_kmh": 45.0,      // optional
+        "heading": 90,          // optional, 0-359
+        "timestamp": "2026-08-27T12:00:05Z"
+      }, ...
+    ]   // max 500 per batch
+  }
+Success 202: (empty body) — always, even if the trip check fails silently
+in one specific case (see below).
+Special case: if the caller has invisible_mode enabled (users/me/settings/),
+this returns 202 immediately and publishes NOTHING — silent no-op, not an
+error, by design (privacy setting).
+Errors:
+  400  "trip": ["..."] if the trip doesn't exist, isn't ACTIF, or belongs to
+  someone else (deliberately the SAME generic error for all three cases —
+  the API never confirms whether a trip id exists if it's not yours).
+  400  { "detail": "Maximum 500 positions per batch." } (well, actually a
+  serializer error on "positions" — send larger data in multiple requests,
+  not one giant batch).
+
+
+============================================================
+8. COMMUNITY / INCIDENTS  (base: incidents/)
+============================================================
+
+INCIDENT OBJECT (shared shape, returned by every read endpoint below):
+{
+  "id": "<uuid>",
+  "type": "DANGER" | "POLICE" | "EMBOUTEILLAGE" | "ACCIDENT" | "ROUTE_BARREE" | "VOIE_BLOQUEE" | "MAUVAIS_TEMPS" | "RADAR",
+  "subtype": "...",
+  "lat": 4.05, "lon": 9.70,      // snapped to the nearest known road, see 8.5
+  "heading": 90 | null,
+  "street_name": "..." | "",     // reverse-geocoded at creation, empty if Nominatim was down
+  "city": "..." | "",            // same call as street_name, empty if Nominatim was down
+  "confirmations": 0, "disputes": 0,
+  "confidence_score": "0.00",    // STRING (DecimalField) — cast to float client-side before comparing/sorting
+  "estimated_impact": 0,         // confirmations - disputes
+  "status": "EN_ATTENTE" | "ACTIF" | "EXPIRE" | "RETIRE" | "FUSIONNE",
+  "severity": 1,
+  "expires_at": "2026-08-27T13:00:00Z",
+  "created_at": "2026-08-27T12:00:00Z"
+}
+Important: status alone is not authoritative for "is this still valid" —
+it only flips from ACTIF to EXPIRE via a periodic background job (up to
+~60s of lag, longer if that job is down). Every list/detail endpoint below
+filters live on expires_at > now() in addition to status — never trust a
+locally-cached incident's status field once its expires_at has passed, even
+if the client last saw status: "ACTIF".
+
+------------------------------------------------------------
+8.1 GET incidents/nearby/                  Auth: none
+Two mutually exclusive modes:
+
+MODE A — cells:  ?cells=<hex,hex,...>&lat=&lon=
+  H3 resolution-8 cells (comma-separated hex), for the "driving, poll my
+  current viewport" use case — server-cached per cell, invalidated on
+  every write (report/vote/expiry), not just TTL. Max 50 cells per request
+  (400 if exceeded). lat/lon optional here — only affect ranking (distance
+  first if given, else severity/confidence).
+
+MODE B — radius:  ?lat=&lon=&radius_km=
+  Direct geo query, no cell cache (a multi-km radius would touch too many
+  H3 cells for that cache to help). radius_km optional, default 10, max 20.
+  Use this for an occasional "what's around me right now" check, not for
+  repeated polling while driving — cells mode is the one actually optimized
+  for that.
+
+If neither cells nor lat+lon is given: 400. If both cells and radius_km are
+given, cells wins and radius_km is silently ignored.
+Success 200: array of INCIDENT OBJECT, max 50 results, sorted by proximity
+(if lat/lon given) then severity/confidence.
+Errors:
+  400  various — missing cells/lat/lon, cells > 50, lat without lon, non-numeric radius_km, radius_km out of (0, 20].
+
+------------------------------------------------------------
+8.2 POST incidents/along-route/            Auth: none
+Alternative to nearby/ for "every incident along my whole trip", not just
+around my current position. Meant to be called ONCE at trip start and
+cached client-side as an offline fallback — nearby/ stays the live source
+while actually driving.
+Body:
+  { "geometry": "<encoded polyline6, e.g. from routes/calculate -> route.geometry>", "buffer_m": 300 }
+buffer_m optional, default 300, max 1000 — corridor width around the route line.
+Success 200: array of INCIDENT OBJECT, max 50, sorted by severity/confidence.
+Errors:
+  400  { "detail": "Invalid encoded polyline." } or geometry decoding to <2 points, or buffer_m out of [1, 1000].
+
+------------------------------------------------------------
+8.3 GET incidents/city/?name=              Auth: none
+Filters on the incident's denormalized city (same reverse-geocode as
+street_name — see INCIDENT OBJECT). Substring match, case/accent-
+insensitive ("Yaounde" matches "Yaoundé", "Yaoundé I", etc.) — deliberately
+not exact, because Nominatim's granularity for Cameroon varies (sometimes
+returns an arrondissement like "Douala I" instead of the plain city name).
+An incident created while Nominatim was down has no city and will never
+show up here.
+Success 200: array of INCIDENT OBJECT, max 50, sorted by severity/confidence.
+Errors:
+  400  { "detail": "'name' is required." }
+
+------------------------------------------------------------
+8.4 GET users/me/reports/                  Auth: required
+All of the caller's own reports, regardless of status/expiry (unlike every
+other read endpoint here — this one is a personal history view, not a
+"what's currently valid" view).
+Success 200: array of INCIDENT OBJECT, sorted newest first, no cap.
+
+------------------------------------------------------------
+8.5 POST incidents/                        Auth: required
+Header REQUIRED: Idempotency-Key: <client-generated unique string>
+  A network retry with the same key returns the same response (the original
+  incident), never creates a second report — the key is valid 24h.
+Body:
+  {
+    "type": "DANGER" | "POLICE" | "EMBOUTEILLAGE" | "ACCIDENT" | "ROUTE_BARREE" | "VOIE_BLOQUEE" | "MAUVAIS_TEMPS" | "RADAR",
+    "subtype": "...",     // optional
+    "lat": 4.05, "lon": 9.70,
+    "heading": 90          // optional, 0-359
+  }
+Success 200 or 201: INCIDENT OBJECT + one extra field:
+  "duplicate_of_existing": true | false
+  200 = merged into an existing nearby report of the same type (within
+  150m, same-ish direction if heading given on both) instead of creating a
+  new one — that existing incident got a confirmation vote from you.
+  201 = genuinely new incident created.
+Position handling (both can reject with 400 before any incident is
+touched):
+  - Checked against Valhalla's road graph (/locate). More than ~50m from
+    any known road, OR the nearest match is a private driveway/parking
+    (not a public road even at 0m) → 400. This check is skipped (never
+    blocks the report) if Valhalla itself is unreachable.
+  - When accepted, the position ACTUALLY STORED is snapped onto the
+    matched road edge — it can differ by a few/dozen meters from the lat/
+    lon you submitted. Don't assume incident.lat/lon in the response
+    exactly echoes what you sent.
+Report visibility: score_reputation < 30 → created as EN_ATTENTE (still
+visible in nearby/city/along-route, needs 2 independent confirmation votes
+to auto-promote to ACTIF); otherwise ACTIF immediately.
+Errors:
+  400  { "detail": "The Idempotency-Key header is required." }
+  400  { "detail": "Reported position is Nm from the nearest known road." }
+  400  { "detail": "Reported position matches a private driveway/parking access, not a public road." }
+  429  { "detail": "Hourly report quota reached." }
+       *** Currently DISABLED server-side (QUOTA_SIGNALEMENTS_ACTIF=False)
+       for testing convenience — the endpoint can still theoretically
+       return this if it gets re-enabled, don't assume it never fires. ***
+
+------------------------------------------------------------
+8.6 GET incidents/<id>/                    Auth: none
+Success 200: INCIDENT OBJECT.
+Errors:
+  404 if the incident is not ACTIF/EN_ATTENTE or its expires_at has
+  passed — same visibility rule as every list endpoint, applied here too
+  (an id you cached from an earlier nearby/ response can 404 once it
+  expires or is withdrawn).
+
+------------------------------------------------------------
+8.7 DELETE incidents/<id>/                 Auth: required
+Withdraw your own report (logical: status -> RETIRE, not a hard delete).
+Success 204: (empty body)
+Errors:
+  404 if the incident doesn't exist or isn't yours (never distinguishes
+  the two).
+
+------------------------------------------------------------
+8.8 POST incidents/<id>/vote/              Auth: required
+Body:
+  { "direction": "confirm" | "dispute" }
+Success 200: INCIDENT OBJECT (confirmations/disputes/confidence_score/
+expires_at updated — a confirm extends expiry by 10 min capped at 3x the
+type's base lifetime; a dispute reduces it by 10 min; 2 independent
+confirmations promote an EN_ATTENTE incident to ACTIF).
+Errors:
+  400  { "detail": "You cannot vote on your own report." }
+  400  { "detail": "You have already voted on this report." } (one vote
+  per (incident, user), confirm and dispute both count against this limit).
+
+
+============================================================
+ENUM REFERENCE (values as stored/returned — NOT translated)
+============================================================
+TypeVehicule (vehicle_type):     VOITURE, MOTO, TAXI, CAMION, BUS, UTILITAIRE
+Formule (plan):                  GRATUITE, PREMIUM
+Plateforme (platform):           IOS, ANDROID
+Unite (units):                   KM, MI
+LibelleAdresse (saved addr label): DOMICILE, TRAVAIL, PERSONNALISE
+StatutTrajet (trip status):      PLANIFIE, ACTIF, TERMINE, ANNULE
+NiveauTrafic (traffic_level):    NORMAL, MODERE, DENSE
+TypeIncident (incident type):    DANGER, POLICE, EMBOUTEILLAGE, ACCIDENT, ROUTE_BARREE, VOIE_BLOQUEE, MAUVAIS_TEMPS, RADAR
+StatutIncident (incident status): EN_ATTENTE, ACTIF, EXPIRE, RETIRE, FUSIONNE
+VoteIncident direction (request only, not stored as-is): confirm, dispute
+
+Incident base lifetime by type (minutes, before any vote extends/reduces it):
+  DANGER 60, POLICE 60, EMBOUTEILLAGE 30, ACCIDENT 90, ROUTE_BARREE 240,
+  VOIE_BLOQUEE 60, MAUVAIS_TEMPS 120, RADAR 480.
+
+
+============================================================
+KNOWN GAPS / THINGS THAT LOOK LIKE BUGS BUT AREN'T (YET)
+============================================================
+- trips/<id>/ PATCH: metrics-before-transition-check bug, see 6.4. Real bug,
+  not fixed, flagged deliberately rather than silently patched.
+- routes/calculate maneuver text is hardcoded French regardless of any
+  client setting — see 5.1. Product decision pending, not a bug per se.
+- users/me/statistics/ is a hardcoded-zeros stub — see 2.7.
+- devices/ storage exists but nothing sends push notifications yet — see 2.8.
+- reputation_score never updates from votes (write-once at account
+  creation) — flagged in an earlier design discussion, not implemented.
+- config/ "cities" is a short static list, unrelated to the 13k+-row Ville
+  table used by places/search — see 3.1, don't confuse the two.

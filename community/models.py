@@ -25,6 +25,75 @@ class TypeIncident(models.TextChoices):
     RADAR = 'RADAR', 'Radar'
 
 
+class SousTypeIncident(models.TextChoices):
+    DANGER = 'DANGER', 'Danger'
+    TRAVAUX = 'TRAVAUX', 'Travaux'
+    VEHICULE_ARRETE = 'VEHICULE_ARRETE', 'Vehicule arrete'
+    FEU_TRICOLORE_HORS_SERVICE = 'FEU_TRICOLORE_HORS_SERVICE', 'Feu tricolore hors service'
+    NID_DE_POULE = 'NID_DE_POULE', 'Nid-de-poule'
+    OBJET = 'OBJET', 'Objet'
+
+    POLICE = 'POLICE', 'Police'
+    POLICE_MUNICIPALE = 'POLICE_MUNICIPALE', 'Police municipale'
+    RADAR_MOBILE = 'RADAR_MOBILE', 'Radar mobile'
+    CACHEE = 'CACHEE', 'Cachee'
+    SENS_INVERSE = 'SENS_INVERSE', 'Sens inverse'
+
+    EMBOUTEILLAGE = 'EMBOUTEILLAGE', 'Embouteillage'
+    IMPORTANT = 'IMPORTANT', 'Important'
+    A_L_ARRET = 'A_L_ARRET', "A l'arret"
+
+    ACCIDENT = 'ACCIDENT', 'Accident'
+    CARAMBOLAGE = 'CARAMBOLAGE', 'Carambolage'
+
+    VOIE_BLOQUEE = 'VOIE_BLOQUEE', 'Voie bloquee'
+    VOIE_DE_GAUCHE = 'VOIE_DE_GAUCHE', 'Voie de gauche'
+    VOIE_DE_DROITE = 'VOIE_DE_DROITE', 'Voie de droite'
+    VOIE_DU_MILIEU = 'VOIE_DU_MILIEU', 'Voie du milieu'
+
+    UNE_VOIE_REDUITE = '1_VOIE_REDUITE', '1 voie reduite'
+    ROUTE_BARREE = 'ROUTE_BARREE', 'Route barree'
+
+    MAUVAIS_TEMPS = 'MAUVAIS_TEMPS', 'Mauvais temps'
+    ROUTE_GLISSANTE = 'ROUTE_GLISSANTE', 'Route glissante'
+    INONDATION = 'INONDATION', 'Inondation'
+    BROUILLARD = 'BROUILLARD', 'Brouillard'
+
+    RADAR = 'RADAR', 'Radar'
+
+
+SOUS_TYPES_PAR_TYPE = {
+    TypeIncident.DANGER: [
+        SousTypeIncident.DANGER, SousTypeIncident.TRAVAUX, SousTypeIncident.VEHICULE_ARRETE,
+        SousTypeIncident.FEU_TRICOLORE_HORS_SERVICE, SousTypeIncident.NID_DE_POULE, SousTypeIncident.OBJET
+    ],
+    TypeIncident.POLICE: [
+        SousTypeIncident.POLICE, SousTypeIncident.POLICE_MUNICIPALE, SousTypeIncident.RADAR_MOBILE,
+        SousTypeIncident.CACHEE, SousTypeIncident.SENS_INVERSE
+    ],
+    TypeIncident.EMBOUTEILLAGE: [
+        SousTypeIncident.EMBOUTEILLAGE, SousTypeIncident.IMPORTANT, SousTypeIncident.A_L_ARRET
+    ],
+    TypeIncident.ACCIDENT: [
+        SousTypeIncident.ACCIDENT, SousTypeIncident.CARAMBOLAGE, SousTypeIncident.SENS_INVERSE
+    ],
+    TypeIncident.ROUTE_BARREE: [
+        SousTypeIncident.VOIE_BLOQUEE, SousTypeIncident.VOIE_DE_GAUCHE,
+        SousTypeIncident.VOIE_DE_DROITE, SousTypeIncident.VOIE_DU_MILIEU
+    ],
+    TypeIncident.VOIE_BLOQUEE: [
+        SousTypeIncident.UNE_VOIE_REDUITE, SousTypeIncident.ROUTE_BARREE
+    ],
+    TypeIncident.MAUVAIS_TEMPS: [
+        SousTypeIncident.MAUVAIS_TEMPS, SousTypeIncident.ROUTE_GLISSANTE,
+        SousTypeIncident.INONDATION, SousTypeIncident.BROUILLARD
+    ],
+    TypeIncident.RADAR: [
+        SousTypeIncident.RADAR
+    ],
+}
+
+
 class StatutIncident(models.TextChoices):
     # EN_ATTENTE ajoute par deduction du cycle de vie decrit en section 5.1
     # (le diagramme de classes, Fig. 9, ne liste que ACTIF/EXPIRE/RETIRE/FUSIONNE).

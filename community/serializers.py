@@ -3,7 +3,7 @@ from rest_framework import serializers
 
 from trips.polyline import decoder_polyline6
 
-from .models import Incident, TypeIncident
+from .models import Incident, TypeIncident, SOUS_TYPES_PAR_TYPE
 
 # Champs declares avec `source=` : la reponse API parle anglais, les modeles/
 # colonnes DB restent en francais (aucune migration, cf. discussion).
@@ -67,6 +67,17 @@ class IncidentCreationSerializer(serializers.Serializer):
     heading = serializers.IntegerField(
         required=False, allow_null=True, min_value=0, max_value=359, default=None, source='cap'
     )
+
+    def validate(self, data):
+        incident_type = data.get('type')
+        sous_type = data.get('sous_type')
+        if sous_type:
+            allowed_subtypes = SOUS_TYPES_PAR_TYPE.get(incident_type, [])
+            if sous_type not in allowed_subtypes:
+                raise serializers.ValidationError(
+                    {'subtype': f"Invalid subtype for {incident_type}. Allowed: {', '.join(allowed_subtypes) if allowed_subtypes else 'none'}"}
+                )
+        return data
 
 
 class VoteIncidentSerializer(serializers.Serializer):
