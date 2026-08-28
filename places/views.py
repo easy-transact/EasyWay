@@ -301,6 +301,14 @@ class AdresseEnregistreeDetailView(APIView):
     def _objet(self, request, id):
         return get_object_or_404(AdresseEnregistree, id=id, utilisateur=request.user)
 
+    def get(self, request, id):
+        adresse = self._objet(request, id)
+        return Response(AdresseEnregistreeSerializer(adresse).data)
+
+    def put(self, request, id):
+        # Alias pour patch (pratique si le client envoie PUT au lieu de PATCH)
+        return self.patch(request, id)
+
     def patch(self, request, id):
         adresse = self._objet(request, id)
         serializer = AdresseEnregistreeSerializer(
