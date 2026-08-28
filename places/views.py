@@ -268,12 +268,12 @@ class ProposerLieuView(APIView):
 )
 class AdresseEnregistreeListCreateView(APIView):
     def get(self, request):
-        adresses = request.user.adresses_enregistrees.all()
+        adresses = AdresseEnregistree.objects.filter(utilisateur=request.user)
         return Response(AdresseEnregistreeSerializer(adresses, many=True).data)
 
     def post(self, request):
         limite = request.user.droits.max_adresses_enregistrees
-        if limite is not None and request.user.adresses_enregistrees.count() >= limite:
+        if limite is not None and AdresseEnregistree.objects.filter(utilisateur=request.user).count() >= limite:
             return Response(
                 {'detail': f"Limit of {limite} saved addresses reached for your plan."},
                 status=status.HTTP_403_FORBIDDEN,
