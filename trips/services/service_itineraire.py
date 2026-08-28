@@ -85,12 +85,21 @@ class ServiceItineraire:
         )
         return 'itineraire:' + hashlib.sha256(brut.encode()).hexdigest()
 
-    def _traduire_road_class(self, valhalla_class) -> str:
-        c = str(valhalla_class).lower() if valhalla_class else ''
-        if 'motorway' in c:
+    def _traduire_road_class(self, manoeuvre: dict) -> str:
+        """Deduit la classe de route a partir des champs disponibles dans
+        les manoeuvres Valhalla. L'API route ne renvoie pas de road_class
+        direct -- on s'appuie sur :
+          - highway (bool) : present et True uniquement sur autoroute/2x2 voies.
+          - street_names   : les routes nationales camerounaises portent
+            systematiquement un identifiant du type 'N1', 'N3', 'RN4'...
+        """
+        if manoeuvre.get('highway'):
             return 'AUTOROUTE'
-        elif c in ('trunk', 'primary', 'secondary'):
-            return 'NATIONALE'
+        import re
+        nationale_re = re.compile(r'\bR?N\d+\b', re.IGNORECASE)
+        for nom in manoeuvre.get('street_names', []):
+            if nationale_re.search(nom):
+                return 'NATIONALE'
         return 'URBAIN'
 
     def _normaliser_trip(self, trip: dict, index: int) -> dict:
@@ -126,7 +135,7 @@ class ServiceItineraire:
                     'distance': round(m.get('length', 0) * 1000),
                     'duree': round(m.get('time', 0)),
                     'nom_voie': ', '.join(m.get('street_names', [])),
-                    'road_class': self._traduire_road_class(m.get('road_class')),
+                    'road_class': self._traduire_road_class(m),
                 }
                 for m in manoeuvres
             ],
