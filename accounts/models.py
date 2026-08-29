@@ -34,25 +34,24 @@ class Unite(models.TextChoices):
 class UtilisateurManager(BaseUserManager):
     use_in_migrations = True
 
-    def _create_user(self, email, password, **extra_fields):
-        if not email:
-            raise ValueError("L'adresse email est obligatoire")
-        email = self.normalize_email(email)
-        user = self.model(email=email, **extra_fields)
+    def _create_user(self, telephone, password, **extra_fields):
+        if not telephone:
+            raise ValueError("Le numéro de téléphone est obligatoire")
+        user = self.model(telephone=telephone, **extra_fields)
         user.set_password(password)
         user.save(using=self._db)
         return user
 
-    def create_user(self, email, password=None, **extra_fields):
+    def create_user(self, telephone, password=None, **extra_fields):
         extra_fields.setdefault('is_staff', False)
         extra_fields.setdefault('is_superuser', False)
-        return self._create_user(email, password, **extra_fields)
+        return self._create_user(telephone, password, **extra_fields)
 
-    def create_superuser(self, email, password=None, **extra_fields):
+    def create_superuser(self, telephone, password=None, **extra_fields):
         extra_fields.setdefault('is_staff', True)
         extra_fields.setdefault('is_superuser', True)
         extra_fields.setdefault('email_verifie', True)
-        return self._create_user(email, password, **extra_fields)
+        return self._create_user(telephone, password, **extra_fields)
 
 
 class Utilisateur(AbstractBaseUser, PermissionsMixin):
@@ -67,10 +66,10 @@ class Utilisateur(AbstractBaseUser, PermissionsMixin):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
-    email = models.EmailField(unique=True)
+    email = models.EmailField(unique=True, null=True, blank=True)
     identifiant_google = models.CharField(max_length=255, unique=True, null=True, blank=True)
     nom_complet = models.CharField(max_length=255)
-    telephone = models.CharField(max_length=32, null=True, blank=True)
+    telephone = models.CharField(max_length=32, unique=True)
     ville = models.CharField(max_length=255, null=True, blank=True)
     type_vehicule = models.CharField(max_length=20, choices=TypeVehicule.choices, null=True, blank=True)
     url_avatar = models.URLField(null=True, blank=True)
@@ -100,14 +99,14 @@ class Utilisateur(AbstractBaseUser, PermissionsMixin):
 
     objects = UtilisateurManager()
 
-    USERNAME_FIELD = 'email'
+    USERNAME_FIELD = 'telephone'
     REQUIRED_FIELDS = ['nom_complet']
 
     class Meta:
         db_table = 'utilisateur'
 
     def __str__(self):
-        return self.email
+        return self.telephone
 
     def est_premium(self):
         return self.formule == Formule.PREMIUM and (

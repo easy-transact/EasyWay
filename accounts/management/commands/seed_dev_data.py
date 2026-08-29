@@ -16,13 +16,13 @@ from places.utils import normaliser
 MOT_DE_PASSE = 'Demo1234!'
 
 UTILISATEURS = [
-    dict(email='demo@easyway.local', nom_complet='Demo Gratuite', ville='Douala',
+    dict(telephone='+237600000001', email='demo@easyway.local', nom_complet='Demo Gratuite', ville='Douala',
          type_vehicule='VOITURE', formule=Formule.GRATUITE, email_verifie=True),
-    dict(email='premium@easyway.local', nom_complet='Demo Premium', ville='Yaounde',
+    dict(telephone='+237600000002', email='premium@easyway.local', nom_complet='Demo Premium', ville='Yaounde',
          type_vehicule='MOTO', formule=Formule.PREMIUM, email_verifie=True),
-    dict(email='nonverifie@easyway.local', nom_complet='Demo Non Verifie', ville='Douala',
+    dict(telephone='+237600000003', email='nonverifie@easyway.local', nom_complet='Demo Non Verifie', ville='Douala',
          type_vehicule='TAXI', formule=Formule.GRATUITE, email_verifie=False),
-    dict(email='banni@easyway.local', nom_complet='Demo Banni', ville='Douala',
+    dict(telephone='+237600000004', email='banni@easyway.local', nom_complet='Demo Banni', ville='Douala',
          type_vehicule='VOITURE', formule=Formule.GRATUITE, email_verifie=True, est_banni=True),
 ]
 
@@ -50,8 +50,8 @@ class Command(BaseCommand):
         utilisateurs = {}
         for donnees in UTILISATEURS:
             donnees = dict(donnees)
-            email = donnees.pop('email')
-            utilisateur, cree = Utilisateur.objects.get_or_create(email=email, defaults=donnees)
+            telephone = donnees.pop('telephone')
+            utilisateur, cree = Utilisateur.objects.get_or_create(telephone=telephone, defaults=donnees)
             if cree:
                 utilisateur.set_password(MOT_DE_PASSE)
                 utilisateur.cgu_acceptee_le = timezone.now()
@@ -63,10 +63,10 @@ class Command(BaseCommand):
                 utilisateur.set_password(MOT_DE_PASSE)
                 utilisateur.save()
                 Parametres.objects.get_or_create(utilisateur=utilisateur)
-            utilisateurs[email] = utilisateur
-            self.stdout.write(f"  utilisateur: {email} / {MOT_DE_PASSE}")
+            utilisateurs[telephone] = utilisateur
+            self.stdout.write(f"  utilisateur: {telephone} (email: {donnees.get('email')}) / {MOT_DE_PASSE}")
 
-        demo = utilisateurs['demo@easyway.local']
+        demo = utilisateurs['+237600000001']
         Appareil.objects.update_or_create(
             utilisateur=demo, jeton_push='ExponentPushToken[demo-device]',
             defaults=dict(plateforme='ANDROID', version_application='1.0.0', version_systeme='14'),

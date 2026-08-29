@@ -79,7 +79,7 @@ class VerifierExistenceView(APIView):
     def post(self, request):
         serializer = VerifierExistenceSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        existe = Utilisateur.objects.filter(email__iexact=serializer.validated_data['email']).exists()
+        existe = Utilisateur.objects.filter(telephone=serializer.validated_data['telephone']).exists()
         return Response({'exists': existe})
 
 
@@ -109,7 +109,8 @@ class InscriptionView(APIView):
         serializer = InscriptionSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         utilisateur = serializer.save()
-        envoyer_email_verification(utilisateur)
+        if utilisateur.email:
+            envoyer_email_verification(utilisateur)
         return Response(
             {
                 'user': UtilisateurSerializer(utilisateur, context={'request': request}).data,
@@ -272,8 +273,8 @@ class DemandeReinitialisationView(APIView):
     def post(self, request):
         serializer = DemandeReinitialisationSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        utilisateur = Utilisateur.objects.filter(email__iexact=serializer.validated_data['email']).first()
-        if utilisateur is not None:
+        utilisateur = Utilisateur.objects.filter(telephone=serializer.validated_data['telephone']).first()
+        if utilisateur is not None and utilisateur.email:
             envoyer_email_reinitialisation(utilisateur, default_token_generator)
         # Reponse identique que le compte existe ou non : evite de reveler
         # l'existence d'une adresse (meme principe que la connexion en deux temps).

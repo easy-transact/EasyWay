@@ -31,8 +31,11 @@ GEOMETRIE_TEST = encoder_polyline6([(9.7043, 4.0483), (9.6970, 4.0469)])
 
 
 def creer_utilisateur(email='user@easyway.local', **extra):
+    telephone = extra.pop('telephone', None)
+    if not telephone:
+        telephone = email
     utilisateur = Utilisateur.objects.create_user(
-        email=email, password=MOT_DE_PASSE, nom_complet='Test User', **extra
+        telephone=telephone, email=email, password=MOT_DE_PASSE, nom_complet='Test User', **extra
     )
     Parametres.objects.create(utilisateur=utilisateur)
     return utilisateur

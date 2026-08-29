@@ -23,8 +23,11 @@ DOUALA_LAT, DOUALA_LON = 4.0483, 9.7043
 
 
 def creer_utilisateur(email='user@easyway.local', score_reputation=100, **extra):
+    telephone = extra.pop('telephone', None)
+    if not telephone:
+        telephone = email
     utilisateur = Utilisateur.objects.create_user(
-        email=email, password=MOT_DE_PASSE, nom_complet='Test User',
+        telephone=telephone, email=email, password=MOT_DE_PASSE, nom_complet='Test User',
         score_reputation=score_reputation, **extra,
     )
     Parametres.objects.create(utilisateur=utilisateur)

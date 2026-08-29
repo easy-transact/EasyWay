@@ -147,14 +147,15 @@ class ExisteSerializer(serializers.Serializer):
 
 
 class VerifierExistenceSerializer(serializers.Serializer):
-    email = serializers.EmailField()
+    phone = serializers.CharField(source='telephone')
 
 
 class InscriptionSerializer(serializers.ModelSerializer):
     full_name = serializers.CharField(source='nom_complet')
     password = serializers.CharField(write_only=True)
     password_confirmation = serializers.CharField(write_only=True)
-    phone = serializers.CharField(source='telephone', required=False)
+    phone = serializers.CharField(source='telephone', required=True)
+    email = serializers.EmailField(required=False, allow_null=True, allow_blank=True)
     city = serializers.CharField(source='ville', required=False)
     vehicle_type = serializers.ChoiceField(choices=TypeVehicule.choices, source='type_vehicule', required=False)
     accepts_terms = serializers.BooleanField(write_only=True)
@@ -162,11 +163,18 @@ class InscriptionSerializer(serializers.ModelSerializer):
     class Meta:
         model = Utilisateur
         fields = [
-            'email', 'full_name', 'password', 'password_confirmation',
-            'phone', 'city', 'vehicle_type', 'accepts_terms',
+            'phone', 'email', 'full_name', 'password', 'password_confirmation',
+            'city', 'vehicle_type', 'accepts_terms',
         ]
 
+    def validate_phone(self, phone):
+        if Utilisateur.objects.filter(telephone=phone).exists():
+            raise serializers.ValidationError('Phone number already in use.')
+        return phone
+
     def validate_email(self, email):
+        if not email:
+            return None
         email = Utilisateur.objects.normalize_email(email)
         if Utilisateur.objects.filter(email__iexact=email).exists():
             raise serializers.ValidationError('Email already in use.')
@@ -191,6 +199,7 @@ class InscriptionSerializer(serializers.ModelSerializer):
         validated_data.pop('accepts_terms')
         mot_de_passe = validated_data.pop('password')
         utilisateur = Utilisateur.objects.create_user(
+            telephone=validated_data.pop('telephone'),
             password=mot_de_passe,
             cgu_acceptee_le=timezone.now(),
             **validated_data,
@@ -200,13 +209,13 @@ class InscriptionSerializer(serializers.ModelSerializer):
 
 
 class ConnexionSerializer(serializers.Serializer):
-    email = serializers.EmailField()
+    phone = serializers.CharField()
     password = serializers.CharField(write_only=True, trim_whitespace=False)
 
     def validate(self, attrs):
         utilisateur = authenticate(
             request=self.context.get('request'),
-            username=attrs['email'],
+            username=attrs['phone'],
             password=attrs['password'],
         )
         if utilisateur is None:
@@ -229,7 +238,7 @@ class ConnexionGoogleSerializer(serializers.Serializer):
 
 
 class DemandeReinitialisationSerializer(serializers.Serializer):
-    email = serializers.EmailField()
+    phone = serializers.CharField(source='telephone')
 
 
 class ConfirmationReinitialisationSerializer(serializers.Serializer):

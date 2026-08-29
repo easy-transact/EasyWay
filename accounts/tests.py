@@ -12,14 +12,17 @@ MOT_DE_PASSE = 'CorrectHorse9!'
 
 
 def creer_utilisateur(email='user@easyway.local', **extra):
+    telephone = extra.pop('telephone', None)
+    if not telephone:
+        telephone = email
     utilisateur = Utilisateur.objects.create_user(
-        email=email, password=MOT_DE_PASSE, nom_complet='Test User', **extra
+        telephone=telephone, email=email, password=MOT_DE_PASSE, nom_complet='Test User', **extra
     )
     Parametres.objects.create(utilisateur=utilisateur)
     return utilisateur
 
 
-def connecter(client, email, mot_de_passe=MOT_DE_PASSE):
+def connecter(client, identifiant, mot_de_passe=MOT_DE_PASSE):
     """Connexion + en-tete d'auth prets a l'emploi. Vide le cache de throttle
     avant chaque appel : ScopedRateThrottle partage un cache process-wide que
     les TestCase Django ne remettent pas a zero (seule la DB est rollback),
@@ -27,7 +30,7 @@ def connecter(client, email, mot_de_passe=MOT_DE_PASSE):
     cache.clear()
     reponse = client.post(
         reverse('accounts:connexion'),
-        {'email': email, 'password': mot_de_passe},
+        {'phone': identifiant, 'password': mot_de_passe},
         content_type='application/json',
     )
     return {'HTTP_AUTHORIZATION': f"Bearer {reponse.json()['tokens']['access']}"}
