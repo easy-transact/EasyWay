@@ -1,3 +1,4 @@
+from decimal import Decimal
 from unittest.mock import patch
 
 from django.contrib.gis.geos import Point
@@ -13,7 +14,7 @@ from trips.polyline import encoder_polyline6
 from trips.services import client_locate
 from trips.services.disjoncteur import DisjoncteurOuvert
 
-from .cache_incidents import cle_cache_cellule
+from .cache_incidents import cle_cache_cellule, ecriture_recente, invalider_cache_cellule
 from .models import Incident, StatutIncident, TypeIncident, Vote
 from .services import PositionHorsRoute, QuotaDepasse, ServiceIncident
 from .tasks import expirer_incidents
@@ -22,7 +23,7 @@ MOT_DE_PASSE = 'CorrectHorse9!'
 DOUALA_LAT, DOUALA_LON = 4.0483, 9.7043
 
 
-def creer_utilisateur(email='user@easyway.local', score_reputation=100, **extra):
+def creer_utilisateur(email='user@easyway.local', score_reputation=Decimal('0'), **extra):
     telephone = extra.pop('telephone', None)
     if not telephone:
         telephone = email
@@ -103,18 +104,16 @@ class ServiceIncidentSignalerTests(TestCase):
     def _point(self, decalage_lat=0, decalage_lon=0):
         return Point(DOUALA_LON + decalage_lon, DOUALA_LAT + decalage_lat, srid=4326)
 
-    def test_utilisateur_reputation_normale_cree_actif(self):
+    def test_signalement_toujours_cree_en_attente_quelle_que_soit_la_reputation(self):
+        # Plus de raccourci "auteur repute -> ACTIF direct" : tout signalement
+        # part EN_ATTENTE et n'est promu que par confirmer() une fois corrobore
+        # (cf. Incident.seuil_validation).
         incident, doublon = ServiceIncident().signaler(
-            creer_utilisateur(score_reputation=100), TypeIncident.EMBOUTEILLAGE, self._point()
+            creer_utilisateur(score_reputation=Decimal('50')), TypeIncident.EMBOUTEILLAGE, self._point()
         )
         self.assertFalse(doublon)
-        self.assertEqual(incident.statut, StatutIncident.ACTIF)
-
-    def test_utilisateur_faible_reputation_cree_en_attente(self):
-        incident, _ = ServiceIncident().signaler(
-            creer_utilisateur(score_reputation=10), TypeIncident.EMBOUTEILLAGE, self._point()
-        )
         self.assertEqual(incident.statut, StatutIncident.EN_ATTENTE)
+
 
     @override_settings(QUOTA_SIGNALEMENTS_ACTIF=True)
     def test_quota_horaire_depasse(self):
@@ -678,6 +677,20 @@ class InvalidationCacheProchesTests(TestCase):
         ).json()
         self.assertEqual(deuxieme_lecture, [])
 
+    def test_lecture_pendant_verrou_ecriture_ne_recache_pas(self):
+        # Simule une lecture concurrente amorcee juste avant une ecriture : meme
+        # en cache miss (ex. apres invalider_cache_cellule), elle ne doit pas
+        # re-peupler durablement le cache pendant la fenetre de verrou -- sinon
+        # une valeur potentiellement perimee (snapshot pre-ecriture) resterait
+        # servie jusqu'a l'expiration de son propre TTL au lieu du prochain
+        # miss legitime.
+        invalider_cache_cellule(self.incident.cellule_h3_res8)
+        self.assertTrue(ecriture_recente(self.incident.cellule_h3_res8))
+
+        reponse = self.client.get(reverse('community:incidents-proches'), {'cells': self.cellule_hex})
+        self.assertEqual(reponse.status_code, 200)
+        self.assertIsNone(cache.get(cle_cache_cellule(self.incident.cellule_h3_res8)))
+
 
 class IncidentDetailApiTests(TestCase):
     def setUp(self):
@@ -769,16 +782,46 @@ class VoteApiTests(TestCase):
         reponse = self._voter(incident, 'confirm')
         self.assertEqual(reponse.status_code, 400)
 
-    def test_deux_confirmations_promeuvent_en_attente_vers_actif(self):
+    def test_trois_confirmations_promeuvent_en_attente_vers_actif(self):
+        # SEUIL_CONFIANCE_VALIDATION = 3 : il faut 3 votants de reputation
+        # neutre (poids 1.0 chacun, nouveau compte) pour atteindre le seuil.
         incident = creer_incident(self.auteur, statut=StatutIncident.EN_ATTENTE)
         self._voter(incident, 'confirm')
         incident.refresh_from_db()
         self.assertEqual(incident.statut, StatutIncident.EN_ATTENTE)
 
-        autre_votant = creer_utilisateur('votant2@easyway.local')
-        self._voter(incident, 'confirm', jetons=connecter(self.client, autre_votant.email))
+        votant2 = creer_utilisateur('votant2@easyway.local')
+        self._voter(incident, 'confirm', jetons=connecter(self.client, votant2.email))
+        incident.refresh_from_db()
+        self.assertEqual(incident.statut, StatutIncident.EN_ATTENTE)
+
+        votant3 = creer_utilisateur('votant3@easyway.local')
+        self._voter(incident, 'confirm', jetons=connecter(self.client, votant3.email))
         incident.refresh_from_db()
         self.assertEqual(incident.statut, StatutIncident.ACTIF)
+
+    def test_seuil_validation_reduit_pour_auteur_repute(self):
+        # Auteur deja repute (>= SEUIL_REPUTATION_PALIER_REDUCTION) : 2
+        # confirmations suffisent au lieu de 3 pour ses signalements suivants.
+        auteur_repute = creer_utilisateur('repute@easyway.local', score_reputation=Decimal('3'))
+        incident = creer_incident(auteur_repute, statut=StatutIncident.EN_ATTENTE)
+        self._voter(incident, 'confirm')
+        incident.refresh_from_db()
+        self.assertEqual(incident.statut, StatutIncident.EN_ATTENTE)
+
+        votant2 = creer_utilisateur('votant2@easyway.local')
+        self._voter(incident, 'confirm', jetons=connecter(self.client, votant2.email))
+        incident.refresh_from_db()
+        self.assertEqual(incident.statut, StatutIncident.ACTIF)
+
+    def test_validation_credite_lauteur_de_points_de_reputation(self):
+        incident = creer_incident(self.auteur, statut=StatutIncident.EN_ATTENTE)
+        self._voter(incident, 'confirm')
+        for i in (2, 3):
+            votant = creer_utilisateur(f'votant{i}@easyway.local')
+            self._voter(incident, 'confirm', jetons=connecter(self.client, votant.email))
+        self.auteur.refresh_from_db()
+        self.assertEqual(self.auteur.score_reputation, Decimal('0.5'))
 
     def test_score_confiance_pondere_par_reputation(self):
         votant_fort = creer_utilisateur('fort@easyway.local', score_reputation=200)

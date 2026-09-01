@@ -18,7 +18,12 @@ from rest_framework.views import APIView
 from accounts.serializers import MessageSerializer
 from places.utils import normaliser
 
-from .cache_incidents import DUREE_CACHE_CELLULE_S, cle_cache_cellule, invalider_cache_cellule
+from .cache_incidents import (
+    DUREE_CACHE_CELLULE_S,
+    cle_cache_cellule,
+    ecriture_recente,
+    invalider_cache_cellule,
+)
 from .models import Incident, SensVote, StatutIncident, Vote
 from .serializers import (
     IncidentAvecDoublonSerializer,
@@ -173,7 +178,12 @@ class IncidentsProchesView(APIView):
 
             for hex_cell in manquantes:
                 donnees = IncidentSerializer(par_cellule.get(hex_cell, []), many=True).data
-                cache.set(cle_cache_cellule(cellules_int[hex_cell]), donnees, timeout=DUREE_CACHE_CELLULE_S)
+                # Ne pas cacher si la cellule vient d'etre invalidee (ecriture recente,
+                # cf. cache_incidents.py) : cette lecture a pu demarrer sa requete DB
+                # juste avant l'ecriture (snapshot perime) -- la cacher ici la ferait
+                # servir jusqu'a son propre TTL au lieu du prochain miss legitime.
+                if not ecriture_recente(cellules_int[hex_cell]):
+                    cache.set(cle_cache_cellule(cellules_int[hex_cell]), donnees, timeout=DUREE_CACHE_CELLULE_S)
                 resultats_par_cellule[hex_cell] = donnees
 
         fusion = [incident for hex_cell in cellules_hex for incident in resultats_par_cellule[hex_cell]]

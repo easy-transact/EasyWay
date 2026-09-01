@@ -31,7 +31,6 @@ from .models import (
 QUOTA_SIGNALEMENTS_PAR_HEURE = 10
 RAYON_DOUBLON_M = 150
 SECTEUR_DOUBLON_DEGRES = 45
-SEUIL_REPUTATION_AUTO_ACTIF = 30
 # Au-dela, on considere que la position n'est sur/pres d'aucune route connue
 # de Valhalla -- pas mesure sur donnees reelles (derive GPS, imprecision
 # urbaine autour des grands carrefours), a ajuster avec de l'usage reel.
@@ -74,10 +73,11 @@ class ServiceIncident:
                     nom_voie=geocodage['label'] if geocodage else '',
                     ville=geocodage['city'] if geocodage else '',
                     ville_normalisee=normaliser(geocodage['city']) if geocodage and geocodage['city'] else '',
-                    statut=(
-                        StatutIncident.EN_ATTENTE if utilisateur.score_reputation < SEUIL_REPUTATION_AUTO_ACTIF
-                        else StatutIncident.ACTIF
-                    ),
+                    # Toujours EN_ATTENTE a la creation, quelle que soit la reputation
+                    # de l'auteur : promu ACTIF par Incident.confirmer() une fois le
+                    # score de confiance corrobore par d'autres utilisateurs
+                    # (seuil reduit si l'auteur est deja repute, cf. seuil_validation()).
+                    statut=StatutIncident.EN_ATTENTE,
                     expire_le=timezone.now() + timezone.timedelta(
                         minutes=DUREE_VIE_BASE_PAR_TYPE.get(type_incident, 60)
                     ),

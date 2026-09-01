@@ -1,4 +1,5 @@
 import uuid
+from decimal import Decimal
 
 import h3
 from django.conf import settings
@@ -120,6 +121,18 @@ DUREE_VIE_BASE_PAR_TYPE = {
     TypeIncident.RADAR: 480,
 }
 
+# Seuil de score_confiance (somme des poids de vote, cf. Utilisateur.poids_de_vote)
+# a atteindre pour qu'un signalement EN_ATTENTE passe ACTIF et devienne visible
+# de tous. Equivaut a ~3 confirmations d'utilisateurs de reputation neutre (poids 1.0).
+SEUIL_CONFIANCE_VALIDATION = Decimal('3')
+# Un auteur suffisamment repute a moins besoin d'etre corrobore : ses
+# signalements suivants ne demandent plus que ~2 confirmations neutres.
+SEUIL_CONFIANCE_VALIDATION_REDUITE = Decimal('2')
+SEUIL_REPUTATION_PALIER_REDUCTION = Decimal('3')
+# Gain de reputation de l'auteur a chaque signalement qui atteint le seuil
+# de validation ci-dessus (un "bon signalement").
+POINTS_REPUTATION_PAR_VALIDATION = Decimal('0.5')
+
 
 class Incident(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -193,9 +206,17 @@ class Incident(models.Model):
     # confirmer()/infirmer() font une lecture-modification-ecriture en Python
     # (pas de F()) : l'appelant doit recuperer l'incident avec
     # select_for_update() dans une transaction, comme pour la detection de
-    # doublon. C'est ce qui permet a confirmer() de lire self.confirmations a
-    # jour pour la promotion EN_ATTENTE -> ACTIF juste en dessous -- un F()
+    # doublon. C'est ce qui permet a confirmer() de lire self.score_confiance
+    # a jour pour la promotion EN_ATTENTE -> ACTIF juste en dessous -- un F()
     # laisserait l'objet avec une expression non resolue apres save().
+
+    def seuil_validation(self) -> Decimal:
+        # Auteur suffisamment repute (>= SEUIL_REPUTATION_PALIER_REDUCTION,
+        # atteint apres quelques signalements valides) : seuil reduit, ses
+        # signalements suivants ont besoin de moins de corroboration.
+        if self.auteur.score_reputation >= SEUIL_REPUTATION_PALIER_REDUCTION:
+            return SEUIL_CONFIANCE_VALIDATION_REDUITE
+        return SEUIL_CONFIANCE_VALIDATION
 
     def confirmer(self, vote: 'Vote'):
         self.confirmations += 1
@@ -205,13 +226,18 @@ class Incident(models.Model):
         self.expire_le = min(self.expire_le + timezone.timedelta(minutes=10), timezone.now() + duree_max)
 
         champs = ['confirmations', 'score_confiance', 'expire_le']
-        # Deux confirmations independantes suffisent a faire sortir un
-        # signalement a faible reputation de EN_ATTENTE (cf. discussion :
-        # EN_ATTENTE reste visible dans /proches/, sinon personne ne peut le
-        # confirmer). L'unicite (incident, votant) garantit l'independance.
-        if self.statut == StatutIncident.EN_ATTENTE and self.confirmations >= 2:
+        # score_confiance (somme des poids de vote, pas un simple comptage) doit
+        # atteindre seuil_validation() pour sortir un signalement de EN_ATTENTE
+        # (cf. discussion : EN_ATTENTE reste visible dans /proches/, sinon
+        # personne ne peut le confirmer). L'unicite (incident, votant) garantit
+        # l'independance des votes qui composent ce score.
+        if self.statut == StatutIncident.EN_ATTENTE and self.score_confiance >= self.seuil_validation():
             self.statut = StatutIncident.ACTIF
             champs.append('statut')
+            # "Bon signalement" : l'auteur gagne des points de reputation des
+            # que la communaute valide son signalement.
+            self.auteur.score_reputation += POINTS_REPUTATION_PAR_VALIDATION
+            self.auteur.save(update_fields=['score_reputation'])
         self.save(update_fields=champs)
 
     def infirmer(self, vote: 'Vote'):

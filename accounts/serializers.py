@@ -40,7 +40,9 @@ class UtilisateurSerializer(serializers.ModelSerializer):
     avatar_url = serializers.SerializerMethodField()
     email_verified = serializers.BooleanField(source='email_verifie', read_only=True)
     plan = serializers.ChoiceField(choices=Formule.choices, source='formule', read_only=True)
-    reputation_score = serializers.IntegerField(source='score_reputation', read_only=True)
+    reputation_score = serializers.DecimalField(
+        source='score_reputation', max_digits=6, decimal_places=1, read_only=True
+    )
     invisible_mode = serializers.BooleanField(source='mode_invisible', read_only=True)
     plan_limits = DroitsSerializer(source='droits', read_only=True)
 

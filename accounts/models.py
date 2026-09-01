@@ -81,7 +81,9 @@ class Utilisateur(AbstractBaseUser, PermissionsMixin):
     formule = models.CharField(max_length=20, choices=Formule.choices, default=Formule.GRATUITE)
     formule_expire_le = models.DateTimeField(null=True, blank=True)
 
-    score_reputation = models.IntegerField(default=100)
+    # Part a 0 (nouveau compte) et progresse par +0.5 a chaque signalement
+    # de l'utilisateur valide par la communaute (cf. Incident.confirmer).
+    score_reputation = models.DecimalField(max_digits=6, decimal_places=1, default=Decimal('0'))
     points = models.IntegerField(default=0)
 
     est_banni = models.BooleanField(default=False)
@@ -117,9 +119,13 @@ class Utilisateur(AbstractBaseUser, PermissionsMixin):
         # Decimal, pas float : alimente Vote.poids et Incident.score_confiance,
         # tous deux DecimalField -- un float y leve un TypeError a l'usage
         # (Decimal ne supporte pas +=/-= avec un float).
-        # Poids borne entre 0,2 et 2,0 : evite qu'un compte tres repute
-        # ecrase le consensus et qu'un compte peu repute soit sans voix.
-        poids = Decimal(self.score_reputation) / 100
+        # Poids neutre (1.0) a 0 point (nouveau compte) : sinon les tout
+        # premiers signalements ne pourraient jamais atteindre le seuil de
+        # validation (Incident.SEUIL_CONFIANCE_VALIDATION = 3) sans un nombre
+        # disproportionne de votants. Progresse ensuite de +0.15 par point de
+        # reputation jusqu'au plafond 2,0 (~13 signalements valides) ; borne
+        # basse 0,2 conservee si un malus de reputation est introduit un jour.
+        poids = Decimal('1') + (self.score_reputation * Decimal('0.15'))
         return max(Decimal('0.2'), min(Decimal('2.0'), poids))
 
     def peut_signaler(self):
