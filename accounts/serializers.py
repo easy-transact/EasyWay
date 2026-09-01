@@ -254,3 +254,32 @@ class ConfirmationReinitialisationSerializer(serializers.Serializer):
         except DjangoValidationError as exc:
             raise serializers.ValidationError(list(exc.messages))
         return valeur
+
+
+class UtilisateurModerationSerializer(serializers.ModelSerializer):
+    """GET/POST /api/staff/users/... : forme complete reservee au staff --
+    contrairement a UtilisateurSerializer (reponse /users/me/), inclut
+    is_staff et l'etat de bannissement."""
+
+    phone = serializers.CharField(source='telephone', read_only=True)
+    full_name = serializers.CharField(source='nom_complet', read_only=True)
+    city = serializers.CharField(source='ville', read_only=True)
+    plan = serializers.ChoiceField(choices=Formule.choices, source='formule', read_only=True)
+    reputation_score = serializers.DecimalField(
+        source='score_reputation', max_digits=6, decimal_places=1, read_only=True
+    )
+    is_banned = serializers.BooleanField(source='est_banni', read_only=True)
+    banned_until = serializers.DateTimeField(source='banni_jusqu_a', read_only=True)
+
+    class Meta:
+        model = Utilisateur
+        fields = [
+            'id', 'phone', 'full_name', 'email', 'city', 'plan', 'reputation_score',
+            'is_banned', 'banned_until', 'is_staff', 'date_joined',
+        ]
+        read_only_fields = fields
+
+
+class BanUtilisateurSerializer(serializers.Serializer):
+    # Absent/null = ban permanent (jusqu'a un debannir() explicite).
+    until = serializers.DateTimeField(required=False, allow_null=True, default=None)

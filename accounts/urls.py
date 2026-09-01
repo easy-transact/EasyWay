@@ -46,4 +46,9 @@ urlpatterns = [
 
     # Configuration publique
     path('config/', views.ConfigView.as_view(), name='config'),
+
+    # Back-office (moderation, reserve au staff)
+    path('staff/users/', views.UtilisateurModerationListView.as_view(), name='staff-utilisateurs'),
+    path('staff/users/<uuid:id>/ban/', views.UtilisateurBanView.as_view(), name='staff-utilisateur-bannir'),
+    path('staff/users/<uuid:id>/unban/', views.UtilisateurUnbanView.as_view(), name='staff-utilisateur-debannir'),
 ]

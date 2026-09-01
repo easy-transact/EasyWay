@@ -1,13 +1,21 @@
 from django.contrib.auth.tokens import default_token_generator
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db.models import Q
 from django.utils import timezone
 from django.utils.encoding import force_str
 from django.utils.http import urlsafe_base64_decode
-from drf_spectacular.utils import OpenApiResponse, extend_schema, extend_schema_view, inline_serializer
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import (
+    OpenApiParameter,
+    OpenApiResponse,
+    extend_schema,
+    extend_schema_view,
+    inline_serializer,
+)
 from rest_framework import serializers as drf_serializers
 from rest_framework import status
 from rest_framework.generics import get_object_or_404
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
@@ -19,9 +27,11 @@ from community.models import TypeIncident
 from .config_data import VERSION_MINIMALE_APP, VILLES_DISPONIBLES
 from .emails import envoyer_email_reinitialisation, envoyer_email_verification
 from .models import Appareil, Parametres, TypeVehicule, Utilisateur
+from .pagination import StaffPagination
 from .serializers import (
     AppareilSerializer,
     AvatarSerializer,
+    BanUtilisateurSerializer,
     ConfirmationReinitialisationSerializer,
     ConnexionGoogleSerializer,
     ConnexionSerializer,
@@ -32,6 +42,7 @@ from .serializers import (
     MessageSerializer,
     ParametresSerializer,
     UtilisateurMiseAJourSerializer,
+    UtilisateurModerationSerializer,
     UtilisateurSerializer,
     VerifierExistenceSerializer,
 )
@@ -484,3 +495,86 @@ class ConfigView(APIView):
             'incident_types': dict(TypeIncident.choices),
             'minimum_app_version': VERSION_MINIMALE_APP,
         })
+
+
+@extend_schema(
+    tags=['Staff Users'],
+    summary='Lister les utilisateurs (moderation)',
+    description=(
+        "Reserve au staff (is_staff). `search` filtre (icontains) sur telephone/nom/"
+        "email ; `banned=true`/`false` filtre sur l'etat de bannissement."
+    ),
+    parameters=[
+        OpenApiParameter('search', OpenApiTypes.STR),
+        OpenApiParameter('banned', OpenApiTypes.BOOL),
+        OpenApiParameter('page', OpenApiTypes.INT),
+        OpenApiParameter('page_size', OpenApiTypes.INT),
+    ],
+    responses={200: UtilisateurModerationSerializer(many=True)},
+)
+class UtilisateurModerationListView(APIView):
+    """GET /api/staff/users/?search=&banned=&page= : liste des comptes."""
+
+    permission_classes = [IsAdminUser]
+    pagination_class = StaffPagination
+
+    def get(self, request):
+        utilisateurs = Utilisateur.objects.all()
+
+        recherche = request.query_params.get('search', '').strip()
+        if recherche:
+            utilisateurs = utilisateurs.filter(
+                Q(telephone__icontains=recherche)
+                | Q(nom_complet__icontains=recherche)
+                | Q(email__icontains=recherche)
+            )
+
+        banni = request.query_params.get('banned')
+        if banni is not None:
+            utilisateurs = utilisateurs.filter(est_banni=banni.lower() == 'true')
+
+        utilisateurs = utilisateurs.order_by('-date_joined')
+
+        paginateur = self.pagination_class()
+        page = paginateur.paginate_queryset(utilisateurs, request)
+        return paginateur.get_paginated_response(UtilisateurModerationSerializer(page, many=True).data)
+
+
+@extend_schema(
+    tags=['Staff Users'],
+    summary='Bannir un utilisateur',
+    description=(
+        "Reserve au staff (is_staff). cf. Utilisateur.bannir(). `until` absent/null "
+        "= ban permanent. Refuse avec 400 si la cible est elle-meme staff."
+    ),
+    request=BanUtilisateurSerializer,
+    responses={200: UtilisateurModerationSerializer, 400: MessageSerializer},
+)
+class UtilisateurBanView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def post(self, request, id):
+        serializer = BanUtilisateurSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        utilisateur = get_object_or_404(Utilisateur, id=id)
+        if utilisateur.is_staff:
+            return Response({'detail': 'Cannot ban a staff account.'}, status=400)
+
+        utilisateur.bannir(jusqu_a=serializer.validated_data['until'])
+        return Response(UtilisateurModerationSerializer(utilisateur).data)
+
+
+@extend_schema(
+    tags=['Staff Users'],
+    summary='Debannir un utilisateur',
+    description='Reserve au staff (is_staff). cf. Utilisateur.debannir().',
+    responses={200: UtilisateurModerationSerializer},
+)
+class UtilisateurUnbanView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def post(self, request, id):
+        utilisateur = get_object_or_404(Utilisateur, id=id)
+        utilisateur.debannir()
+        return Response(UtilisateurModerationSerializer(utilisateur).data)

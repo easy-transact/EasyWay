@@ -345,3 +345,72 @@ class ConfigTests(TestCase):
         self.assertIn('vehicle_types', corps)
         self.assertIn('incident_types', corps)
         self.assertIn('minimum_app_version', corps)
+
+
+class UtilisateurModerationApiTests(TestCase):
+    def setUp(self):
+        self.staff = creer_utilisateur('staff@easyway.local', is_staff=True)
+        self.jetons_staff = connecter(self.client, self.staff.email)
+        self.cible = creer_utilisateur('cible@easyway.local')
+
+    def test_liste_reserve_au_staff_anonyme(self):
+        reponse = self.client.get(reverse('accounts:staff-utilisateurs'))
+        self.assertEqual(reponse.status_code, 401)
+
+    def test_liste_reserve_au_staff_non_staff(self):
+        non_staff = creer_utilisateur('simple@easyway.local')
+        jetons = connecter(self.client, non_staff.email)
+        reponse = self.client.get(reverse('accounts:staff-utilisateurs'), **jetons)
+        self.assertEqual(reponse.status_code, 403)
+
+    def test_recherche_filtre_par_telephone_ou_email(self):
+        creer_utilisateur('autre@easyway.local', telephone='+237611110000')
+        reponse = self.client.get(
+            reverse('accounts:staff-utilisateurs'), {'search': 'cible'}, **self.jetons_staff
+        )
+        self.assertEqual(reponse.status_code, 200)
+        emails = [r['email'] for r in reponse.json()['results']]
+        self.assertEqual(emails, ['cible@easyway.local'])
+
+    def test_bannir_definit_est_banni_et_expiration(self):
+        url = reverse('accounts:staff-utilisateur-bannir', kwargs={'id': self.cible.id})
+        reponse = self.client.post(
+            url, {'until': '2030-01-01T00:00:00Z'}, content_type='application/json', **self.jetons_staff
+        )
+        self.assertEqual(reponse.status_code, 200)
+        self.assertTrue(reponse.json()['is_banned'])
+        self.cible.refresh_from_db()
+        self.assertTrue(self.cible.est_banni)
+        self.assertIsNotNone(self.cible.banni_jusqu_a)
+
+    def test_bannir_permanent_sans_until(self):
+        url = reverse('accounts:staff-utilisateur-bannir', kwargs={'id': self.cible.id})
+        reponse = self.client.post(url, {}, content_type='application/json', **self.jetons_staff)
+        self.assertEqual(reponse.status_code, 200)
+        self.cible.refresh_from_db()
+        self.assertTrue(self.cible.est_banni)
+        self.assertIsNone(self.cible.banni_jusqu_a)
+
+    def test_bannir_refuse_sur_compte_staff(self):
+        autre_staff = creer_utilisateur('staff2@easyway.local', is_staff=True)
+        url = reverse('accounts:staff-utilisateur-bannir', kwargs={'id': autre_staff.id})
+        reponse = self.client.post(url, {}, content_type='application/json', **self.jetons_staff)
+        self.assertEqual(reponse.status_code, 400)
+        autre_staff.refresh_from_db()
+        self.assertFalse(autre_staff.est_banni)
+
+    def test_debannir_reinitialise_les_champs(self):
+        self.cible.bannir()
+        url = reverse('accounts:staff-utilisateur-debannir', kwargs={'id': self.cible.id})
+        reponse = self.client.post(url, **self.jetons_staff)
+        self.assertEqual(reponse.status_code, 200)
+        self.cible.refresh_from_db()
+        self.assertFalse(self.cible.est_banni)
+        self.assertIsNone(self.cible.banni_jusqu_a)
+
+    def test_non_staff_recoit_403_sur_bannir(self):
+        non_staff = creer_utilisateur('simple2@easyway.local')
+        jetons = connecter(self.client, non_staff.email)
+        url = reverse('accounts:staff-utilisateur-bannir', kwargs={'id': self.cible.id})
+        reponse = self.client.post(url, {}, content_type='application/json', **jetons)
+        self.assertEqual(reponse.status_code, 403)

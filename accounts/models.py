@@ -131,6 +131,18 @@ class Utilisateur(AbstractBaseUser, PermissionsMixin):
     def peut_signaler(self):
         return self.is_active and not self.est_banni
 
+    def bannir(self, jusqu_a=None):
+        # jusqu_a=None : ban permanent (jusqu'a un debannir() explicite),
+        # meme convention que banni_jusqu_a nullable deja sur le champ.
+        self.est_banni = True
+        self.banni_jusqu_a = jusqu_a
+        self.save(update_fields=['est_banni', 'banni_jusqu_a'])
+
+    def debannir(self):
+        self.est_banni = False
+        self.banni_jusqu_a = None
+        self.save(update_fields=['est_banni', 'banni_jusqu_a'])
+
     @property
     def droits(self):
         # Droits est une table de reference par formule (2 lignes), pas une

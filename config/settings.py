@@ -77,6 +77,10 @@ MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'corsheaders.middleware.CorsMiddleware',
+    # cf. config/middleware.py : le reverse proxy prod (ea-nginx/cPanel) met en
+    # cache par URL seule, sans tenir compte d'Authorization -- doit tourner
+    # avant tout middleware qui pourrait court-circuiter la reponse.
+    'config.middleware.NoStoreApiMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -177,11 +181,12 @@ SIMPLE_JWT = {
 # attendue lors de la verification du jeton d'identite transmis par l'app mobile.
 GOOGLE_OAUTH_CLIENT_ID = env('GOOGLE_OAUTH_CLIENT_ID', default='')
 
-# test-ui/ (Vite, port par defaut 5173) : seul client web amene a appeler
-# l'API en cross-origin pour l'instant. Vide (donc aucune origine autorisee)
-# des que DEBUG=False.
+# test-ui/ (Vite, port 5173) et back-office/ (Vite, port 5174 -- 5173 deja
+# pris) : les deux clients web amenes a appeler l'API en cross-origin pour
+# l'instant. Vide (donc aucune origine autorisee) des que DEBUG=False.
 CORS_ALLOWED_ORIGINS = env.list(
-    'CORS_ALLOWED_ORIGINS', default=['http://localhost:5173'] if DEBUG else []
+    'CORS_ALLOWED_ORIGINS',
+    default=['http://localhost:5173', 'http://localhost:5174'] if DEBUG else [],
 )
 
 # Idempotency-Key (POST /api/incidents/, cf. community/views.py) n'est pas

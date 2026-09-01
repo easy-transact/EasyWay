@@ -11,10 +11,11 @@ from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema, extend_schema_view
 from rest_framework import status
 from rest_framework.generics import get_object_or_404
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAdminUser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from accounts.pagination import StaffPagination
 from accounts.serializers import MessageSerializer
 from places.utils import normaliser
 
@@ -28,6 +29,8 @@ from .models import Incident, SensVote, StatutIncident, Vote
 from .serializers import (
     IncidentAvecDoublonSerializer,
     IncidentCreationSerializer,
+    IncidentModerationSerializer,
+    IncidentRetraitSerializer,
     IncidentsSurTrajetSerializer,
     IncidentSerializer,
     VoteIncidentSerializer,
@@ -474,3 +477,59 @@ class MesSignalementsView(APIView):
     def get(self, request):
         incidents = request.user.incidents_signales.order_by('-cree_le')
         return Response(IncidentSerializer(incidents, many=True).data)
+
+
+@extend_schema(
+    tags=['Staff Incidents'],
+    summary='Lister les incidents (moderation)',
+    description=(
+        "Reserve au staff (is_staff). Filtre par defaut sur ACTIF+EN_ATTENTE -- "
+        "passer `status=RETIRE`/`EXPIRE`/`FUSIONNE` pour voir les autres files."
+    ),
+    parameters=[
+        OpenApiParameter('status', OpenApiTypes.STR, description='Defaut ACTIF+EN_ATTENTE.'),
+        OpenApiParameter('page', OpenApiTypes.INT),
+        OpenApiParameter('page_size', OpenApiTypes.INT),
+    ],
+    responses={200: IncidentModerationSerializer(many=True)},
+)
+class IncidentModerationListView(APIView):
+    """GET /api/staff/incidents/?status=&page= : file de moderation des incidents."""
+
+    permission_classes = [IsAdminUser]
+    pagination_class = StaffPagination
+
+    def get(self, request):
+        statut = request.query_params.get('status')
+        if statut:
+            incidents = Incident.objects.filter(statut=statut)
+        else:
+            incidents = Incident.objects.filter(statut__in=[StatutIncident.ACTIF, StatutIncident.EN_ATTENTE])
+        incidents = incidents.order_by('-cree_le')
+
+        paginateur = self.pagination_class()
+        page = paginateur.paginate_queryset(incidents, request)
+        return paginateur.get_paginated_response(IncidentModerationSerializer(page, many=True).data)
+
+
+@extend_schema(
+    tags=['Staff Incidents'],
+    summary='Retirer un signalement',
+    description=(
+        'Reserve au staff (is_staff). cf. Incident.retirer() -- meme invalidation '
+        'du cache de cellule que le retrait par son propre auteur (IncidentDetailView.delete).'
+    ),
+    request=IncidentRetraitSerializer,
+    responses={200: IncidentModerationSerializer},
+)
+class IncidentRetraitStaffView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def post(self, request, id):
+        serializer = IncidentRetraitSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        incident = get_object_or_404(Incident, id=id)
+        incident.retirer(motif=serializer.validated_data['reason'])
+        invalider_cache_cellule(incident.cellule_h3_res8)
+        return Response(IncidentModerationSerializer(incident).data)

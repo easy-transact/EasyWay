@@ -24,6 +24,10 @@ UTILISATEURS = [
          type_vehicule='TAXI', formule=Formule.GRATUITE, email_verifie=False),
     dict(telephone='+237600000004', email='banni@easyway.local', nom_complet='Demo Banni', ville='Douala',
          type_vehicule='VOITURE', formule=Formule.GRATUITE, email_verifie=True, est_banni=True),
+    # Pour tester le back-office (moderation) -- is_staff seul suffit, IsAdminUser
+    # ne verifie pas is_superuser.
+    dict(telephone='+237600000005', email='staff@easyway.local', nom_complet='Demo Staff', ville='Douala',
+         type_vehicule='VOITURE', formule=Formule.GRATUITE, email_verifie=True, is_staff=True),
 ]
 
 # (nom, categorie, ville, quartier, lat, lon)

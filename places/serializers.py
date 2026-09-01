@@ -215,3 +215,44 @@ class RechercheRecenteSerializer(serializers.ModelSerializer):
             utilisateur=self.context['request'].user,
             **validated_data,
         )
+
+
+class LieuModerationSerializer(serializers.ModelSerializer):
+    """GET/POST /api/staff/places/... : forme complete pour la file de
+    moderation, contrairement a LieuRechercheSerializer (allegee) -- proche
+    de LieuDetailSerializer mais inclut aussi les lieux non approuves et
+    l'auteur de la proposition."""
+
+    name = serializers.CharField(source='nom', read_only=True)
+    category = serializers.CharField(source='categorie', read_only=True)
+    address = serializers.CharField(source='adresse', read_only=True)
+    neighborhood = serializers.CharField(source='quartier', read_only=True)
+    city = serializers.CharField(source='ville', read_only=True)
+    lat = serializers.SerializerMethodField()
+    lon = serializers.SerializerMethodField()
+    status = serializers.CharField(source='statut', read_only=True)
+    proposed_by = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Lieu
+        fields = [
+            'id', 'name', 'category', 'address', 'neighborhood', 'city',
+            'lat', 'lon', 'source', 'status', 'proposed_by',
+        ]
+        read_only_fields = fields
+
+    @extend_schema_field(serializers.FloatField())
+    def get_lat(self, lieu):
+        return lieu.position.y
+
+    @extend_schema_field(serializers.FloatField())
+    def get_lon(self, lieu):
+        return lieu.position.x
+
+    @extend_schema_field(serializers.CharField(allow_null=True))
+    def get_proposed_by(self, lieu):
+        return lieu.propose_par.telephone if lieu.propose_par_id else None
+
+
+class LieuRejetSerializer(serializers.Serializer):
+    reason = serializers.CharField(max_length=255)

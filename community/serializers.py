@@ -46,6 +46,27 @@ class IncidentSerializer(serializers.ModelSerializer):
         return incident.impact_estime()
 
 
+class IncidentModerationSerializer(IncidentSerializer):
+    """GET/POST /api/staff/incidents/... : IncidentSerializer + l'auteur et le
+    motif de retrait, utiles en moderation mais absents de la reponse
+    publique (jamais expose a un utilisateur autre que l'auteur/le staff)."""
+
+    author_phone = serializers.SerializerMethodField()
+    reason = serializers.CharField(source='motif_retrait', read_only=True, allow_null=True)
+
+    class Meta(IncidentSerializer.Meta):
+        fields = IncidentSerializer.Meta.fields + ['author_phone', 'reason']
+        read_only_fields = fields
+
+    @extend_schema_field(serializers.CharField())
+    def get_author_phone(self, incident):
+        return incident.auteur.telephone
+
+
+class IncidentRetraitSerializer(serializers.Serializer):
+    reason = serializers.CharField(max_length=255)
+
+
 class IncidentAvecDoublonSerializer(IncidentSerializer):
     """Documentation only: forme reelle de la reponse d'IncidentCreationView,
     IncidentSerializer + le flag de fusion ajoute manuellement dans la vue."""

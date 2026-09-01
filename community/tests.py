@@ -878,3 +878,60 @@ class ExpirationTaskTests(TestCase):
         expirer_incidents()
         incident.refresh_from_db()
         self.assertEqual(incident.statut, StatutIncident.ACTIF)
+
+
+class IncidentModerationApiTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.staff = creer_utilisateur('staff@easyway.local', is_staff=True)
+        self.jetons_staff = connecter(self.client, self.staff.email)
+        self.auteur = creer_utilisateur('auteur@easyway.local')
+        self.incident = creer_incident(self.auteur, type_incident=TypeIncident.EMBOUTEILLAGE)
+
+    def test_liste_reserve_au_staff_anonyme(self):
+        reponse = self.client.get(reverse('community:staff-incidents'))
+        self.assertEqual(reponse.status_code, 401)
+
+    def test_liste_reserve_au_staff_non_staff(self):
+        non_staff = creer_utilisateur('simple@easyway.local')
+        jetons = connecter(self.client, non_staff.email)
+        reponse = self.client.get(reverse('community:staff-incidents'), **jetons)
+        self.assertEqual(reponse.status_code, 403)
+
+    def test_liste_par_defaut_montre_actifs_et_en_attente(self):
+        reponse = self.client.get(reverse('community:staff-incidents'), **self.jetons_staff)
+        self.assertEqual(reponse.status_code, 200)
+        ids = [r['id'] for r in reponse.json()['results']]
+        self.assertIn(str(self.incident.id), ids)
+
+    def test_retirer_change_statut_et_motif(self):
+        url = reverse('community:staff-incident-retirer', kwargs={'id': self.incident.id})
+        reponse = self.client.post(
+            url, {'reason': 'Faux signalement'}, content_type='application/json', **self.jetons_staff
+        )
+        self.assertEqual(reponse.status_code, 200)
+        self.assertEqual(reponse.json()['status'], StatutIncident.RETIRE)
+        self.assertEqual(reponse.json()['reason'], 'Faux signalement')
+        self.incident.refresh_from_db()
+        self.assertEqual(self.incident.statut, StatutIncident.RETIRE)
+        self.assertEqual(self.incident.motif_retrait, 'Faux signalement')
+
+    def test_retirer_invalide_le_cache_de_la_cellule(self):
+        import h3
+        cellule_hex = h3.int_to_str(self.incident.cellule_h3_res8)
+        self.client.get(reverse('community:incidents-proches'), {'cells': cellule_hex})
+        self.assertIsNotNone(cache.get(cle_cache_cellule(self.incident.cellule_h3_res8)))
+
+        url = reverse('community:staff-incident-retirer', kwargs={'id': self.incident.id})
+        self.client.post(url, {'reason': 'Spam'}, content_type='application/json', **self.jetons_staff)
+
+        self.assertIsNone(cache.get(cle_cache_cellule(self.incident.cellule_h3_res8)))
+
+    def test_non_staff_ne_peut_pas_retirer(self):
+        non_staff = creer_utilisateur('simple2@easyway.local')
+        jetons = connecter(self.client, non_staff.email)
+        url = reverse('community:staff-incident-retirer', kwargs={'id': self.incident.id})
+        reponse = self.client.post(url, {'reason': 'Spam'}, content_type='application/json', **jetons)
+        self.assertEqual(reponse.status_code, 403)
+        self.incident.refresh_from_db()
+        self.assertEqual(self.incident.statut, StatutIncident.ACTIF)

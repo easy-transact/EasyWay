@@ -21,7 +21,7 @@ class UtilisateurAdmin(UserAdmin):
         ('Permissions', {'fields': ('is_active', 'is_staff', 'is_superuser', 'groups', 'user_permissions')}),
     )
     add_fieldsets = (
-        (None, {'classes': ('wide',), 'fields': ('email', 'nom_complet', 'password1', 'password2')}),
+        (None, {'classes': ('wide',), 'fields': ('telephone', 'email', 'nom_complet', 'password1', 'password2')}),
     )
 
 

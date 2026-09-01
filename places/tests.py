@@ -568,3 +568,52 @@ class ImportVillesGpkgTests(TestCase):
         ):
             with self.assertRaises(CommandError):
                 call_command('import_villes_gpkg', 'fake.gpkg')
+
+
+class LieuModerationApiTests(TestCase):
+    def setUp(self):
+        self.staff = creer_utilisateur('staff@easyway.local', is_staff=True)
+        self.jetons_staff = connecter(self.client, self.staff.email)
+        self.lieu_en_attente = creer_lieu('Boutique Test', 4.05, 9.70, statut=StatutLieu.EN_ATTENTE)
+
+    def test_liste_reserve_au_staff_anonyme(self):
+        reponse = self.client.get(reverse('places:staff-lieux'))
+        self.assertEqual(reponse.status_code, 401)
+
+    def test_liste_reserve_au_staff_non_staff(self):
+        non_staff = creer_utilisateur('simple@easyway.local')
+        jetons = connecter(self.client, non_staff.email)
+        reponse = self.client.get(reverse('places:staff-lieux'), **jetons)
+        self.assertEqual(reponse.status_code, 403)
+
+    def test_liste_par_defaut_ne_montre_que_en_attente(self):
+        creer_lieu('Deja Approuve', 4.06, 9.71, statut=StatutLieu.APPROUVE)
+        reponse = self.client.get(reverse('places:staff-lieux'), **self.jetons_staff)
+        self.assertEqual(reponse.status_code, 200)
+        noms = [r['name'] for r in reponse.json()['results']]
+        self.assertEqual(noms, ['Boutique Test'])
+
+    def test_approuver_change_le_statut(self):
+        url = reverse('places:staff-lieu-approuver', kwargs={'id': self.lieu_en_attente.id})
+        reponse = self.client.post(url, **self.jetons_staff)
+        self.assertEqual(reponse.status_code, 200)
+        self.assertEqual(reponse.json()['status'], StatutLieu.APPROUVE)
+        self.lieu_en_attente.refresh_from_db()
+        self.assertEqual(self.lieu_en_attente.statut, StatutLieu.APPROUVE)
+
+    def test_rejeter_change_le_statut(self):
+        url = reverse('places:staff-lieu-rejeter', kwargs={'id': self.lieu_en_attente.id})
+        reponse = self.client.post(
+            url, {'reason': 'Doublon existant'}, content_type='application/json', **self.jetons_staff
+        )
+        self.assertEqual(reponse.status_code, 200)
+        self.assertEqual(reponse.json()['status'], StatutLieu.REJETE)
+
+    def test_non_staff_ne_peut_pas_approuver(self):
+        non_staff = creer_utilisateur('simple2@easyway.local')
+        jetons = connecter(self.client, non_staff.email)
+        url = reverse('places:staff-lieu-approuver', kwargs={'id': self.lieu_en_attente.id})
+        reponse = self.client.post(url, **jetons)
+        self.assertEqual(reponse.status_code, 403)
+        self.lieu_en_attente.refresh_from_db()
+        self.assertEqual(self.lieu_en_attente.statut, StatutLieu.EN_ATTENTE)

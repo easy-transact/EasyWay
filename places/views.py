@@ -15,18 +15,21 @@ from drf_spectacular.utils import (
 from rest_framework import serializers as drf_serializers
 from rest_framework import status
 from rest_framework.generics import get_object_or_404
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAdminUser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from accounts.pagination import StaffPagination
 from accounts.serializers import MessageSerializer
 
 from .models import AdresseEnregistree, Lieu, RechercheRecente, StatutLieu, Ville
 from .serializers import (
     AdresseEnregistreeSerializer,
     LieuDetailSerializer,
+    LieuModerationSerializer,
     LieuPropositionSerializer,
     LieuRechercheSerializer,
+    LieuRejetSerializer,
     RechercheRecenteSerializer,
 )
 from .services.client_nominatim import ClientNominatim
@@ -366,3 +369,66 @@ class RechercheRecenteView(APIView):
     def delete(self, request):
         request.user.recherches_recentes.all().delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+@extend_schema(
+    tags=['Staff Places'],
+    summary='Lister les lieux (moderation)',
+    description=(
+        "Reserve au staff (is_staff). Filtre par defaut sur EN_ATTENTE -- passer "
+        "`status=APPROUVE`/`REJETE`/`FUSIONNE` pour voir les autres files."
+    ),
+    parameters=[
+        OpenApiParameter('status', OpenApiTypes.STR, description='Defaut EN_ATTENTE.'),
+        OpenApiParameter('page', OpenApiTypes.INT),
+        OpenApiParameter('page_size', OpenApiTypes.INT),
+    ],
+    responses={200: LieuModerationSerializer(many=True)},
+)
+class LieuModerationListView(APIView):
+    """GET /api/staff/places/?status=&page= : file de moderation des lieux."""
+
+    permission_classes = [IsAdminUser]
+    pagination_class = StaffPagination
+
+    def get(self, request):
+        statut = request.query_params.get('status', StatutLieu.EN_ATTENTE)
+        lieux = Lieu.objects.filter(statut=statut).order_by('nom')
+
+        paginateur = self.pagination_class()
+        page = paginateur.paginate_queryset(lieux, request)
+        return paginateur.get_paginated_response(LieuModerationSerializer(page, many=True).data)
+
+
+@extend_schema(
+    tags=['Staff Places'],
+    summary='Approuver un lieu propose',
+    description='Reserve au staff (is_staff). cf. Lieu.approuver().',
+    responses={200: LieuModerationSerializer},
+)
+class LieuApprouverView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def post(self, request, id):
+        lieu = get_object_or_404(Lieu, id=id)
+        lieu.approuver()
+        return Response(LieuModerationSerializer(lieu).data)
+
+
+@extend_schema(
+    tags=['Staff Places'],
+    summary='Rejeter un lieu propose',
+    description='Reserve au staff (is_staff). cf. Lieu.rejeter().',
+    request=LieuRejetSerializer,
+    responses={200: LieuModerationSerializer},
+)
+class LieuRejeterView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def post(self, request, id):
+        serializer = LieuRejetSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        lieu = get_object_or_404(Lieu, id=id)
+        lieu.rejeter(motif=serializer.validated_data['reason'])
+        return Response(LieuModerationSerializer(lieu).data)

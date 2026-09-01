@@ -12,4 +12,12 @@ urlpatterns = [
     path('incidents/<uuid:id>/', views.IncidentDetailView.as_view(), name='incident-detail'),
     path('incidents/<uuid:id>/vote/', views.VoterIncidentView.as_view(), name='incident-vote'),
     path('users/me/reports/', views.MesSignalementsView.as_view(), name='mes-signalements'),
+
+    # Back-office (moderation, reserve au staff)
+    path('staff/incidents/', views.IncidentModerationListView.as_view(), name='staff-incidents'),
+    path(
+        'staff/incidents/<uuid:id>/remove/',
+        views.IncidentRetraitStaffView.as_view(),
+        name='staff-incident-retirer',
+    ),
 ]
