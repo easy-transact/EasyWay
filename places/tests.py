@@ -270,6 +270,16 @@ class RechercheRecenteTests(TestCase):
         self.assertEqual(reponse.status_code, 204)
         self.assertEqual(RechercheRecente.objects.filter(utilisateur=self.utilisateur).count(), 0)
 
+    def test_liste_renvoie_les_coordonnees(self):
+        # lat/lon sont write_only (entree) -- sans position_lat/position_lon
+        # en sortie, un recent revient sans coordonnees et devient inutilisable
+        # comme destination.
+        self._ajouter('Premier')
+        reponse = self.client.get(reverse('places:recents'), **self.jetons)
+        resultat = reponse.json()[0]
+        self.assertEqual(resultat['position_lat'], 4.05)
+        self.assertEqual(resultat['position_lon'], 9.70)
+
 
 def _resultat_photon_factice(label='Boulangerie Externe', lat=4.05, lon=9.70):
     return {

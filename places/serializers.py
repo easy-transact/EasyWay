@@ -183,12 +183,27 @@ class RechercheRecenteSerializer(serializers.ModelSerializer):
     sublabel = serializers.CharField(source='sous_libelle', required=False, allow_null=True)
     lat = serializers.FloatField(write_only=True)
     lon = serializers.FloatField(write_only=True)
+    position_lat = serializers.SerializerMethodField()
+    position_lon = serializers.SerializerMethodField()
     searched_at = serializers.DateTimeField(source='recherche_le', read_only=True)
 
     class Meta:
         model = RechercheRecente
-        fields = ['id', 'label', 'sublabel', 'lat', 'lon', 'searched_at']
+        fields = ['id', 'label', 'sublabel', 'lat', 'lon', 'position_lat', 'position_lon', 'searched_at']
         read_only_fields = ['id', 'searched_at']
+
+    # lat/lon restent write_only (entree : position brute a stocker dans le
+    # PointField) -- meme convention que AdresseEnregistreeSerializer :
+    # position_lat/position_lon exposent la valeur en lecture, faute de quoi
+    # un recent revient sans coordonnees et devient inutilisable comme
+    # destination (position n'est pas un attribut direct du modele).
+    @extend_schema_field(serializers.FloatField())
+    def get_position_lat(self, recherche):
+        return recherche.position.y
+
+    @extend_schema_field(serializers.FloatField())
+    def get_position_lon(self, recherche):
+        return recherche.position.x
 
     def create(self, validated_data):
         from django.contrib.gis.geos import Point
