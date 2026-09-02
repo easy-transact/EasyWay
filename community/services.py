@@ -107,12 +107,15 @@ class ServiceIncident:
     def _verifier_position_routiere(self, position):
         """None si la verification est ignoree (Valhalla indisponible, ou
         aucune route connue dans la zone) -- l'appelant garde alors le point
-        brut. Sinon la position calee sur l'arete trouvee (correlated_lat/
-        lon) : meme un bon appariement peut avoir quelques metres d'ecart
-        entre le point soumis et le centre reel de la route (precision GPS
-        cote client, ou choix de Nominatim en amont) -- visible a l'affichage
-        carte si on garde le point brut (cf. capture d'ecran frontend, un
-        marqueur "a cote" de la route plutot que dessus)."""
+        brut, sans way_id/forward. Sinon (Point, way_id, forward) : la
+        position calee sur l'arete trouvee (correlated_lat/lon -- meme un bon
+        appariement peut avoir quelques metres d'ecart entre le point soumis
+        et le centre reel de la route, precision GPS cote client ou choix de
+        Nominatim en amont -- visible a l'affichage carte si on garde le
+        point brut, cf. capture d'ecran frontend, un marqueur "a cote" de la
+        route plutot que dessus), l'identifiant OSM de la voie et le sens de
+        circulation dessus (cf. Incident.way_id_osm/forward_osm -- matching
+        par topologie dans IncidentsSurTrajetView, pas par distance)."""
         try:
             arete = client_locate.localiser(position.y, position.x)
         except (client_locate.ErreurLocate, DisjoncteurOuvert):
@@ -135,7 +138,8 @@ class ServiceIncident:
             raise PositionHorsRoute(
                 f"Reported position is {round(arete['distance_m'])}m from the nearest known road."
             )
-        return Point(arete['lon'], arete['lat'], srid=4326)
+        position_calee = Point(arete['lon'], arete['lat'], srid=4326)
+        return position_calee, arete['way_id'], arete['forward']
 
     def _chercher_doublon(self, type_incident, position, cap):
         # select_for_update() verrouille les candidats pour la duree de la
