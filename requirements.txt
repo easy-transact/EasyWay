@@ -29,6 +29,7 @@ jsonschema-specifications==2025.9.1
 kombu==5.6.2
 osmium==4.3.1
 packaging==26.3
+phonenumbers==9.0.38
 pillow==12.3.0
 prompt_toolkit==3.0.53
 psycopg==3.3.4

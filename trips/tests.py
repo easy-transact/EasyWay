@@ -11,7 +11,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from accounts.models import Formule, Parametres, Utilisateur
-from accounts.tests import connecter
+from accounts.tests import connecter, numero_telephone_test
 
 from .exceptions import TransitionInvalide
 from .models import FUSEAU_TRAFIC, EchantillonVitesse, NiveauTrafic, StatutTrajet, Trajet
@@ -31,9 +31,7 @@ GEOMETRIE_TEST = encoder_polyline6([(9.7043, 4.0483), (9.6970, 4.0469)])
 
 
 def creer_utilisateur(email='user@easyway.local', **extra):
-    telephone = extra.pop('telephone', None)
-    if not telephone:
-        telephone = email
+    telephone = extra.pop('telephone', None) or numero_telephone_test()
     utilisateur = Utilisateur.objects.create_user(
         telephone=telephone, email=email, password=MOT_DE_PASSE, nom_complet='Test User', **extra
     )
@@ -420,7 +418,7 @@ class TrajetApiTests(TestCase):
     def setUp(self):
         cache.clear()
         self.utilisateur = creer_utilisateur()
-        self.jetons = connecter(self.client, self.utilisateur.email)
+        self.jetons = connecter(self.client, self.utilisateur.telephone)
         # Idem ServiceItineraireTests -- evite un appel Meili reseau reel.
         patcher = patch(
             'trips.services.service_itineraire.service_trafic.evaluer_route',
@@ -622,7 +620,7 @@ class RetentionTrajetsTests(TestCase):
     def setUp(self):
         cache.clear()
         self.utilisateur = creer_utilisateur()
-        self.jetons = connecter(self.client, self.utilisateur.email)
+        self.jetons = connecter(self.client, self.utilisateur.telephone)
 
     def _lister(self, periode=None):
         params = {'period': periode} if periode else {}
@@ -677,7 +675,7 @@ class ProducteurRedisStreamsTests(TestCase):
 class TelemetriePositionsApiTests(TestCase):
     def setUp(self):
         self.utilisateur = creer_utilisateur()
-        self.jetons = connecter(self.client, self.utilisateur.email)
+        self.jetons = connecter(self.client, self.utilisateur.telephone)
         self.trajet = _trajet_actif_pour(self.utilisateur)
 
     def _lot(self, **overrides):

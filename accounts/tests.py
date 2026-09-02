@@ -1,3 +1,5 @@
+import itertools
+
 from django.contrib.auth.tokens import default_token_generator
 from django.core.cache import cache
 from django.test import TestCase
@@ -10,11 +12,20 @@ from .tokens import email_verification_token
 
 MOT_DE_PASSE = 'CorrectHorse9!'
 
+# '677' est un prefixe mobile camerounais valide pour phonenumbers (cf.
+# accounts.utils) sur toute la plage 000000-999999 -- suffisant pour generer
+# un numero unique et syntaxiquement valide par utilisateur de test, sans
+# reutiliser l'email (desormais rejete par ConnexionSerializer : ce n'est
+# plus un numero de telephone valide).
+_compteur_telephone_test = itertools.count(1)
+
+
+def numero_telephone_test() -> str:
+    return f'+237677{next(_compteur_telephone_test):06d}'
+
 
 def creer_utilisateur(email='user@easyway.local', **extra):
-    telephone = extra.pop('telephone', None)
-    if not telephone:
-        telephone = email
+    telephone = extra.pop('telephone', None) or numero_telephone_test()
     utilisateur = Utilisateur.objects.create_user(
         telephone=telephone, email=email, password=MOT_DE_PASSE, nom_complet='Test User', **extra
     )
@@ -69,6 +80,7 @@ class DroitsTests(TestCase):
 class InscriptionTests(TestCase):
     def _payload(self, **overrides):
         payload = {
+            'phone': numero_telephone_test(),
             'email': 'nouveau@easyway.local',
             'full_name': 'Nouveau Utilisateur',
             'password': MOT_DE_PASSE,
@@ -122,7 +134,7 @@ class ConnexionTests(TestCase):
         cache.clear()
         reponse = self.client.post(
             reverse('accounts:connexion'),
-            {'email': self.utilisateur.email, 'password': MOT_DE_PASSE},
+            {'phone': self.utilisateur.telephone, 'password': MOT_DE_PASSE},
             content_type='application/json',
         )
         self.assertEqual(reponse.status_code, 200)
@@ -132,7 +144,7 @@ class ConnexionTests(TestCase):
         cache.clear()
         reponse = self.client.post(
             reverse('accounts:connexion'),
-            {'email': self.utilisateur.email, 'password': 'incorrect'},
+            {'phone': self.utilisateur.telephone, 'password': 'incorrect'},
             content_type='application/json',
         )
         self.assertEqual(reponse.status_code, 400)
@@ -143,7 +155,7 @@ class ConnexionTests(TestCase):
         cache.clear()
         reponse = self.client.post(
             reverse('accounts:connexion'),
-            {'email': self.utilisateur.email, 'password': MOT_DE_PASSE},
+            {'phone': self.utilisateur.telephone, 'password': MOT_DE_PASSE},
             content_type='application/json',
         )
         self.assertEqual(reponse.status_code, 400)
@@ -158,7 +170,7 @@ class RafraichirTests(TestCase):
         self.utilisateur = creer_utilisateur()
         reponse = self.client.post(
             reverse('accounts:connexion'),
-            {'email': self.utilisateur.email, 'password': MOT_DE_PASSE},
+            {'phone': self.utilisateur.telephone, 'password': MOT_DE_PASSE},
             content_type='application/json',
         )
         self.jetons = reponse.json()['tokens']
@@ -227,10 +239,10 @@ class ReinitialisationMotDePasseTests(TestCase):
         utilisateur.refresh_from_db()
         self.assertTrue(utilisateur.check_password('NouveauMotDePasse9!'))
 
-    def test_demande_reinitialisation_reste_neutre_pour_email_inconnu(self):
+    def test_demande_reinitialisation_reste_neutre_pour_numero_inconnu(self):
         reponse = self.client.post(
             reverse('accounts:mot-de-passe-reinitialiser'),
-            {'email': 'inconnu@easyway.local'},
+            {'phone': numero_telephone_test()},
             content_type='application/json',
         )
         self.assertEqual(reponse.status_code, 200)
@@ -239,7 +251,7 @@ class ReinitialisationMotDePasseTests(TestCase):
 class CompteAuthentifieTests(TestCase):
     def setUp(self):
         self.utilisateur = creer_utilisateur()
-        self.jetons = connecter(self.client, self.utilisateur.email)
+        self.jetons = connecter(self.client, self.utilisateur.telephone)
 
     def test_moi_non_authentifie_rejete(self):
         reponse = self.client.get(reverse('accounts:moi'))
@@ -350,7 +362,7 @@ class ConfigTests(TestCase):
 class UtilisateurModerationApiTests(TestCase):
     def setUp(self):
         self.staff = creer_utilisateur('staff@easyway.local', is_staff=True)
-        self.jetons_staff = connecter(self.client, self.staff.email)
+        self.jetons_staff = connecter(self.client, self.staff.telephone)
         self.cible = creer_utilisateur('cible@easyway.local')
 
     def test_liste_reserve_au_staff_anonyme(self):
@@ -359,7 +371,7 @@ class UtilisateurModerationApiTests(TestCase):
 
     def test_liste_reserve_au_staff_non_staff(self):
         non_staff = creer_utilisateur('simple@easyway.local')
-        jetons = connecter(self.client, non_staff.email)
+        jetons = connecter(self.client, non_staff.telephone)
         reponse = self.client.get(reverse('accounts:staff-utilisateurs'), **jetons)
         self.assertEqual(reponse.status_code, 403)
 
@@ -410,7 +422,7 @@ class UtilisateurModerationApiTests(TestCase):
 
     def test_non_staff_recoit_403_sur_bannir(self):
         non_staff = creer_utilisateur('simple2@easyway.local')
-        jetons = connecter(self.client, non_staff.email)
+        jetons = connecter(self.client, non_staff.telephone)
         url = reverse('accounts:staff-utilisateur-bannir', kwargs={'id': self.cible.id})
         reponse = self.client.post(url, {}, content_type='application/json', **jetons)
         self.assertEqual(reponse.status_code, 403)

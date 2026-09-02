@@ -8,7 +8,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from accounts.models import Parametres, Utilisateur
-from accounts.tests import connecter
+from accounts.tests import connecter, numero_telephone_test
 from places.utils import normaliser
 from trips.polyline import encoder_polyline6
 from trips.services import client_locate
@@ -24,9 +24,7 @@ DOUALA_LAT, DOUALA_LON = 4.0483, 9.7043
 
 
 def creer_utilisateur(email='user@easyway.local', score_reputation=Decimal('0'), **extra):
-    telephone = extra.pop('telephone', None)
-    if not telephone:
-        telephone = email
+    telephone = extra.pop('telephone', None) or numero_telephone_test()
     utilisateur = Utilisateur.objects.create_user(
         telephone=telephone, email=email, password=MOT_DE_PASSE, nom_complet='Test User',
         score_reputation=score_reputation, **extra,
@@ -264,7 +262,7 @@ class IncidentCreationApiTests(TestCase):
         patcher_locate_incident(self)
         cache.clear()
         self.utilisateur = creer_utilisateur()
-        self.jetons = connecter(self.client, self.utilisateur.email)
+        self.jetons = connecter(self.client, self.utilisateur.telephone)
 
     def _payload(self, **overrides):
         payload = {'type': TypeIncident.EMBOUTEILLAGE, 'lat': DOUALA_LAT, 'lon': DOUALA_LON}
@@ -581,6 +579,37 @@ class IncidentsSurTrajetApiTests(TestCase):
         corps = reponse.json()
         self.assertEqual([corps[0]['id'], corps[1]['id']], [str(forte.id), str(faible.id)])
 
+    # self.geometrie va plein ouest (cap ~270) -- cf. discussion frontend sur
+    # le matching par way_id : en attendant, un test de cap elimine deja la
+    # chaussee opposee/une rue perpendiculaire meme a l'interieur du couloir.
+
+    def test_incident_cap_aligne_avec_le_trajet_est_garde(self):
+        incident = creer_incident(self.utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON, cap=270)
+        reponse = self.client.post(
+            reverse('community:incidents-sur-trajet'), {'geometry': self.geometrie},
+            content_type='application/json',
+        )
+        self.assertEqual([i['id'] for i in reponse.json()], [str(incident.id)])
+
+    def test_incident_cap_oppose_chaussee_den_face_est_exclu(self):
+        creer_incident(self.utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON, cap=90)
+        reponse = self.client.post(
+            reverse('community:incidents-sur-trajet'), {'geometry': self.geometrie},
+            content_type='application/json',
+        )
+        self.assertEqual(reponse.json(), [])
+
+    def test_incident_sans_cap_est_garde_par_defaut(self):
+        # Pas de cap renseigne (signalement a l'arret, ou client ancien qui
+        # n'envoie pas 'heading') : aucune information a comparer, on ne
+        # filtre pas plutot que de rejeter a tort.
+        incident = creer_incident(self.utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON, cap=None)
+        reponse = self.client.post(
+            reverse('community:incidents-sur-trajet'), {'geometry': self.geometrie},
+            content_type='application/json',
+        )
+        self.assertEqual([i['id'] for i in reponse.json()], [str(incident.id)])
+
 
 class IncidentsParVilleApiTests(TestCase):
     """GET /api/incidents/city/?name=<ville> : filtre sur Incident.ville_normalisee
@@ -644,7 +673,7 @@ class InvalidationCacheProchesTests(TestCase):
         self.auteur = creer_utilisateur('auteur@easyway.local')
         self.incident = creer_incident(self.auteur, type_incident=TypeIncident.EMBOUTEILLAGE)
         self.votant = creer_utilisateur('votant@easyway.local')
-        self.jetons_votant = connecter(self.client, self.votant.email)
+        self.jetons_votant = connecter(self.client, self.votant.telephone)
 
         import h3
         self.cellule_hex = h3.int_to_str(self.incident.cellule_h3_res8)
@@ -668,7 +697,7 @@ class InvalidationCacheProchesTests(TestCase):
 
     def test_retrait_invalide_le_cache_de_la_cellule(self):
         self.client.get(reverse('community:incidents-proches'), {'cells': self.cellule_hex})
-        jetons_auteur = connecter(self.client, self.auteur.email)
+        jetons_auteur = connecter(self.client, self.auteur.telephone)
 
         self.client.delete(reverse('community:incident-detail', kwargs={'id': self.incident.id}), **jetons_auteur)
 
@@ -723,7 +752,7 @@ class IncidentDetailApiTests(TestCase):
         self.assertEqual(reponse.status_code, 200)
 
     def test_retrait_par_lauteur(self):
-        jetons = connecter(self.client, self.auteur.email)
+        jetons = connecter(self.client, self.auteur.telephone)
         reponse = self.client.delete(
             reverse('community:incident-detail', kwargs={'id': self.incident.id}), **jetons
         )
@@ -733,7 +762,7 @@ class IncidentDetailApiTests(TestCase):
 
     def test_retrait_refuse_pour_non_auteur(self):
         autre = creer_utilisateur('autre@easyway.local')
-        jetons = connecter(self.client, autre.email)
+        jetons = connecter(self.client, autre.telephone)
         reponse = self.client.delete(
             reverse('community:incident-detail', kwargs={'id': self.incident.id}), **jetons
         )
@@ -745,7 +774,7 @@ class VoteApiTests(TestCase):
         cache.clear()
         self.auteur = creer_utilisateur('auteur@easyway.local')
         self.votant = creer_utilisateur('votant@easyway.local')
-        self.jetons_votant = connecter(self.client, self.votant.email)
+        self.jetons_votant = connecter(self.client, self.votant.telephone)
 
     def _voter(self, incident, sens, jetons=None):
         return self.client.post(
@@ -772,7 +801,7 @@ class VoteApiTests(TestCase):
 
     def test_vote_sur_son_propre_signalement_refuse(self):
         incident = creer_incident(self.auteur)
-        jetons_auteur = connecter(self.client, self.auteur.email)
+        jetons_auteur = connecter(self.client, self.auteur.telephone)
         reponse = self._voter(incident, 'confirm', jetons=jetons_auteur)
         self.assertEqual(reponse.status_code, 400)
 
@@ -791,12 +820,12 @@ class VoteApiTests(TestCase):
         self.assertEqual(incident.statut, StatutIncident.EN_ATTENTE)
 
         votant2 = creer_utilisateur('votant2@easyway.local')
-        self._voter(incident, 'confirm', jetons=connecter(self.client, votant2.email))
+        self._voter(incident, 'confirm', jetons=connecter(self.client, votant2.telephone))
         incident.refresh_from_db()
         self.assertEqual(incident.statut, StatutIncident.EN_ATTENTE)
 
         votant3 = creer_utilisateur('votant3@easyway.local')
-        self._voter(incident, 'confirm', jetons=connecter(self.client, votant3.email))
+        self._voter(incident, 'confirm', jetons=connecter(self.client, votant3.telephone))
         incident.refresh_from_db()
         self.assertEqual(incident.statut, StatutIncident.ACTIF)
 
@@ -810,7 +839,7 @@ class VoteApiTests(TestCase):
         self.assertEqual(incident.statut, StatutIncident.EN_ATTENTE)
 
         votant2 = creer_utilisateur('votant2@easyway.local')
-        self._voter(incident, 'confirm', jetons=connecter(self.client, votant2.email))
+        self._voter(incident, 'confirm', jetons=connecter(self.client, votant2.telephone))
         incident.refresh_from_db()
         self.assertEqual(incident.statut, StatutIncident.ACTIF)
 
@@ -819,14 +848,14 @@ class VoteApiTests(TestCase):
         self._voter(incident, 'confirm')
         for i in (2, 3):
             votant = creer_utilisateur(f'votant{i}@easyway.local')
-            self._voter(incident, 'confirm', jetons=connecter(self.client, votant.email))
+            self._voter(incident, 'confirm', jetons=connecter(self.client, votant.telephone))
         self.auteur.refresh_from_db()
         self.assertEqual(self.auteur.score_reputation, Decimal('0.5'))
 
     def test_score_confiance_pondere_par_reputation(self):
         votant_fort = creer_utilisateur('fort@easyway.local', score_reputation=200)
         incident = creer_incident(self.auteur)
-        self._voter(incident, 'confirm', jetons=connecter(self.client, votant_fort.email))
+        self._voter(incident, 'confirm', jetons=connecter(self.client, votant_fort.telephone))
         incident.refresh_from_db()
         self.assertEqual(incident.score_confiance, votant_fort.poids_de_vote())
 
@@ -837,7 +866,7 @@ class MesSignalementsApiTests(TestCase):
         creer_incident(moi)
         creer_incident(creer_utilisateur('autre@easyway.local'))
 
-        jetons = connecter(self.client, moi.email)
+        jetons = connecter(self.client, moi.telephone)
         reponse = self.client.get(reverse('community:mes-signalements'), **jetons)
         self.assertEqual(len(reponse.json()), 1)
 
@@ -884,7 +913,7 @@ class IncidentModerationApiTests(TestCase):
     def setUp(self):
         cache.clear()
         self.staff = creer_utilisateur('staff@easyway.local', is_staff=True)
-        self.jetons_staff = connecter(self.client, self.staff.email)
+        self.jetons_staff = connecter(self.client, self.staff.telephone)
         self.auteur = creer_utilisateur('auteur@easyway.local')
         self.incident = creer_incident(self.auteur, type_incident=TypeIncident.EMBOUTEILLAGE)
 
@@ -894,7 +923,7 @@ class IncidentModerationApiTests(TestCase):
 
     def test_liste_reserve_au_staff_non_staff(self):
         non_staff = creer_utilisateur('simple@easyway.local')
-        jetons = connecter(self.client, non_staff.email)
+        jetons = connecter(self.client, non_staff.telephone)
         reponse = self.client.get(reverse('community:staff-incidents'), **jetons)
         self.assertEqual(reponse.status_code, 403)
 
@@ -929,7 +958,7 @@ class IncidentModerationApiTests(TestCase):
 
     def test_non_staff_ne_peut_pas_retirer(self):
         non_staff = creer_utilisateur('simple2@easyway.local')
-        jetons = connecter(self.client, non_staff.email)
+        jetons = connecter(self.client, non_staff.telephone)
         url = reverse('community:staff-incident-retirer', kwargs={'id': self.incident.id})
         reponse = self.client.post(url, {'reason': 'Spam'}, content_type='application/json', **jetons)
         self.assertEqual(reponse.status_code, 403)

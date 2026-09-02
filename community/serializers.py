@@ -105,7 +105,13 @@ class VoteIncidentSerializer(serializers.Serializer):
     direction = serializers.ChoiceField(choices=['confirm', 'dispute'], source='sens')
 
 
-BUFFER_M_DEFAUT = 300  # couloir de recherche autour du trace -- pas mesure sur donnees reelles, a ajuster
+# Couloir volontairement etroit (30m, pas 300m) : au-dela, aucun seuil de
+# distance ne separe plus une contre-allee parallele du boulevard qu'elle
+# longe -- la distance ne porte pas cette information, seule la topologie du
+# graphe routier la porte (cf. discussion, futur matching par way_id OSM).
+# 30m + le test de cap dans IncidentsSurTrajetView suffit a eliminer la
+# chaussee opposee et l'essentiel du bruit perpendiculaire en attendant.
+BUFFER_M_DEFAUT = 30
 BUFFER_M_MAX = 1000
 
 

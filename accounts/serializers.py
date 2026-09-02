@@ -7,6 +7,7 @@ from rest_framework import serializers
 
 from .google_oauth import JetonGoogleInvalide, verifier_jeton_google
 from .models import Appareil, Droits, Formule, Parametres, Plateforme, TypeVehicule, Unite, Utilisateur
+from .utils import NumeroTelephoneInvalide, valider_et_normaliser_telephone
 
 # Les champs ci-dessous sont delibrement declares avec `source=` plutot que
 # de laisser ModelSerializer les auto-generer : la reponse API doit parler
@@ -151,6 +152,12 @@ class ExisteSerializer(serializers.Serializer):
 class VerifierExistenceSerializer(serializers.Serializer):
     phone = serializers.CharField(source='telephone')
 
+    def validate_phone(self, phone):
+        try:
+            return valider_et_normaliser_telephone(phone)
+        except NumeroTelephoneInvalide as exc:
+            raise serializers.ValidationError(str(exc)) from exc
+
 
 class InscriptionSerializer(serializers.ModelSerializer):
     full_name = serializers.CharField(source='nom_complet')
@@ -170,6 +177,10 @@ class InscriptionSerializer(serializers.ModelSerializer):
         ]
 
     def validate_phone(self, phone):
+        try:
+            phone = valider_et_normaliser_telephone(phone)
+        except NumeroTelephoneInvalide as exc:
+            raise serializers.ValidationError(str(exc)) from exc
         if Utilisateur.objects.filter(telephone=phone).exists():
             raise serializers.ValidationError('Phone number already in use.')
         return phone
@@ -215,9 +226,18 @@ class ConnexionSerializer(serializers.Serializer):
     password = serializers.CharField(write_only=True, trim_whitespace=False)
 
     def validate(self, attrs):
+        # Normalise avant authenticate() : Utilisateur.telephone est stocke en
+        # E.164 (cf. InscriptionSerializer), un numero saisi differemment mais
+        # equivalent (espaces, 0 initial, sans indicatif) doit quand meme
+        # matcher plutot que produire un faux "Incorrect credentials.".
+        try:
+            telephone = valider_et_normaliser_telephone(attrs['phone'])
+        except NumeroTelephoneInvalide as exc:
+            raise serializers.ValidationError({'phone': str(exc)}) from exc
+
         utilisateur = authenticate(
             request=self.context.get('request'),
-            username=attrs['phone'],
+            username=telephone,
             password=attrs['password'],
         )
         if utilisateur is None:
@@ -241,6 +261,12 @@ class ConnexionGoogleSerializer(serializers.Serializer):
 
 class DemandeReinitialisationSerializer(serializers.Serializer):
     phone = serializers.CharField(source='telephone')
+
+    def validate_phone(self, phone):
+        try:
+            return valider_et_normaliser_telephone(phone)
+        except NumeroTelephoneInvalide as exc:
+            raise serializers.ValidationError(str(exc)) from exc
 
 
 class ConfirmationReinitialisationSerializer(serializers.Serializer):

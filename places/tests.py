@@ -9,7 +9,7 @@ from django.test import TestCase
 from django.urls import reverse
 
 from accounts.models import Droits, Formule, Parametres, Utilisateur
-from accounts.tests import connecter
+from accounts.tests import connecter, numero_telephone_test
 from .models import AdresseEnregistree, Lieu, RechercheRecente, SourceLieu, StatutLieu, Ville
 from .views import LIMITE_VILLES
 from .services.client_nominatim import (
@@ -49,9 +49,7 @@ def patcher_photon(test_case, rechercher=None):
 
 
 def creer_utilisateur(email='user@easyway.local', **extra):
-    telephone = extra.pop('telephone', None)
-    if not telephone:
-        telephone = email
+    telephone = extra.pop('telephone', None) or numero_telephone_test()
     utilisateur = Utilisateur.objects.create_user(
         telephone=telephone, email=email, password=MOT_DE_PASSE, nom_complet='Test User', **extra
     )
@@ -152,7 +150,7 @@ class LieuDetailTests(TestCase):
 class ProposerLieuTests(TestCase):
     def setUp(self):
         self.utilisateur = creer_utilisateur()
-        self.jetons = connecter(self.client, self.utilisateur.email)
+        self.jetons = connecter(self.client, self.utilisateur.telephone)
 
     def test_proposition_authentifiee_cree_lieu_en_attente(self):
         payload = {'name': 'Boutique Test', 'category': 'shop', 'city': 'Douala', 'lat': 4.05, 'lon': 9.70}
@@ -174,7 +172,7 @@ class ProposerLieuTests(TestCase):
 class AdresseEnregistreeTests(TestCase):
     def setUp(self):
         self.utilisateur = creer_utilisateur()
-        self.jetons = connecter(self.client, self.utilisateur.email)
+        self.jetons = connecter(self.client, self.utilisateur.telephone)
 
     def _ajouter(self, label='PERSONNALISE', **extra):
         payload = {'label': label, 'address': 'Rue test', 'lat': 4.05, 'lon': 9.70, **extra}
@@ -190,7 +188,7 @@ class AdresseEnregistreeTests(TestCase):
     def test_isolation_entre_utilisateurs(self):
         self._ajouter()
         autre = creer_utilisateur('autre@easyway.local')
-        jetons_autre = connecter(self.client, autre.email)
+        jetons_autre = connecter(self.client, autre.telephone)
         reponse = self.client.get(reverse('places:enregistres'), **jetons_autre)
         self.assertEqual(reponse.json(), [])
 
@@ -232,7 +230,7 @@ class AdresseEnregistreeTests(TestCase):
     def test_delete_refuse_pour_autre_utilisateur(self):
         adresse_id = self._ajouter().json()['id']
         autre = creer_utilisateur('autre@easyway.local')
-        jetons_autre = connecter(self.client, autre.email)
+        jetons_autre = connecter(self.client, autre.telephone)
         reponse = self.client.delete(
             reverse('places:enregistres-detail', kwargs={'id': adresse_id}), **jetons_autre
         )
@@ -242,7 +240,7 @@ class AdresseEnregistreeTests(TestCase):
 class RechercheRecenteTests(TestCase):
     def setUp(self):
         self.utilisateur = creer_utilisateur()
-        self.jetons = connecter(self.client, self.utilisateur.email)
+        self.jetons = connecter(self.client, self.utilisateur.telephone)
 
     def _ajouter(self, label):
         return self.client.post(
@@ -573,7 +571,7 @@ class ImportVillesGpkgTests(TestCase):
 class LieuModerationApiTests(TestCase):
     def setUp(self):
         self.staff = creer_utilisateur('staff@easyway.local', is_staff=True)
-        self.jetons_staff = connecter(self.client, self.staff.email)
+        self.jetons_staff = connecter(self.client, self.staff.telephone)
         self.lieu_en_attente = creer_lieu('Boutique Test', 4.05, 9.70, statut=StatutLieu.EN_ATTENTE)
 
     def test_liste_reserve_au_staff_anonyme(self):
@@ -582,7 +580,7 @@ class LieuModerationApiTests(TestCase):
 
     def test_liste_reserve_au_staff_non_staff(self):
         non_staff = creer_utilisateur('simple@easyway.local')
-        jetons = connecter(self.client, non_staff.email)
+        jetons = connecter(self.client, non_staff.telephone)
         reponse = self.client.get(reverse('places:staff-lieux'), **jetons)
         self.assertEqual(reponse.status_code, 403)
 
@@ -611,7 +609,7 @@ class LieuModerationApiTests(TestCase):
 
     def test_non_staff_ne_peut_pas_approuver(self):
         non_staff = creer_utilisateur('simple2@easyway.local')
-        jetons = connecter(self.client, non_staff.email)
+        jetons = connecter(self.client, non_staff.telephone)
         url = reverse('places:staff-lieu-approuver', kwargs={'id': self.lieu_en_attente.id})
         reponse = self.client.post(url, **jetons)
         self.assertEqual(reponse.status_code, 403)
