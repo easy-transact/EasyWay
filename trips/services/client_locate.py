@@ -38,12 +38,15 @@ class ErreurLocate(Exception):
 def localiser(lat: float, lon: float) -> dict | None:
     """None si Valhalla ne connait aucune route dans la zone (tres rare --
     meme un point isole trouve generalement l'arete la moins lointaine).
-    Sinon {'distance_m', 'lat', 'lon', 'destination_only', 'use'} pour
-    l'arete routiere connue de Valhalla la plus proche : distance_m et
-    lat/lon du point correle sur cette arete, destination_only (True pour
-    une allee privee/un parking -- jamais une route publique) et use
-    (classification Valhalla, ex. 'road', 'driveway', 'footway'). Leve
-    ErreurLocate/DisjoncteurOuvert si Valhalla est indisponible -- a
+    Sinon {'distance_m', 'lat', 'lon', 'destination_only', 'use', 'way_id',
+    'forward'} pour l'arete routiere connue de Valhalla la plus proche :
+    distance_m et lat/lon du point correle sur cette arete, destination_only
+    (True pour une allee privee/un parking -- jamais une route publique),
+    use (classification Valhalla, ex. 'road', 'driveway', 'footway'), way_id
+    (identifiant OSM stable de la voie, cf. community.models.Incident.way_id_osm
+    -- matching par topologie plutot que par distance dans
+    IncidentsSurTrajetView) et forward (sens de circulation sur cette arete).
+    Leve ErreurLocate/DisjoncteurOuvert si Valhalla est indisponible -- a
     l'appelant de decider du repli."""
     disjoncteur.verifier()
 
@@ -70,6 +73,8 @@ def localiser(lat: float, lon: float) -> dict | None:
         'lon': arete['correlated_lon'],
         'destination_only': arete['edge']['destination_only'],
         'use': arete['edge']['classification']['use'],
+        'way_id': arete['edge_info']['way_id'],
+        'forward': arete['edge']['forward'],
     }
 
 

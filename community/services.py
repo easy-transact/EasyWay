@@ -54,8 +54,13 @@ class ServiceIncident:
         nouvel Incident n'a ete cree -- le signalement a corrobore un existant."""
         self._verifier_quota(utilisateur)
         # Position calee sur l'arete routiere trouvee (cf. _verifier_position_routiere)
-        # si la verification reussit -- sinon garde le point brut soumis.
-        position = self._verifier_position_routiere(position) or position
+        # si la verification reussit -- sinon garde le point brut soumis, sans
+        # way_id/forward (Valhalla indisponible ou hors-route non bloquant).
+        resultat_routier = self._verifier_position_routiere(position)
+        if resultat_routier is not None:
+            position, way_id_osm, forward_osm = resultat_routier
+        else:
+            way_id_osm, forward_osm = None, None
 
         with transaction.atomic():
             doublon = self._chercher_doublon(type_incident, position, cap)
@@ -70,6 +75,8 @@ class ServiceIncident:
                     sous_type=sous_type,
                     position=position,
                     cap=cap,
+                    way_id_osm=way_id_osm,
+                    forward_osm=forward_osm,
                     nom_voie=geocodage['label'] if geocodage else '',
                     ville=geocodage['city'] if geocodage else '',
                     ville_normalisee=normaliser(geocodage['city']) if geocodage and geocodage['city'] else '',

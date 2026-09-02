@@ -156,6 +156,17 @@ class Incident(models.Model):
     # Lieu.nom_normalise : permet un filtre par ville insensible a la casse
     # et aux accents sans extension Postgres (unaccent) supplementaire.
     ville_normalisee = models.CharField(max_length=255, blank=True)
+    # Cales sur le graphe routier Valhalla au signalement (cf.
+    # ServiceIncident._verifier_position_routiere) : identifiant de voie OSM
+    # + sens de circulation dessus. Remplace le matching par distance pure
+    # dans IncidentsSurTrajetView -- aucun couloir de tolerance ne separe une
+    # contre-allee parallele de la route qu'elle longe, seule la topologie du
+    # graphe le peut (cf. discussion). Nullable : absent si Valhalla est
+    # indisponible au signalement, ou pour tout incident cree avant cette
+    # colonne -- pas de backfill, ces incidents expirent naturellement sous
+    # 8h max (DUREE_VIE_BASE_PAR_TYPE) et retombent sur le repli par couloir.
+    way_id_osm = models.BigIntegerField(null=True, blank=True)
+    forward_osm = models.BooleanField(null=True, blank=True)
 
     confirmations = models.IntegerField(default=0)
     infirmations = models.IntegerField(default=0)
@@ -178,6 +189,7 @@ class Incident(models.Model):
             models.Index(fields=['cellule_h3_res8', 'statut']),
             models.Index(fields=['statut', 'expire_le']),
             models.Index(fields=['ville_normalisee', 'statut']),
+            models.Index(fields=['way_id_osm', 'forward_osm']),
             gis_models.Index(fields=['position']),
         ]
 

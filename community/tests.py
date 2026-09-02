@@ -51,13 +51,19 @@ def patcher_nominatim_incident(test_case, libelle=None, ville=None):
     test_case.addCleanup(patcheur.stop)
 
 
-def patcher_locate_incident(test_case, distance_m=0, destination_only=False, lat=None, lon=None, effet_de_bord=None):
+def patcher_locate_incident(
+    test_case, distance_m=0, destination_only=False, lat=None, lon=None,
+    way_id=111111, forward=True, effet_de_bord=None,
+):
     """Par defaut simule une position sur la route (distance 0m, calee sur le
     meme point que celui teste) pour ne pas perturber les tests qui ne
     portent pas sur cette verification -- cf. patcher_nominatim_incident
     ci-dessus, meme logique. distance_m=None simule "aucune route connue
     dans la zone" (localiser() renvoie None). lat/lon : force le point
-    correle renvoye (sinon identique au point soumis -- pas de correction)."""
+    correle renvoye (sinon identique au point soumis -- pas de correction).
+    way_id/forward : identifiant OSM + sens simules (cf. Incident.way_id_osm/
+    forward_osm), way_id=None simule un signalement sans correlation OSM
+    (Valhalla degrade -- meme forme que si la cle etait absente)."""
     patcheur = patch('community.services.client_locate.localiser')
     fonction_simulee = patcheur.start()
     if effet_de_bord is not None:
@@ -72,6 +78,8 @@ def patcher_locate_incident(test_case, distance_m=0, destination_only=False, lat
                 'lon': lon_in if lon is None else lon,
                 'destination_only': destination_only,
                 'use': 'driveway' if destination_only else 'road',
+                'way_id': way_id,
+                'forward': forward,
             }
         fonction_simulee.side_effect = _repondre
     test_case.addCleanup(patcheur.stop)
