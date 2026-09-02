@@ -231,6 +231,14 @@ class IncidentsProchesView(APIView):
         return Response(donnees[:MAX_RESULTATS])
 
 
+# Meme tolerance que SECTEUR_DOUBLON_DEGRES (community/services.py) : un
+# signalement dont le cap s'ecarte de plus de 45 deg du cap local du trajet
+# est considere comme une autre route (chaussee opposee, rue perpendiculaire)
+# -- ne resout pas le cas d'une contre-allee parallele (meme cap que la
+# route qu'elle longe), qui demande le matching par way_id ci-dessous.
+ECART_CAP_MAX_DEGRES = 45
+
+
 @extend_schema(
     tags=['Incidents'],
     summary="Lister les incidents le long d'un trajet complet",
@@ -247,43 +255,6 @@ class IncidentsProchesView(APIView):
     request=IncidentsSurTrajetSerializer,
     responses={200: IncidentSerializer(many=True), 400: MessageSerializer},
 )
-def _cap_segment(lon1, lat1, lon2, lat2):
-    """Cap (0-359, degres depuis le nord) du segment [1 -> 2] -- meme
-    convention que Incident.cap (fourni par le client au signalement)."""
-    lat1_r, lat2_r = math.radians(lat1), math.radians(lat2)
-    delta_lon = math.radians(lon2 - lon1)
-    x = math.sin(delta_lon) * math.cos(lat2_r)
-    y = math.cos(lat1_r) * math.sin(lat2_r) - math.sin(lat1_r) * math.cos(lat2_r) * math.cos(delta_lon)
-    return math.degrees(math.atan2(x, y)) % 360
-
-
-def _cap_trajet_le_plus_proche(points, position):
-    """Cap du segment de `points` (liste de (lon, lat) decodee du polyline6)
-    le plus proche de `position` (geos Point) -- approxime par le sommet le
-    plus proche plutot qu'une vraie projection sur la ligne : suffisant a
-    l'echelle du couloir de recherche (quelques dizaines de metres, cf.
-    BUFFER_M_DEFAUT), pas mesure au-dela de ca."""
-    lon0, lat0 = position.x, position.y
-    index_plus_proche, distance_min = 0, float('inf')
-    for i, (lon, lat) in enumerate(points):
-        distance = (lon - lon0) ** 2 + (lat - lat0) ** 2
-        if distance < distance_min:
-            distance_min, index_plus_proche = distance, i
-    if index_plus_proche == len(points) - 1:
-        index_plus_proche -= 1
-    lon1, lat1 = points[index_plus_proche]
-    lon2, lat2 = points[index_plus_proche + 1]
-    return _cap_segment(lon1, lat1, lon2, lat2)
-
-
-# Meme tolerance que SECTEUR_DOUBLON_DEGRES (community/services.py) : un
-# signalement dont le cap s'ecarte de plus de 45 deg du cap local du trajet
-# est considere comme une autre route (chaussee opposee, rue perpendiculaire)
-# -- ne resout pas le cas d'une contre-allee parallele (meme cap que la
-# route qu'elle longe), qui demande un matching par way_id (cf. plan).
-ECART_CAP_MAX_DEGRES = 45
-
-
 class IncidentsSurTrajetView(APIView):
     """POST /api/incidents/along-route/ : matche par topologie (meme way_id
     OSM + meme sens que le trajet, cf. _incidents_par_topologie) plutot que
@@ -360,6 +331,35 @@ class IncidentsSurTrajetView(APIView):
                     continue
             resultats.append(incident)
         return resultats
+
+
+def _cap_segment(lon1, lat1, lon2, lat2):
+    """Cap (0-359, degres depuis le nord) du segment [1 -> 2] -- meme
+    convention que Incident.cap (fourni par le client au signalement)."""
+    lat1_r, lat2_r = math.radians(lat1), math.radians(lat2)
+    delta_lon = math.radians(lon2 - lon1)
+    x = math.sin(delta_lon) * math.cos(lat2_r)
+    y = math.cos(lat1_r) * math.sin(lat2_r) - math.sin(lat1_r) * math.cos(lat2_r) * math.cos(delta_lon)
+    return math.degrees(math.atan2(x, y)) % 360
+
+
+def _cap_trajet_le_plus_proche(points, position):
+    """Cap du segment de `points` (liste de (lon, lat) decodee du polyline6)
+    le plus proche de `position` (geos Point) -- approxime par le sommet le
+    plus proche plutot qu'une vraie projection sur la ligne : suffisant a
+    l'echelle du couloir de recherche (quelques dizaines de metres, cf.
+    BUFFER_M_DEFAUT), pas mesure au-dela de ca."""
+    lon0, lat0 = position.x, position.y
+    index_plus_proche, distance_min = 0, float('inf')
+    for i, (lon, lat) in enumerate(points):
+        distance = (lon - lon0) ** 2 + (lat - lat0) ** 2
+        if distance < distance_min:
+            distance_min, index_plus_proche = distance, i
+    if index_plus_proche == len(points) - 1:
+        index_plus_proche -= 1
+    lon1, lat1 = points[index_plus_proche]
+    lon2, lat2 = points[index_plus_proche + 1]
+    return _cap_segment(lon1, lat1, lon2, lat2)
 
 
 @extend_schema(

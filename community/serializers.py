@@ -23,13 +23,21 @@ class IncidentSerializer(serializers.ModelSerializer):
     severity = serializers.IntegerField(source='severite', read_only=True)
     expires_at = serializers.DateTimeField(source='expire_le', read_only=True)
     created_at = serializers.DateTimeField(source='cree_le', read_only=True)
+    # Identifiant OSM de la voie + sens de circulation (cf. Incident.way_id_osm/
+    # forward_osm) : cale au signalement via Valhalla /locate, utilise cote
+    # serveur pour le matching par topologie sur /along-route/ (plutot qu'un
+    # couloir de distance). Expose ici pour que le client puisse verifier/
+    # filtrer lui-meme -- null si l'incident date d'avant cette colonne, ou si
+    # Valhalla etait indisponible au signalement.
+    way_id = serializers.IntegerField(source='way_id_osm', read_only=True, allow_null=True)
+    forward = serializers.BooleanField(source='forward_osm', read_only=True, allow_null=True)
 
     class Meta:
         model = Incident
         fields = [
             'id', 'type', 'subtype', 'lat', 'lon', 'heading', 'street_name', 'city',
             'confirmations', 'disputes', 'confidence_score', 'estimated_impact',
-            'status', 'severity', 'expires_at', 'created_at',
+            'status', 'severity', 'expires_at', 'created_at', 'way_id', 'forward',
         ]
         read_only_fields = fields
 

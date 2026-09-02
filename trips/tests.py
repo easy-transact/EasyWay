@@ -322,14 +322,17 @@ class DisjoncteurValhallaTests(TestCase):
         self.assertGreater(candidats[0]['distance'], 0)
 
 
-def _arete_factice(correlated_lat=4.0, correlated_lon=9.7, destination_only=False, use='road'):
+def _arete_factice(correlated_lat=4.0, correlated_lon=9.7, destination_only=False, use='road', way_id=1, forward=True):
     return {
         'correlated_lat': correlated_lat,
         'correlated_lon': correlated_lon,
-        'way_id': 1,
+        'edge_info': {
+            'way_id': way_id,
+        },
         'edge': {
             'destination_only': destination_only,
             'classification': {'use': use},
+            'forward': forward,
         },
     }
 
@@ -357,6 +360,15 @@ class ClientLocateTests(TestCase):
             arete = client_locate.localiser(4.0, 9.7)
         self.assertTrue(arete['destination_only'])
         self.assertEqual(arete['use'], 'driveway')
+
+    def test_expose_way_id_et_forward(self):
+        # cf. community.models.Incident.way_id_osm/forward_osm -- matching
+        # par topologie plutot que par distance dans IncidentsSurTrajetView.
+        reponse_simulee = self._reponse([_arete_factice(way_id=1527842568, forward=False)])
+        with patch('trips.services.client_locate.requests.post', return_value=reponse_simulee):
+            arete = client_locate.localiser(4.0, 9.7)
+        self.assertEqual(arete['way_id'], 1527842568)
+        self.assertFalse(arete['forward'])
 
     def test_requete_en_mode_verbose(self):
         # verbose=True est necessaire pour recevoir edge.classification/

@@ -522,12 +522,18 @@ class IncidentsSurTrajetApiTests(TestCase):
 
     def setUp(self):
         # Segment rectiligne d'environ 800m -- assez pour placer un incident
-        # "sur" le trace et un autre nettement hors du couloir par defaut (300m).
+        # "sur" le trace et un autre nettement hors du couloir par defaut
+        # (30m -- reduit depuis 300m, cf. discussion frontend/way_id).
         self.geometrie = encoder_polyline6([
             (DOUALA_LON, DOUALA_LAT),
             (DOUALA_LON - 0.007, DOUALA_LAT),
         ])
         self.utilisateur = creer_utilisateur()
+        # Par defaut, simule "Valhalla ne matche aucune arete sur cette
+        # geometrie" -- ces tests exercent le repli couloir+cap (Phase A) ;
+        # les tests de matching par way_id (plus bas) reprennent le mock avec
+        # de vraies aretes simulees.
+        patcher_attributs_trace(self)
 
     def test_geometrie_tronquee_fait_planter_le_decodeur_rejetee(self):
         # decoder_polyline6 est un decodeur permissif (pas un validateur) :
