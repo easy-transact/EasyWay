@@ -86,6 +86,23 @@ def patcher_locate_incident(
     return fonction_simulee
 
 
+def patcher_attributs_trace(test_case, aretes=None, effet_de_bord=None):
+    """Simule trips.services.client_trace_attributes.attributs_trace(), tel
+    qu'importe dans community.views (patch au point d'usage). aretes=None
+    (par defaut) simule "Valhalla ne matche aucune arete sur cette geometrie"
+    -- meme forme que le vrai client. Passer une liste de {'way_id','forward'}
+    pour simuler un trajet reel ; effet_de_bord pour simuler une panne
+    (ex. ErreurTraceAttributes/DisjoncteurOuvert)."""
+    patcheur = patch('community.views.attributs_trace')
+    fonction_simulee = patcheur.start()
+    if effet_de_bord is not None:
+        fonction_simulee.side_effect = effet_de_bord
+    else:
+        fonction_simulee.return_value = aretes
+    test_case.addCleanup(patcheur.stop)
+    return fonction_simulee
+
+
 class H3IndexationTests(TestCase):
     def test_cellules_calculees_a_la_creation(self):
         incident = creer_incident(creer_utilisateur())
@@ -612,6 +629,70 @@ class IncidentsSurTrajetApiTests(TestCase):
         # n'envoie pas 'heading') : aucune information a comparer, on ne
         # filtre pas plutot que de rejeter a tort.
         incident = creer_incident(self.utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON, cap=None)
+        reponse = self.client.post(
+            reverse('community:incidents-sur-trajet'), {'geometry': self.geometrie},
+            content_type='application/json',
+        )
+        self.assertEqual([i['id'] for i in reponse.json()], [str(incident.id)])
+
+    # Matching par topologie (way_id OSM + sens) : cf. discussion frontend
+    # (Waze) -- remplace le couloir de distance des que Valhalla repond.
+
+    def test_incident_meme_way_id_et_sens_inclus_meme_hors_couloir(self):
+        # A ~5.5km du trace -- prouve que l'inclusion vient du way_id, pas de
+        # la distance (qui l'aurait exclu sous n'importe quel couloir raisonnable).
+        patcher_attributs_trace(self, aretes=[{'way_id': 111, 'forward': True}])
+        incident = creer_incident(
+            self.utilisateur, lat=DOUALA_LAT + 0.05, lon=DOUALA_LON + 0.05,
+            way_id_osm=111, forward_osm=True,
+        )
+        reponse = self.client.post(
+            reverse('community:incidents-sur-trajet'), {'geometry': self.geometrie},
+            content_type='application/json',
+        )
+        self.assertEqual([i['id'] for i in reponse.json()], [str(incident.id)])
+
+    def test_incident_way_id_different_exclu_meme_dans_le_couloir(self):
+        # Le cas contre-allee : sur le trace geometriquement, mais un autre
+        # way_id -- c'est le test qui prouve le changement de comportement
+        # (l'ancien couloir de distance l'aurait inclus a tort).
+        patcher_attributs_trace(self, aretes=[{'way_id': 111, 'forward': True}])
+        creer_incident(self.utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON, way_id_osm=222, forward_osm=True)
+        reponse = self.client.post(
+            reverse('community:incidents-sur-trajet'), {'geometry': self.geometrie},
+            content_type='application/json',
+        )
+        self.assertEqual(reponse.json(), [])
+
+    def test_incident_meme_way_id_sens_oppose_exclu(self):
+        patcher_attributs_trace(self, aretes=[{'way_id': 111, 'forward': True}])
+        creer_incident(self.utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON, way_id_osm=111, forward_osm=False)
+        reponse = self.client.post(
+            reverse('community:incidents-sur-trajet'), {'geometry': self.geometrie},
+            content_type='application/json',
+        )
+        self.assertEqual(reponse.json(), [])
+
+    def test_incident_sans_way_id_osm_absent_quand_valhalla_repond(self):
+        # Incident "legacy" (cree avant cette colonne, ou signale sans
+        # verification routiere) : n'apparait jamais via ce matching des que
+        # Valhalla repond, meme s'il est geometriquement sur le trace -- pas
+        # de repli partiel, seule une panne Valhalla declenche le couloir.
+        patcher_attributs_trace(self, aretes=[{'way_id': 111, 'forward': True}])
+        creer_incident(self.utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON, way_id_osm=None, forward_osm=None)
+        reponse = self.client.post(
+            reverse('community:incidents-sur-trajet'), {'geometry': self.geometrie},
+            content_type='application/json',
+        )
+        self.assertEqual(reponse.json(), [])
+
+    def test_valhalla_indisponible_replie_sur_le_couloir(self):
+        # Panne Valhalla (disjoncteur ouvert) : repli complet sur couloir+cap
+        # -- un incident legacy geometriquement sur le trace redevient visible.
+        patcher_attributs_trace(self, effet_de_bord=DisjoncteurOuvert())
+        incident = creer_incident(
+            self.utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON, way_id_osm=None, forward_osm=None, cap=None,
+        )
         reponse = self.client.post(
             reverse('community:incidents-sur-trajet'), {'geometry': self.geometrie},
             content_type='application/json',
