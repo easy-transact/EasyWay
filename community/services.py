@@ -56,7 +56,7 @@ class ServiceIncident:
         # Position calee sur l'arete routiere trouvee (cf. _verifier_position_routiere)
         # si la verification reussit -- sinon garde le point brut soumis, sans
         # way_id/forward (Valhalla indisponible ou hors-route non bloquant).
-        resultat_routier = self._verifier_position_routiere(position)
+        resultat_routier = self._verifier_position_routiere(position, cap)
         if resultat_routier is not None:
             position, way_id_osm, forward_osm = resultat_routier
         else:
@@ -104,7 +104,7 @@ class ServiceIncident:
         if recents >= QUOTA_SIGNALEMENTS_PAR_HEURE:
             raise QuotaDepasse()
 
-    def _verifier_position_routiere(self, position):
+    def _verifier_position_routiere(self, position, cap=None):
         """None si la verification est ignoree (Valhalla indisponible, ou
         aucune route connue dans la zone) -- l'appelant garde alors le point
         brut, sans way_id/forward. Sinon (Point, way_id, forward) : la
@@ -115,9 +115,16 @@ class ServiceIncident:
         point brut, cf. capture d'ecran frontend, un marqueur "a cote" de la
         route plutot que dessus), l'identifiant OSM de la voie et le sens de
         circulation dessus (cf. Incident.way_id_osm/forward_osm -- matching
-        par topologie dans IncidentsSurTrajetView, pas par distance)."""
+        par topologie dans IncidentsSurTrajetView, pas par distance).
+
+        `cap` transmis a client_locate.localiser() : sur une rue a double
+        sens, les deux sens partagent le meme way_id -- sans heading pour
+        les departager, l'arete renvoyee par Valhalla (et donc `forward`)
+        n'est pas fiable, verifie en prod (cf. discussion : un signalement
+        a heading=177 sur un trace a 357, donc oppose, s'etait vu attribuer
+        forward=True au lieu de False)."""
         try:
-            arete = client_locate.localiser(position.y, position.x)
+            arete = client_locate.localiser(position.y, position.x, cap=cap)
         except (client_locate.ErreurLocate, DisjoncteurOuvert):
             # Meme principe que _nom_voie() : un Valhalla en panne ne doit
             # jamais bloquer un signalement -- on renonce juste a la

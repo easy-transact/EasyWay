@@ -71,7 +71,7 @@ def patcher_locate_incident(
     elif distance_m is None:
         fonction_simulee.return_value = None
     else:
-        def _repondre(lat_in, lon_in):
+        def _repondre(lat_in, lon_in, cap=None):
             return {
                 'distance_m': distance_m,
                 'lat': lat_in if lat is None else lat,
@@ -137,6 +137,13 @@ class ServiceIncidentSignalerTests(TestCase):
         self.assertFalse(doublon)
         self.assertEqual(incident.statut, StatutIncident.EN_ATTENTE)
 
+    def test_cap_transmis_a_localiser_pour_departager_les_deux_sens(self):
+        # Sur une rue a double sens, les deux sens partagent le meme way_id --
+        # sans heading, l'arete renvoyee par Valhalla (donc `forward`) n'est
+        # pas fiable (regression constatee en prod, cf. discussion).
+        fonction_simulee = patcher_locate_incident(self)
+        ServiceIncident().signaler(creer_utilisateur(), TypeIncident.RADAR, self._point(), cap=177)
+        self.assertEqual(fonction_simulee.call_args.kwargs.get('cap'), 177)
 
     @override_settings(QUOTA_SIGNALEMENTS_ACTIF=True)
     def test_quota_horaire_depasse(self):

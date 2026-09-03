@@ -378,6 +378,22 @@ class ClientLocateTests(TestCase):
             client_locate.localiser(4.0, 9.7)
         self.assertTrue(post_simule.call_args.kwargs['json']['verbose'])
 
+    def test_cap_transmis_en_heading(self):
+        # Sur une rue a double sens, les deux sens partagent le meme way_id --
+        # sans heading pour departager les deux aretes dirigees, celle
+        # renvoyee (donc `forward`) n'est pas fiable (regression constatee en
+        # prod, cf. discussion).
+        reponse_simulee = self._reponse([_arete_factice()])
+        with patch('trips.services.client_locate.requests.post', return_value=reponse_simulee) as post_simule:
+            client_locate.localiser(4.0, 9.7, cap=177)
+        self.assertEqual(post_simule.call_args.kwargs['json']['locations'][0]['heading'], 177)
+
+    def test_sans_cap_pas_de_heading_envoye(self):
+        reponse_simulee = self._reponse([_arete_factice()])
+        with patch('trips.services.client_locate.requests.post', return_value=reponse_simulee) as post_simule:
+            client_locate.localiser(4.0, 9.7)
+        self.assertNotIn('heading', post_simule.call_args.kwargs['json']['locations'][0])
+
     def test_aucune_arete_retourne_none(self):
         reponse_simulee = self._reponse([])
         with patch('trips.services.client_locate.requests.post', return_value=reponse_simulee):

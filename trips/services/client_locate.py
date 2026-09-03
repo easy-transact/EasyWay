@@ -35,7 +35,7 @@ class ErreurLocate(Exception):
     meme principe que ClientNominatim/ClientMeili."""
 
 
-def localiser(lat: float, lon: float) -> dict | None:
+def localiser(lat: float, lon: float, cap: int | None = None) -> dict | None:
     """None si Valhalla ne connait aucune route dans la zone (tres rare --
     meme un point isole trouve generalement l'arete la moins lointaine).
     Sinon {'distance_m', 'lat', 'lon', 'destination_only', 'use', 'way_id',
@@ -46,14 +46,28 @@ def localiser(lat: float, lon: float) -> dict | None:
     (identifiant OSM stable de la voie, cf. community.models.Incident.way_id_osm
     -- matching par topologie plutot que par distance dans
     IncidentsSurTrajetView) et forward (sens de circulation sur cette arete).
-    Leve ErreurLocate/DisjoncteurOuvert si Valhalla est indisponible -- a
-    l'appelant de decider du repli."""
+
+    `cap` (heading, degres) : sur une rue a double sens, Valhalla represente
+    chaque sens comme une arete dirigee distincte du meme way_id -- sans
+    heading pour les departager, l'arete renvoyee en premier n'est pas
+    forcement celle du sens reellement emprunte (verifie en prod : un
+    signalement avec heading=177 sur une rue dont le trace fait 357 -- donc
+    strictement oppose -- s'est vu attribuer forward=True au lieu de False,
+    et n'etait donc plus filtre par IncidentsSurTrajetView). Meme convention
+    que ClientValhalla.cap_origine (trips/services/client_valhalla.py) --
+    heading_tolerance laisse au defaut Valhalla (60 deg), pas mesure sur
+    donnees reelles. Leve ErreurLocate/DisjoncteurOuvert si Valhalla est
+    indisponible -- a l'appelant de decider du repli."""
     disjoncteur.verifier()
+
+    localisation = {'lat': lat, 'lon': lon}
+    if cap is not None:
+        localisation['heading'] = cap
 
     try:
         reponse = requests.post(
             f'{settings.VALHALLA_URL}/locate',
-            json={'locations': [{'lat': lat, 'lon': lon}], 'costing': 'auto', 'verbose': True},
+            json={'locations': [localisation], 'costing': 'auto', 'verbose': True},
             timeout=TIMEOUT_S,
         )
         reponse.raise_for_status()
