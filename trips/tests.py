@@ -116,11 +116,13 @@ class ClientFactice(ClientRoutage):
         self.appels = 0
         self.dernieres_options = None
         self.dernier_cap_origine = None
+        self.dernier_alternatives = None
 
-    def calculer_itineraires(self, depart, arrivee, options, cap_origine=None):
+    def calculer_itineraires(self, depart, arrivee, options, cap_origine=None, alternatives=True):
         self.appels += 1
         self.dernieres_options = options
         self.dernier_cap_origine = cap_origine
+        self.dernier_alternatives = alternatives
         return [trip_factice()['trip']]
 
     def replier(self, depart, arrivee):
@@ -250,6 +252,28 @@ class ServiceItineraireTests(TestCase):
 
         self.assertEqual(client.appels, 2)
 
+    def test_alternatives_transmis_au_client(self):
+        client = ClientFactice()
+        service = ServiceItineraire(client=client)
+        service.calculer((4.0483, 9.7043), (4.0469, 9.6970), self.utilisateur, alternatives=False)
+        self.assertFalse(client.dernier_alternatives)
+
+    def test_alternatives_par_defaut_vrai(self):
+        client = ClientFactice()
+        service = ServiceItineraire(client=client)
+        service.calculer((4.0483, 9.7043), (4.0469, 9.6970), self.utilisateur)
+        self.assertTrue(client.dernier_alternatives)
+
+    def test_alternatives_differencie_la_cle_de_cache(self):
+        client = ClientFactice()
+        service = ServiceItineraire(client=client)
+        depart, arrivee = (4.0483, 9.7043), (4.0469, 9.6970)
+
+        service.calculer(depart, arrivee, self.utilisateur)
+        service.calculer(depart, arrivee, self.utilisateur, alternatives=False)
+
+        self.assertEqual(client.appels, 2)
+
 
 class CapOrigineValhallaTests(TestCase):
     def setUp(self):
@@ -279,6 +303,46 @@ class CapOrigineValhallaTests(TestCase):
             client.calculer_itineraires((4.0, 9.7), (4.01, 9.71), {'costing': 'auto'})
         locations = post_simule.call_args.kwargs['json']['locations']
         self.assertNotIn('heading', locations[0])
+
+
+class AlternativesValhallaTests(TestCase):
+    """alternatives=False doit reellement etre honore -- un seul appel
+    Valhalla (alternates=0), jamais le deuxieme appel "shortest" que
+    _collecter_variantes fait pour maximiser les chances d'une 3e option."""
+
+    def setUp(self):
+        cache.clear()
+
+    def _reponse(self):
+        reponse_simulee = Mock(status_code=200)
+        reponse_simulee.json.return_value = trip_factice()
+        reponse_simulee.raise_for_status = lambda: None
+        return reponse_simulee
+
+    def test_alternatives_false_un_seul_appel_alternates_zero(self):
+        client = ClientValhalla()
+        with patch(
+            'trips.services.client_valhalla.requests.post', return_value=self._reponse()
+        ) as post_simule:
+            resultat = client.calculer_itineraires(
+                (4.0, 9.7), (4.01, 9.71), {'costing': 'auto'}, alternatives=False
+            )
+        post_simule.assert_called_once()
+        self.assertEqual(post_simule.call_args.kwargs['json']['alternates'], 0)
+        self.assertEqual(len(resultat), 1)
+
+    def test_alternatives_true_par_defaut_collecte_les_variantes(self):
+        # Meme reponse (un seul trip, jamais de vraie 2e route pour ce
+        # segment) -- le point ici est le NOMBRE d'appels, pas le resultat :
+        # _collecter_variantes retente toujours avec l'objectif "shortest"
+        # tant qu'elle a moins de 3 trips, contrairement a alternatives=False.
+        client = ClientValhalla()
+        with patch(
+            'trips.services.client_valhalla.requests.post', return_value=self._reponse()
+        ) as post_simule:
+            client.calculer_itineraires((4.0, 9.7), (4.01, 9.71), {'costing': 'auto'})
+        self.assertEqual(post_simule.call_count, 2)
+        self.assertEqual(post_simule.call_args_list[0].kwargs['json']['alternates'], 2)
 
 
 class DisjoncteurValhallaTests(TestCase):

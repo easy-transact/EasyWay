@@ -14,12 +14,15 @@ class ClientRoutage(ABC):
     @abstractmethod
     def calculer_itineraires(
         self, depart: tuple[float, float], arrivee: tuple[float, float], options: dict,
-        cap_origine: int | None = None,
+        cap_origine: int | None = None, alternatives: bool = True,
     ) -> list[dict]:
         """depart/arrivee : (lat, lon). cap_origine (0-359, optionnel) : cap
         du vehicule au depart, a transmettre comme heading sur la premiere
-        location si le moteur le supporte. Retourne une liste de trips au
-        format Valhalla (summary.length/time, legs[].shape, legs[].maneuvers)."""
+        location si le moteur le supporte. alternatives=False : un seul trip
+        (le recommande), sans les appels/couts supplementaires que la
+        recherche de variantes implique -- honore reellement, pas juste
+        tronque apres coup. Retourne une liste de trips au format Valhalla
+        (summary.length/time, legs[].shape, legs[].maneuvers)."""
 
     @abstractmethod
     def replier(self, depart: tuple[float, float], arrivee: tuple[float, float]) -> list[dict]:

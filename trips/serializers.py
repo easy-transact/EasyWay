@@ -37,6 +37,14 @@ class CalculItineraireSerializer(serializers.Serializer):
         many=True, required=False, default=list, source='eviter',
         help_text="Points a exclure du graphe de routage (ex. position d'un incident).",
     )
+    alternatives = serializers.BooleanField(
+        required=False, default=True,
+        help_text=(
+            'false : un seul itineraire (le recommande) est calcule, sans les appels '
+            'Valhalla supplementaires que la recherche de variantes implique -- reellement '
+            'honore cote serveur, pas juste tronque apres coup.'
+        ),
+    )
 
 
 class ManoeuvreCandidatSerializer(serializers.Serializer):

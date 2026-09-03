@@ -35,7 +35,7 @@ class ServiceItineraire:
     def __init__(self, client=None):
         self.client = client or ClientValhalla()
 
-    def calculer(self, depart, arrivee, utilisateur, eviter=None, cap_origine=None) -> list[dict]:
+    def calculer(self, depart, arrivee, utilisateur, eviter=None, cap_origine=None, alternatives=True) -> list[dict]:
         """depart/arrivee : (lat, lon). eviter : liste de (lat, lon) a exclure
         du graphe de routage (ex. position d'un incident) -- transmis a
         Valhalla via exclude_locations, jamais un simple reclassement des
@@ -44,18 +44,24 @@ class ServiceItineraire:
         comme heading Valhalla sur la premiere location -- sans ca, un
         recalcul en cours de route peut choisir l'arete la plus proche dans
         le mauvais sens (voie a sens unique/chaussee separee) et demarrer par
-        un demi-tour immediat. Retourne une liste d'itineraires candidats
-        normalises (voir _normaliser_trip), le premier etant recommande."""
+        un demi-tour immediat. alternatives=False : un seul itineraire
+        (le recommande), reellement propage jusqu'a ClientValhalla -- pas
+        juste tronque apres coup, pour eviter le cout des appels de variantes
+        quand l'appelant n'en a pas besoin. Retourne une liste d'itineraires
+        candidats normalises (voir _normaliser_trip), le premier etant
+        recommande."""
         options = self._options_depuis_parametres(utilisateur)
         if eviter:
             # cf. https://valhalla.github.io/valhalla/api/turn-by-turn/api-reference/#exclude-locations
             # -- cle top-level du payload /route, pas une costing_option.
             options['exclude_locations'] = [{'lat': lat, 'lon': lon} for lat, lon in eviter]
-        cle = self._cle_cache(depart, arrivee, options, cap_origine)
+        cle = self._cle_cache(depart, arrivee, options, cap_origine, alternatives)
 
         trips = cache.get(cle)
         if trips is None:
-            trips = self.client.calculer_itineraires(depart, arrivee, options, cap_origine=cap_origine)
+            trips = self.client.calculer_itineraires(
+                depart, arrivee, options, cap_origine=cap_origine, alternatives=alternatives
+            )
             cache.set(cle, trips, timeout=DUREE_CACHE_S)
 
         return [self._normaliser_trip(trip, index) for index, trip in enumerate(trips)]
@@ -78,9 +84,12 @@ class ServiceItineraire:
 
         return {'costing': costing, 'costing_options': {costing: costing_options}}
 
-    def _cle_cache(self, depart, arrivee, options, cap_origine) -> str:
+    def _cle_cache(self, depart, arrivee, options, cap_origine, alternatives) -> str:
         brut = json.dumps(
-            {'depart': depart, 'arrivee': arrivee, 'options': options, 'cap_origine': cap_origine},
+            {
+                'depart': depart, 'arrivee': arrivee, 'options': options,
+                'cap_origine': cap_origine, 'alternatives': alternatives,
+            },
             sort_keys=True,
         )
         return 'itineraire:' + hashlib.sha256(brut.encode()).hexdigest()

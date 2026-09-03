@@ -41,7 +41,9 @@ DUREE_PERIODE = {
         "(ex. position d'un incident) -- Valhalla replanifie autour, ce n'est pas un "
         "simple reclassement des candidats existants. 'origin_heading' (optionnel) evite "
         "qu'un recalcul en cours de route demarre par un demi-tour immediat sur une voie "
-        'a sens unique ou une chaussee separee.'
+        "a sens unique ou une chaussee separee. 'alternatives' (defaut true) : false "
+        'demande un seul itineraire, reellement honore -- pas de recherche de variantes '
+        'cote Valhalla, jamais un simple troncage de la reponse.'
     ),
     request=CalculItineraireSerializer,
     responses={200: ItineraireCandidatSerializer(many=True)},
@@ -61,6 +63,7 @@ class CalculItineraireView(APIView):
             utilisateur=request.user,
             eviter=[(p['lat'], p['lon']) for p in donnees['eviter']],
             cap_origine=donnees['cap_origine'],
+            alternatives=donnees['alternatives'],
         )
         return Response(ItineraireCandidatSerializer(candidats, many=True).data)
 

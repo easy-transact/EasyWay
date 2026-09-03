@@ -35,10 +35,17 @@ class ClientValhalla(ClientRoutage):
     TIMEOUT_S = 5
     TENTATIVES = 2
 
-    def calculer_itineraires(self, depart, arrivee, options, cap_origine=None):
+    def calculer_itineraires(self, depart, arrivee, options, cap_origine=None, alternatives=True):
         try:
             disjoncteur.verifier()
-            trips = self._collecter_variantes(depart, arrivee, options, cap_origine)
+            if alternatives:
+                trips = self._collecter_variantes(depart, arrivee, options, cap_origine)
+            else:
+                # alternatives=False reellement honore : un seul appel Valhalla
+                # (alternates=0), jamais le deuxieme appel "shortest" de
+                # _collecter_variantes -- pas seulement trips[:1] apres coup,
+                # qui aurait quand meme paye le cout des variantes.
+                trips = self._appeler_avec_retry(depart, arrivee, options, alternates=0, cap_origine=cap_origine)
         except (DisjoncteurOuvert, ErreurRoutage):
             return self.replier(depart, arrivee)
         disjoncteur.reinitialiser_echecs()
