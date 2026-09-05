@@ -1,18 +1,19 @@
 import { useEffect, useState } from 'react';
 import DataTable from '../components/DataTable';
 import { bannirUtilisateur, debannirUtilisateur, listerUtilisateurs } from '../api';
+import { Search, ShieldBan, ShieldCheck } from 'lucide-react';
 
 const COLONNES = [
-  { key: 'phone', label: 'Telephone' },
+  { key: 'phone', label: 'Téléphone' },
   { key: 'full_name', label: 'Nom' },
   { key: 'email', label: 'Email' },
   { key: 'city', label: 'Ville' },
-  { key: 'plan', label: 'Plan' },
-  { key: 'reputation_score', label: 'Reputation' },
+  { key: 'plan', label: 'Plan', render: (u) => <span className={`badge plan-${u.plan.toLowerCase()}`}>{u.plan}</span> },
+  { key: 'reputation_score', label: 'Réputation', render: (u) => <strong>{u.reputation_score}</strong> },
   {
     key: 'is_banned',
     label: 'Statut',
-    render: (u) => (u.is_banned ? `Banni${u.banned_until ? ` jusqu'au ${new Date(u.banned_until).toLocaleDateString()}` : ' (permanent)'}` : 'Actif'),
+    render: (u) => (u.is_banned ? <span className="badge badge-danger">Banni{u.banned_until ? ` jusqu'au ${new Date(u.banned_until).toLocaleDateString()}` : ' (permanent)'}</span> : <span className="badge badge-success">Actif</span>),
   },
 ];
 
@@ -65,42 +66,59 @@ export default function UtilisateursPage() {
   }
 
   return (
-    <section>
-      <h2>Utilisateurs</h2>
-      <form className="barre-outils" onSubmit={soumettreRecherche}>
-        <label>
-          Recherche (telephone / nom / email)
-          <input value={recherche} onChange={(e) => setRecherche(e.target.value)} />
-        </label>
-        <button type="submit">Rechercher</button>
-      </form>
-      {erreur && <p className="erreur">{erreur}</p>}
-      {chargement ? (
-        <p className="chargement">Chargement...</p>
-      ) : (
-        <DataTable
-          columns={COLONNES}
-          rows={utilisateurs}
-          renderActions={(utilisateur) =>
-            utilisateur.is_staff ? (
-              <span>Compte staff</span>
-            ) : utilisateur.is_banned ? (
-              <button onClick={() => debannir(utilisateur.id)}>Debannir</button>
-            ) : (
-              <div className="actions-ligne">
-                <input
-                  type="date"
-                  value={jusquAParId[utilisateur.id] || ''}
-                  onChange={(e) =>
-                    setJusquAParId((precedent) => ({ ...precedent, [utilisateur.id]: e.target.value }))
-                  }
-                />
-                <button onClick={() => bannir(utilisateur.id)}>Bannir</button>
-              </div>
-            )
-          }
-        />
-      )}
+    <section className="page-container">
+      <div className="page-header">
+        <div>
+          <h2>Gestion des Utilisateurs</h2>
+          <p className="subtitle">Gérez les comptes, les bannissements et la réputation des utilisateurs.</p>
+        </div>
+        <div className="header-filters">
+          <form className="search-bar" onSubmit={soumettreRecherche}>
+            <Search size={18} className="text-muted" />
+            <input 
+              placeholder="Téléphone / Nom / Email" 
+              value={recherche} 
+              onChange={(e) => setRecherche(e.target.value)} 
+              className="input-search"
+            />
+            <button type="submit" className="btn-secondary">Rechercher</button>
+          </form>
+        </div>
+      </div>
+      
+      <div className="card">
+        {erreur && <div className="erreur">{erreur}</div>}
+        {chargement ? (
+          <p className="chargement">Chargement des utilisateurs...</p>
+        ) : (
+          <DataTable
+            columns={COLONNES}
+            rows={utilisateurs}
+            renderActions={(utilisateur) =>
+              utilisateur.is_staff ? (
+                <span className="badge badge-staff">Compte staff</span>
+              ) : utilisateur.is_banned ? (
+                <button className="btn-success" onClick={() => debannir(utilisateur.id)}>
+                  <ShieldCheck size={16} /> Débannir
+                </button>
+              ) : (
+                <div className="actions-ligne">
+                  <input
+                    type="date"
+                    value={jusquAParId[utilisateur.id] || ''}
+                    onChange={(e) =>
+                      setJusquAParId((precedent) => ({ ...precedent, [utilisateur.id]: e.target.value }))
+                    }
+                  />
+                  <button className="btn-danger" onClick={() => bannir(utilisateur.id)}>
+                    <ShieldBan size={16} /> Bannir
+                  </button>
+                </div>
+              )
+            }
+          />
+        )}
+      </div>
     </section>
   );
 }

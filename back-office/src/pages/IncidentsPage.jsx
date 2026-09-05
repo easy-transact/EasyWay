@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import DataTable from '../components/DataTable';
 import { listerIncidents, retirerIncident } from '../api';
+import { Filter, Trash2 } from 'lucide-react';
 
 const COLONNES = [
   { key: 'type', label: 'Type' },
@@ -10,7 +11,7 @@ const COLONNES = [
   { key: 'confirmations', label: 'Confirmations' },
   { key: 'disputes', label: 'Infirmations' },
   { key: 'author_phone', label: 'Auteur' },
-  { key: 'created_at', label: 'Cree le', render: (i) => new Date(i.created_at).toLocaleString() },
+  { key: 'created_at', label: 'Créé le', render: (i) => new Date(i.created_at).toLocaleString() },
 ];
 
 export default function IncidentsPage() {
@@ -53,43 +54,53 @@ export default function IncidentsPage() {
   }
 
   return (
-    <section>
-      <h2>Incidents</h2>
-      <div className="barre-outils">
-        <label>
-          Statut
-          <select value={statut} onChange={(e) => setStatut(e.target.value)}>
-            <option value="">Actifs + en attente</option>
-            <option value="RETIRE">Retires</option>
-            <option value="EXPIRE">Expires</option>
-          </select>
-        </label>
+    <section className="page-container">
+      <div className="page-header">
+        <div>
+          <h2>Gestion des Incidents</h2>
+          <p className="subtitle">Consultez et modérez les incidents signalés sur la carte.</p>
+        </div>
+        <div className="header-filters">
+          <div className="filter-group">
+            <Filter size={18} className="text-muted" />
+            <select value={statut} onChange={(e) => setStatut(e.target.value)} className="select-modern">
+              <option value="">Actifs + en attente</option>
+              <option value="RETIRE">Retirés</option>
+              <option value="EXPIRE">Expirés</option>
+            </select>
+          </div>
+        </div>
       </div>
-      {erreur && <p className="erreur">{erreur}</p>}
-      {chargement ? (
-        <p className="chargement">Chargement...</p>
-      ) : (
-        <DataTable
-          columns={COLONNES}
-          rows={incidents}
-          renderActions={
-            statut === ''
-              ? (incident) => (
-                  <div className="actions-ligne">
-                    <input
-                      placeholder="Motif de retrait"
-                      value={motifParId[incident.id] || ''}
-                      onChange={(e) =>
-                        setMotifParId((precedent) => ({ ...precedent, [incident.id]: e.target.value }))
-                      }
-                    />
-                    <button onClick={() => retirer(incident.id)}>Retirer</button>
-                  </div>
-                )
-              : undefined
-          }
-        />
-      )}
+      
+      <div className="card">
+        {erreur && <div className="erreur">{erreur}</div>}
+        {chargement ? (
+          <p className="chargement">Chargement des incidents...</p>
+        ) : (
+          <DataTable
+            columns={COLONNES}
+            rows={incidents}
+            renderActions={
+              statut === ''
+                ? (incident) => (
+                    <div className="actions-ligne">
+                      <input
+                        placeholder="Motif de retrait"
+                        value={motifParId[incident.id] || ''}
+                        onChange={(e) =>
+                          setMotifParId((precedent) => ({ ...precedent, [incident.id]: e.target.value }))
+                        }
+                      />
+                      <button className="btn-danger" onClick={() => retirer(incident.id)}>
+                        <Trash2 size={16} /> Retirer
+                      </button>
+                    </div>
+                  )
+                : undefined
+            }
+          />
+        )}
+      </div>
     </section>
   );
 }
