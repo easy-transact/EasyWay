@@ -18,5 +18,8 @@ FROM nginx:1.27-alpine
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /app/dist /usr/share/nginx/html
 
+# 127.0.0.1, not localhost: busybox wget resolves localhost's IPv6 entry
+# (::1) first and doesn't fall back to IPv4 when that's refused, which
+# reported the container unhealthy despite nginx serving fine on IPv4.
 HEALTHCHECK --interval=10s --timeout=3s --retries=5 \
-    CMD wget -qO- http://localhost/ >/dev/null || exit 1
+    CMD wget -qO- http://127.0.0.1/ >/dev/null || exit 1
