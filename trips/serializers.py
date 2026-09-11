@@ -4,7 +4,7 @@ from rest_framework import serializers
 
 from places.models import Lieu
 
-from .models import Itineraire, Manoeuvre, StatutTrajet, Trajet
+from .models import Itineraire, Manoeuvre, StatutTrajet, Trajet, ZoneVitesse
 from .polyline import decoder_polyline6
 
 # Champs declares avec `source=` : la reponse API parle anglais, les modeles/
@@ -273,3 +273,78 @@ class TelemetriePositionsSerializer(serializers.Serializer):
         if len(positions) > LIMITE_POSITIONS_PAR_LOT:
             raise serializers.ValidationError(f'Maximum {LIMITE_POSITIONS_PAR_LOT} positions per batch.')
         return positions
+
+
+class ZoneVitesseCreationSerializer(serializers.Serializer):
+    """POST /api/staff/speed-zones/ : la vue calcule le trace routier reel
+    entre origin/destination via ServiceItineraire avant de persister (pas de
+    .save() ici, contrairement au reste du fichier -- cf. ZoneVitesseListCreateView)."""
+
+    name = serializers.CharField(max_length=255, required=False, allow_blank=True, default='', source='nom')
+    origin_lat = serializers.FloatField()
+    origin_lon = serializers.FloatField()
+    destination_lat = serializers.FloatField()
+    destination_lon = serializers.FloatField()
+    speed_limit_kmh = serializers.IntegerField(min_value=1, source='vitesse_max_kmh')
+
+
+class ZoneVitesseModificationSerializer(serializers.Serializer):
+    """PATCH /api/staff/speed-zones/<id>/ : nom/vitesse/actif seulement --
+    modifier les points impliquerait de recalculer le trace, hors perimetre
+    de cette passe (recreer la zone plutot que la deplacer)."""
+
+    name = serializers.CharField(max_length=255, required=False, allow_blank=True, source='nom')
+    speed_limit_kmh = serializers.IntegerField(min_value=1, required=False, source='vitesse_max_kmh')
+    active = serializers.BooleanField(required=False, source='actif')
+
+    def update(self, instance, validated_data):
+        for champ, valeur in validated_data.items():
+            setattr(instance, champ, valeur)
+        instance.save()
+        return instance
+
+
+class ZoneVitesseSerializer(serializers.ModelSerializer):
+    """Forme de lecture -- geometry en [[lat, lon], ...] (ordre Leaflet natif,
+    pas l'ordre GeoJSON [lon, lat]) pour que le back-office puisse tracer la
+    polyline sans reordonner les coordonnees cote client."""
+
+    name = serializers.CharField(source='nom', read_only=True)
+    origin_lat = serializers.SerializerMethodField()
+    origin_lon = serializers.SerializerMethodField()
+    destination_lat = serializers.SerializerMethodField()
+    destination_lon = serializers.SerializerMethodField()
+    geometry = serializers.SerializerMethodField()
+    speed_limit_kmh = serializers.IntegerField(source='vitesse_max_kmh', read_only=True)
+    active = serializers.BooleanField(source='actif', read_only=True)
+    created_at = serializers.DateTimeField(source='cree_le', read_only=True)
+
+    class Meta:
+        model = ZoneVitesse
+        fields = [
+            'id', 'name', 'origin_lat', 'origin_lon', 'destination_lat', 'destination_lon',
+            'geometry', 'speed_limit_kmh', 'active', 'created_at',
+        ]
+        read_only_fields = fields
+
+    @extend_schema_field(serializers.FloatField())
+    def get_origin_lat(self, zone):
+        return zone.point_depart.y
+
+    @extend_schema_field(serializers.FloatField())
+    def get_origin_lon(self, zone):
+        return zone.point_depart.x
+
+    @extend_schema_field(serializers.FloatField())
+    def get_destination_lat(self, zone):
+        return zone.point_arrivee.y
+
+    @extend_schema_field(serializers.FloatField())
+    def get_destination_lon(self, zone):
+        return zone.point_arrivee.x
+
+    @extend_schema_field(serializers.ListField(child=serializers.ListField(child=serializers.FloatField())))
+    def get_geometry(self, zone):
+        if not zone.geometrie:
+            return None
+        return [[lat, lon] for lon, lat in zone.geometrie.coords]

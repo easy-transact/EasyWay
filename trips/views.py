@@ -1,18 +1,23 @@
 from datetime import timedelta
 
+from django.contrib.gis.geos import LineString, Point
 from django.utils import timezone
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view, inline_serializer
 from rest_framework import serializers as drf_serializers
 from rest_framework import status
 from rest_framework.generics import get_object_or_404
+from rest_framework.permissions import IsAdminUser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from accounts.models import Parametres
+from accounts.pagination import StaffPagination
 from accounts.serializers import MessageSerializer
 
 from .exceptions import TransitionInvalide
-from .models import StatutTrajet, Trajet
+from .models import StatutTrajet, Trajet, ZoneVitesse
+from .polyline import decoder_polyline6
 from .serializers import (
     CalculItineraireSerializer,
     ItineraireCandidatSerializer,
@@ -21,6 +26,9 @@ from .serializers import (
     TrajetCreationSerializer,
     TrajetMiseAJourSerializer,
     TrajetSerializer,
+    ZoneVitesseCreationSerializer,
+    ZoneVitesseModificationSerializer,
+    ZoneVitesseSerializer,
 )
 from .services.producteur_evenements import FLUX_POSITIONS, ProducteurRedisStreams
 from .services.service_itineraire import ServiceItineraire
@@ -233,3 +241,117 @@ class TelemetriePositionsView(APIView):
             # regroupement cote consommateur (cf. cahier des charges, confidentialite)
 
         return Response(status=status.HTTP_202_ACCEPTED)
+
+
+@extend_schema_view(
+    get=extend_schema(
+        tags=['Staff Speed Zones'],
+        summary='Lister les zones de vitesse',
+        parameters=[
+            OpenApiParameter('active', OpenApiTypes.BOOL),
+            OpenApiParameter('page', OpenApiTypes.INT),
+            OpenApiParameter('page_size', OpenApiTypes.INT),
+        ],
+        responses={200: ZoneVitesseSerializer(many=True)},
+    ),
+    post=extend_schema(
+        tags=['Staff Speed Zones'],
+        summary='Creer une zone de vitesse',
+        description=(
+            'Reserve au staff (is_staff). Calcule le trace routier reel entre '
+            'origin et destination via ServiceItineraire (meme service que '
+            'POST /api/routes/calculate/) plutot que de stocker une ligne droite.'
+        ),
+        request=ZoneVitesseCreationSerializer,
+        responses={201: ZoneVitesseSerializer, 400: MessageSerializer},
+    ),
+)
+class ZoneVitesseListCreateView(APIView):
+    permission_classes = [IsAdminUser]
+    pagination_class = StaffPagination
+
+    def get(self, request):
+        zones = ZoneVitesse.objects.all().order_by('-cree_le')
+        actif = request.query_params.get('active')
+        if actif is not None:
+            zones = zones.filter(actif=actif.lower() == 'true')
+
+        paginateur = self.pagination_class()
+        page = paginateur.paginate_queryset(zones, request)
+        return paginateur.get_paginated_response(ZoneVitesseSerializer(page, many=True).data)
+
+    def post(self, request):
+        serializer = ZoneVitesseCreationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        donnees = serializer.validated_data
+
+        # ServiceItineraire lit utilisateur.parametres -- absent pour un compte
+        # cree via createsuperuser (jamais instancie hors de l'inscription
+        # normale, cf. accounts/serializers.py:InscriptionSerializer). Le staff
+        # n'a par ailleurs pas a se soucier de configurer ses Parametres avant
+        # de pouvoir creer une zone.
+        Parametres.objects.get_or_create(utilisateur=request.user)
+
+        candidats = ServiceItineraire().calculer(
+            depart=(donnees['origin_lat'], donnees['origin_lon']),
+            arrivee=(donnees['destination_lat'], donnees['destination_lon']),
+            utilisateur=request.user,
+            alternatives=False,
+        )
+        if not candidats:
+            return Response(
+                {'detail': 'No route could be computed between these two points.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        points = decoder_polyline6(candidats[0]['geometrie'])
+        geometrie_ligne = LineString(points, srid=4326) if len(points) >= 2 else None
+
+        zone = ZoneVitesse.objects.create(
+            nom=donnees.get('nom', ''),
+            point_depart=Point(donnees['origin_lon'], donnees['origin_lat'], srid=4326),
+            point_arrivee=Point(donnees['destination_lon'], donnees['destination_lat'], srid=4326),
+            geometrie=geometrie_ligne,
+            vitesse_max_kmh=donnees['vitesse_max_kmh'],
+            cree_par=request.user,
+        )
+        return Response(ZoneVitesseSerializer(zone).data, status=status.HTTP_201_CREATED)
+
+
+@extend_schema_view(
+    get=extend_schema(
+        tags=['Staff Speed Zones'],
+        summary="Detail d'une zone de vitesse",
+        responses={200: ZoneVitesseSerializer},
+    ),
+    patch=extend_schema(
+        tags=['Staff Speed Zones'],
+        summary='Modifier une zone de vitesse',
+        description='nom/vitesse/actif seulement -- recreer la zone pour deplacer ses points.',
+        request=ZoneVitesseModificationSerializer,
+        responses={200: ZoneVitesseSerializer},
+    ),
+    delete=extend_schema(
+        tags=['Staff Speed Zones'],
+        summary='Supprimer une zone de vitesse',
+        responses={204: None},
+    ),
+)
+class ZoneVitesseDetailView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def get(self, request, id):
+        zone = get_object_or_404(ZoneVitesse, id=id)
+        return Response(ZoneVitesseSerializer(zone).data)
+
+    def patch(self, request, id):
+        zone = get_object_or_404(ZoneVitesse, id=id)
+        serializer = ZoneVitesseModificationSerializer(zone, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(ZoneVitesseSerializer(zone).data)
+
+    def delete(self, request, id):
+        zone = get_object_or_404(ZoneVitesse, id=id)
+        zone.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
