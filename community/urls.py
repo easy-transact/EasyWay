@@ -20,4 +20,9 @@ urlpatterns = [
         views.IncidentRetraitStaffView.as_view(),
         name='staff-incident-retirer',
     ),
+    path(
+        'staff/incidents/<uuid:id>/',
+        views.IncidentSupprimerView.as_view(),
+        name='staff-incident-supprimer',
+    ),
 ]

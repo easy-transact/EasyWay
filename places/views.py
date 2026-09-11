@@ -432,3 +432,23 @@ class LieuRejeterView(APIView):
         lieu = get_object_or_404(Lieu, id=id)
         lieu.rejeter(motif=serializer.validated_data['reason'])
         return Response(LieuModerationSerializer(lieu).data)
+
+
+@extend_schema(
+    tags=['Staff Places'],
+    summary='Supprimer definitivement un lieu',
+    description=(
+        'Reserve au staff (is_staff). Suppression DB reelle (pas un changement de '
+        "statut) -- pour les entrees clairement abusives (ex. payloads XSS/SSTI "
+        "soumis via /places/propose/) plutot que de les laisser trainer en REJETE. "
+        'AdresseEnregistree.lieu est SET_NULL, aucune cascade a craindre.'
+    ),
+    responses={204: None},
+)
+class LieuSupprimerView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def delete(self, request, id):
+        lieu = get_object_or_404(Lieu, id=id)
+        lieu.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)

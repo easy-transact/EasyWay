@@ -21,4 +21,5 @@ urlpatterns = [
     path('staff/places/', views.LieuModerationListView.as_view(), name='staff-lieux'),
     path('staff/places/<uuid:id>/approve/', views.LieuApprouverView.as_view(), name='staff-lieu-approuver'),
     path('staff/places/<uuid:id>/reject/', views.LieuRejeterView.as_view(), name='staff-lieu-rejeter'),
+    path('staff/places/<uuid:id>/', views.LieuSupprimerView.as_view(), name='staff-lieu-supprimer'),
 ]

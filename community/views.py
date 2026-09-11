@@ -623,3 +623,25 @@ class IncidentRetraitStaffView(APIView):
         incident.retirer(motif=serializer.validated_data['reason'])
         invalider_cache_cellule(incident.cellule_h3_res8)
         return Response(IncidentModerationSerializer(incident).data)
+
+
+@extend_schema(
+    tags=['Staff Incidents'],
+    summary='Supprimer definitivement un signalement',
+    description=(
+        'Reserve au staff (is_staff). Suppression DB reelle (pas un retrait '
+        "logique comme IncidentDetailView.delete()/IncidentRetraitStaffView) -- "
+        'pour les entrees clairement abusives plutot que de les laisser trainer '
+        'en RETIRE. Vote.incident est CASCADE, les votes associes partent avec.'
+    ),
+    responses={204: None},
+)
+class IncidentSupprimerView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def delete(self, request, id):
+        incident = get_object_or_404(Incident, id=id)
+        cellule = incident.cellule_h3_res8
+        incident.delete()
+        invalider_cache_cellule(cellule)
+        return Response(IncidentModerationSerializer(incident).data)
