@@ -69,7 +69,10 @@ class Utilisateur(AbstractBaseUser, PermissionsMixin):
     email = models.EmailField(unique=True, null=True, blank=True)
     identifiant_google = models.CharField(max_length=255, unique=True, null=True, blank=True)
     nom_complet = models.CharField(max_length=255)
-    telephone = models.CharField(max_length=32, unique=True)
+    # Nullable : les comptes crees via Google avant le passage au telephone
+    # comme USERNAME_FIELD (cf. UtilisateurManager) n'en ont pas -- cf.
+    # ConnexionGoogleView, qui cree toujours ces comptes sans telephone.
+    telephone = models.CharField(max_length=32, unique=True, null=True, blank=True)
     ville = models.CharField(max_length=255, null=True, blank=True)
     type_vehicule = models.CharField(max_length=20, choices=TypeVehicule.choices, null=True, blank=True)
     url_avatar = models.URLField(null=True, blank=True)
