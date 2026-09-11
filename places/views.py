@@ -22,9 +22,11 @@ from rest_framework.views import APIView
 from accounts.pagination import StaffPagination
 from accounts.serializers import MessageSerializer
 
-from .models import AdresseEnregistree, Lieu, RechercheRecente, StatutLieu, Ville
+from .models import AdresseEnregistree, Etablissement, Lieu, RechercheRecente, StatutLieu, Ville
 from .serializers import (
     AdresseEnregistreeSerializer,
+    EtablissementEcritureSerializer,
+    EtablissementSerializer,
     LieuDetailSerializer,
     LieuModerationSerializer,
     LieuPropositionSerializer,
@@ -451,4 +453,88 @@ class LieuSupprimerView(APIView):
     def delete(self, request, id):
         lieu = get_object_or_404(Lieu, id=id)
         lieu.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+@extend_schema_view(
+    get=extend_schema(
+        tags=['Staff Establishments'],
+        summary='Lister les etablissements',
+        description='Reserve au staff (is_staff). Filtre optionnel par `type`.',
+        parameters=[
+            OpenApiParameter('type', OpenApiTypes.STR, description='HOPITAL/GARAGE.'),
+            OpenApiParameter('page', OpenApiTypes.INT),
+            OpenApiParameter('page_size', OpenApiTypes.INT),
+        ],
+        responses={200: EtablissementSerializer(many=True)},
+    ),
+    post=extend_schema(
+        tags=['Staff Establishments'],
+        summary='Enregistrer un etablissement',
+        description=(
+            'Reserve au staff (is_staff). Creation directe -- pas de file de '
+            "moderation, contrairement a Lieu (cf. ProposerLieuView)."
+        ),
+        request=EtablissementEcritureSerializer,
+        responses={201: EtablissementSerializer},
+    ),
+)
+class EtablissementListCreateView(APIView):
+    permission_classes = [IsAdminUser]
+    pagination_class = StaffPagination
+
+    def get(self, request):
+        etablissements = Etablissement.objects.all().order_by('nom')
+        type_filtre = request.query_params.get('type')
+        if type_filtre:
+            etablissements = etablissements.filter(type=type_filtre)
+
+        paginateur = self.pagination_class()
+        page = paginateur.paginate_queryset(etablissements, request)
+        return paginateur.get_paginated_response(EtablissementSerializer(page, many=True).data)
+
+    def post(self, request):
+        serializer = EtablissementEcritureSerializer(data=request.data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        etablissement = serializer.save()
+        return Response(EtablissementSerializer(etablissement).data, status=status.HTTP_201_CREATED)
+
+
+@extend_schema_view(
+    get=extend_schema(
+        tags=['Staff Establishments'],
+        summary='Detail d\'un etablissement',
+        responses={200: EtablissementSerializer},
+    ),
+    patch=extend_schema(
+        tags=['Staff Establishments'],
+        summary='Modifier un etablissement',
+        request=EtablissementEcritureSerializer,
+        responses={200: EtablissementSerializer},
+    ),
+    delete=extend_schema(
+        tags=['Staff Establishments'],
+        summary='Supprimer un etablissement',
+        responses={204: None},
+    ),
+)
+class EtablissementDetailView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def get(self, request, id):
+        etablissement = get_object_or_404(Etablissement, id=id)
+        return Response(EtablissementSerializer(etablissement).data)
+
+    def patch(self, request, id):
+        etablissement = get_object_or_404(Etablissement, id=id)
+        serializer = EtablissementEcritureSerializer(
+            etablissement, data=request.data, partial=True, context={'request': request}
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(EtablissementSerializer(etablissement).data)
+
+    def delete(self, request, id):
+        etablissement = get_object_or_404(Etablissement, id=id)
+        etablissement.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)

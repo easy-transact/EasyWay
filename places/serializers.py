@@ -1,7 +1,7 @@
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
-from .models import AdresseEnregistree, LibelleAdresse, Lieu, RechercheRecente
+from .models import AdresseEnregistree, Etablissement, LibelleAdresse, Lieu, RechercheRecente, TypeEtablissement
 
 # Champs declares avec `source=` : la reponse API parle anglais, les modeles/
 # colonnes DB restent en francais (aucune migration, cf. discussion).
@@ -256,3 +256,63 @@ class LieuModerationSerializer(serializers.ModelSerializer):
 
 class LieuRejetSerializer(serializers.Serializer):
     reason = serializers.CharField(max_length=255)
+
+
+class EtablissementSerializer(serializers.ModelSerializer):
+    """GET /api/staff/establishments/... : forme de lecture. cf.
+    EtablissementEcritureSerializer pour la creation/modification."""
+
+    lat = serializers.SerializerMethodField()
+    lon = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Etablissement
+        fields = [
+            'id', 'nom', 'type', 'adresse', 'ville', 'lat', 'lon',
+            'visible_sur_carte', 'cree_le',
+        ]
+        read_only_fields = fields
+
+    @extend_schema_field(serializers.FloatField())
+    def get_lat(self, etablissement):
+        return etablissement.position.y
+
+    @extend_schema_field(serializers.FloatField())
+    def get_lon(self, etablissement):
+        return etablissement.position.x
+
+
+class EtablissementEcritureSerializer(serializers.Serializer):
+    """POST/PATCH /api/staff/establishments/... : reserve au staff
+    (IsAdminUser), creation/modification directe -- pas de file de
+    moderation, contrairement a LieuPropositionSerializer."""
+
+    nom = serializers.CharField(max_length=255)
+    type = serializers.ChoiceField(choices=TypeEtablissement.choices)
+    adresse = serializers.CharField(max_length=500, required=False, allow_blank=True)
+    ville = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    lat = serializers.FloatField()
+    lon = serializers.FloatField()
+    visible_sur_carte = serializers.BooleanField(required=False, default=True)
+
+    def create(self, validated_data):
+        from django.contrib.gis.geos import Point
+
+        lat = validated_data.pop('lat')
+        lon = validated_data.pop('lon')
+        return Etablissement.objects.create(
+            position=Point(lon, lat, srid=4326),
+            cree_par=self.context['request'].user,
+            **validated_data,
+        )
+
+    def update(self, instance, validated_data):
+        lat = validated_data.pop('lat', None)
+        lon = validated_data.pop('lon', None)
+        if lat is not None and lon is not None:
+            from django.contrib.gis.geos import Point
+            instance.position = Point(lon, lat, srid=4326)
+        for champ, valeur in validated_data.items():
+            setattr(instance, champ, valeur)
+        instance.save()
+        return instance

@@ -40,6 +40,14 @@ class LibelleAdresse(models.TextChoices):
     PERSONNALISE = 'PERSONNALISE', 'Personnalise'
 
 
+class TypeEtablissement(models.TextChoices):
+    """Etablissements "basiques" enregistres directement par le staff (back-office),
+    distincts de Lieu -- liste volontairement restreinte au depart, extensible."""
+
+    HOPITAL = 'HOPITAL', 'Hopital'
+    GARAGE = 'GARAGE', 'Garage'
+
+
 class Lieu(models.Model):
     """Objet public partage, potentiellement reference par plusieurs
     AdresseEnregistree ou Trajet sans en dependre (cf. section 3.3)."""
@@ -175,6 +183,35 @@ class RechercheRecente(models.Model):
 
     def __str__(self):
         return self.libelle
+
+
+class Etablissement(models.Model):
+    """Etablissement "basique" (hopital, garage, ...) enregistre directement
+    par le staff via le back-office -- separe de Lieu (jamais soumis/modere
+    par un utilisateur) car appele a porter des avis multi-utilisateurs et un
+    controle de visibilite independant de tout statut de moderation."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    nom = models.CharField(max_length=255)
+    type = models.CharField(max_length=20, choices=TypeEtablissement.choices)
+    adresse = models.CharField(max_length=500, blank=True)
+    ville = models.CharField(max_length=255, blank=True)
+    position = gis_models.PointField(srid=4326, geography=True)
+
+    visible_sur_carte = models.BooleanField(default=True)
+
+    cree_le = models.DateTimeField(auto_now_add=True)
+    cree_par = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name='etablissements_crees'
+    )
+
+    class Meta:
+        db_table = 'etablissement'
+        indexes = [gis_models.Index(fields=['position'])]
+
+    def __str__(self):
+        return self.nom
 
 
 class Ville(models.Model):

@@ -22,4 +22,14 @@ urlpatterns = [
     path('staff/places/<uuid:id>/approve/', views.LieuApprouverView.as_view(), name='staff-lieu-approuver'),
     path('staff/places/<uuid:id>/reject/', views.LieuRejeterView.as_view(), name='staff-lieu-rejeter'),
     path('staff/places/<uuid:id>/', views.LieuSupprimerView.as_view(), name='staff-lieu-supprimer'),
+    path(
+        'staff/establishments/',
+        views.EtablissementListCreateView.as_view(),
+        name='staff-etablissements',
+    ),
+    path(
+        'staff/establishments/<uuid:id>/',
+        views.EtablissementDetailView.as_view(),
+        name='staff-etablissement-detail',
+    ),
 ]

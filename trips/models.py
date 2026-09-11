@@ -229,3 +229,32 @@ class EchantillonVitesse(models.Model):
     # 25 km/h est rapide en centre-ville et lent sur une penetrante. Le niveau
     # se calcule en comparant une arete a son propre historique au meme jour/
     # heure (cf. services/service_trafic.py:niveau_relatif), jamais dans l'absolu.
+
+
+class ZoneVitesse(models.Model):
+    """Zone de limitation de vitesse definie par le staff (back-office) entre
+    deux points : point_depart/point_arrivee sont la saisie brute, geometrie
+    est le trace routier reel calcule via ServiceItineraire au moment de la
+    creation (pas une ligne droite -- cf. la meme logique que le snapping des
+    Incident sur le graphe routier)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    nom = models.CharField(max_length=255, blank=True)
+    point_depart = gis_models.PointField(srid=4326, geography=True)
+    point_arrivee = gis_models.PointField(srid=4326, geography=True)
+    geometrie = gis_models.LineStringField(srid=4326, geography=True, null=True, blank=True)
+    vitesse_max_kmh = models.PositiveSmallIntegerField()
+
+    actif = models.BooleanField(default=True)
+
+    cree_le = models.DateTimeField(auto_now_add=True)
+    cree_par = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name='zones_vitesse_creees'
+    )
+
+    class Meta:
+        db_table = 'zone_vitesse'
+
+    def __str__(self):
+        return self.nom or f"Zone {self.vitesse_max_kmh} km/h"
