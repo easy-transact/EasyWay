@@ -182,6 +182,20 @@ services:
       NOMINATIM_URL: http://nominatim:8080
       PHOTON_URL: http://photon:2322
 
+  # Static SPA (React/Vite), built and served by nginx inside the image --
+  # cf. back-office/Dockerfile. Not publicly reachable directly: bind it to
+  # 127.0.0.1 and front it with its own cPanel subdomain (ea-nginx/Apache),
+  # the same way `web` is fronted for the API domain.
+  back_office:
+    build:
+      context: ./back-office
+      args:
+        VITE_API_URL: ${BACK_OFFICE_API_URL}
+    container_name: back_office
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:80"
+
   celery_beat:
     build: .
     container_name: celery_beat
