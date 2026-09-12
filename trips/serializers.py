@@ -2,9 +2,10 @@ from django.contrib.gis.geos import LineString, Point
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
+from community.services import incidents_actifs_par_topologie
 from places.models import Lieu
 
-from .models import Itineraire, Manoeuvre, StatutTrajet, Trajet, ZoneVitesse
+from .models import EtapeTrajet, Itineraire, Manoeuvre, StatutTrajet, Trajet, ZoneVitesse
 from .polyline import decoder_polyline6
 
 # Champs declares avec `source=` : la reponse API parle anglais, les modeles/
@@ -37,6 +38,10 @@ class CalculItineraireSerializer(serializers.Serializer):
         many=True, required=False, default=list, source='eviter',
         help_text="Points a exclure du graphe de routage (ex. position d'un incident).",
     )
+    waypoints = PointEvitementSerializer(
+        many=True, required=False, default=list, source='etapes',
+        help_text="Arrets intermediaires, dans l'ordre de passage entre origine et destination.",
+    )
     alternatives = serializers.BooleanField(
         required=False, default=True,
         help_text=(
@@ -55,6 +60,10 @@ class ManoeuvreCandidatSerializer(serializers.Serializer):
     duration = serializers.IntegerField(source='duree')
     street_name = serializers.CharField(allow_blank=True, source='nom_voie')
     road_class = serializers.CharField(allow_blank=True, required=False)
+    stop_index = serializers.IntegerField(
+        allow_null=True, required=False, source='arrivee_etape_index',
+        help_text="Index (0-based) de l'etape atteinte si ce maneuver cloture un troncon intermediaire, sinon null.",
+    )
 
 
 class ItineraireCandidatSerializer(serializers.Serializer):
@@ -79,10 +88,14 @@ class ManoeuvreSerializer(serializers.ModelSerializer):
     voice_instruction = serializers.CharField(source='instruction_vocale', read_only=True)
     duration = serializers.IntegerField(source='duree', read_only=True)
     street_name = serializers.CharField(source='nom_voie', read_only=True)
+    stop_index = serializers.IntegerField(source='arrivee_etape_index', read_only=True, allow_null=True)
 
     class Meta:
         model = Manoeuvre
-        fields = ['order', 'type', 'instruction', 'voice_instruction', 'distance', 'duration', 'street_name', 'road_class']
+        fields = [
+            'order', 'type', 'instruction', 'voice_instruction', 'distance', 'duration',
+            'street_name', 'road_class', 'stop_index',
+        ]
         read_only_fields = fields
 
 
@@ -105,6 +118,24 @@ class ItineraireSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class EtapeTrajetSerializer(serializers.ModelSerializer):
+    lat = serializers.SerializerMethodField()
+    lon = serializers.SerializerMethodField()
+
+    class Meta:
+        model = EtapeTrajet
+        fields = ['id', 'lat', 'lon']
+        read_only_fields = fields
+
+    @extend_schema_field(serializers.FloatField())
+    def get_lat(self, etape):
+        return etape.position.y
+
+    @extend_schema_field(serializers.FloatField())
+    def get_lon(self, etape):
+        return etape.position.x
+
+
 class TrajetSerializer(serializers.ModelSerializer):
     origin_label = serializers.CharField(source='libelle_origine', read_only=True)
     origin_lat = serializers.SerializerMethodField()
@@ -125,6 +156,7 @@ class TrajetSerializer(serializers.ModelSerializer):
     started_at = serializers.DateTimeField(source='demarre_le', read_only=True)
     ended_at = serializers.DateTimeField(source='termine_le', read_only=True)
     routes = ItineraireSerializer(many=True, read_only=True, source='itineraires')
+    stops = EtapeTrajetSerializer(many=True, read_only=True, source='etapes')
 
     class Meta:
         model = Trajet
@@ -134,7 +166,7 @@ class TrajetSerializer(serializers.ModelSerializer):
             'destination_place', 'chosen_route_id',
             'planned_distance', 'planned_duration', 'actual_distance', 'actual_duration',
             'status', 'incidents_avoided', 'rating', 'comment',
-            'started_at', 'ended_at', 'routes',
+            'started_at', 'ended_at', 'routes', 'stops',
         ]
         read_only_fields = fields
 
@@ -165,11 +197,16 @@ class TrajetCreationSerializer(serializers.Serializer):
     destination_place = serializers.PrimaryKeyRelatedField(
         source='lieu_destination', queryset=Lieu.objects.all(), required=False, allow_null=True
     )
+    waypoints = PointEvitementSerializer(
+        many=True, required=False, default=list, source='etapes',
+        help_text="Arrets intermediaires du trajet, dans l'ordre de passage.",
+    )
     route = ItineraireCandidatSerializer(source='itineraire')
 
     def create(self, validated_data):
         itineraire_data = validated_data.pop('itineraire')
         manoeuvres_data = itineraire_data.pop('manoeuvres')
+        etapes_data = validated_data.pop('etapes', [])
 
         origine = Point(validated_data.pop('origine_lon'), validated_data.pop('origine_lat'), srid=4326)
         destination = Point(
@@ -205,6 +242,10 @@ class TrajetCreationSerializer(serializers.Serializer):
         )
         Manoeuvre.objects.bulk_create([
             Manoeuvre(itineraire=itineraire, ordre=i, **m) for i, m in enumerate(manoeuvres_data)
+        ])
+        EtapeTrajet.objects.bulk_create([
+            EtapeTrajet(trajet=trajet, ordre=i, position=Point(e['lon'], e['lat'], srid=4326))
+            for i, e in enumerate(etapes_data)
         ])
         return trajet
 
@@ -348,3 +389,37 @@ class ZoneVitesseSerializer(serializers.ModelSerializer):
         if not zone.geometrie:
             return None
         return [[lat, lon] for lon, lat in zone.geometrie.coords]
+
+
+class TrajetModerationSerializer(serializers.ModelSerializer):
+    """GET /api/staff/trips/... : forme allegee pour la table de moderation
+    (pas de routes/manoeuvres imbriquees, contrairement a TrajetSerializer,
+    inutile pour une vue en liste) -- ajoute le voyageur (jamais expose sur
+    TrajetSerializer, qui ne sert que les trajets de l'appelant lui-meme) et
+    le nombre de signalements reellement sur le trajet."""
+
+    traveler_name = serializers.CharField(source='utilisateur.nom_complet', read_only=True)
+    origin_label = serializers.CharField(source='libelle_origine', read_only=True)
+    destination_label = serializers.CharField(source='libelle_destination', read_only=True)
+    status = serializers.CharField(source='statut', read_only=True)
+    started_at = serializers.DateTimeField(source='demarre_le', read_only=True)
+    ended_at = serializers.DateTimeField(source='termine_le', read_only=True)
+    incidents_on_route = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Trajet
+        fields = [
+            'id', 'traveler_name', 'origin_label', 'destination_label',
+            'status', 'started_at', 'ended_at', 'incidents_on_route',
+        ]
+        read_only_fields = fields
+
+    @extend_schema_field(serializers.IntegerField(allow_null=True))
+    def get_incidents_on_route(self, trajet):
+        # None (pas 0) si la geometrie est absente -- trajet jamais demarre,
+        # ou purgee par purger_geometrie() (retention) : "inconnu", pas "zero".
+        if not trajet.geometrie:
+            return None
+        points = list(trajet.geometrie.coords)  # deja (lon, lat), forme attendue
+        incidents = incidents_actifs_par_topologie(points)
+        return len(incidents) if incidents is not None else None

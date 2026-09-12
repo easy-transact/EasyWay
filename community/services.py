@@ -11,11 +11,13 @@ from django.contrib.gis.db.models.functions import Distance
 from django.contrib.gis.geos import Point
 from django.contrib.gis.measure import D
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from places.services.client_nominatim import ClientNominatim
 from places.utils import normaliser
 from trips.services import client_locate
+from trips.services.client_trace_attributes import ErreurTraceAttributes, attributs_trace
 from trips.services.disjoncteur import DisjoncteurOuvert
 
 from .cache_incidents import invalider_cache_cellule
@@ -27,6 +29,32 @@ from .models import (
     StatutIncident,
     Vote,
 )
+
+
+def incidents_actifs_par_topologie(points: list[tuple[float, float]]) -> list[Incident] | None:
+    """None si Valhalla/trace_attributes est indisponible ou ne matche aucune
+    arete sur cette geometrie -- l'appelant retombe alors sur un autre mode de
+    recherche (cf. IncidentsSurTrajetView._incidents_par_couloir). Une liste
+    (potentiellement vide) sinon : vide signifie "aucun incident sur ce
+    trajet", pas un echec. Extrait de IncidentsSurTrajetView pour etre
+    reutilisable (cf. trips.serializers.TrajetModerationSerializer, qui
+    l'appelle sur la geometrie stockee d'un Trajet plutot que sur une
+    geometrie fournie par le client)."""
+    try:
+        aretes = attributs_trace(points)
+    except (ErreurTraceAttributes, DisjoncteurOuvert):
+        return None
+    if aretes is None:
+        return None
+
+    paires = {(arete['way_id'], arete['forward']) for arete in aretes}
+    q = Q(pk__in=[])
+    for way_id, forward in paires:
+        q |= Q(way_id_osm=way_id, forward_osm=forward)
+
+    return list(Incident.objects.filter(
+        q, statut__in=[StatutIncident.ACTIF, StatutIncident.EN_ATTENTE], expire_le__gt=timezone.now(),
+    ))
 
 QUOTA_SIGNALEMENTS_PAR_HEURE = 10
 RAYON_DOUBLON_M = 150

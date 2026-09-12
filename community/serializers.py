@@ -60,10 +60,12 @@ class IncidentModerationSerializer(IncidentSerializer):
     publique (jamais expose a un utilisateur autre que l'auteur/le staff)."""
 
     author_phone = serializers.SerializerMethodField()
+    author_name = serializers.CharField(source='auteur.nom_complet', read_only=True)
+    member_since = serializers.DateTimeField(source='auteur.date_joined', read_only=True)
     reason = serializers.CharField(source='motif_retrait', read_only=True, allow_null=True)
 
     class Meta(IncidentSerializer.Meta):
-        fields = IncidentSerializer.Meta.fields + ['author_phone', 'reason']
+        fields = IncidentSerializer.Meta.fields + ['author_phone', 'author_name', 'member_since', 'reason']
         read_only_fields = fields
 
     @extend_schema_field(serializers.CharField())

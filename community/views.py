@@ -6,7 +6,6 @@ from django.contrib.gis.geos import LineString, Point
 from django.contrib.gis.measure import D
 from django.core.cache import cache
 from django.db import transaction
-from django.db.models import Q
 from django.utils import timezone
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema, extend_schema_view
@@ -19,8 +18,6 @@ from rest_framework.views import APIView
 from accounts.pagination import StaffPagination
 from accounts.serializers import MessageSerializer
 from places.utils import normaliser
-from trips.services.client_trace_attributes import ErreurTraceAttributes, attributs_trace
-from trips.services.disjoncteur import DisjoncteurOuvert
 
 from .cache_incidents import (
     DUREE_CACHE_CELLULE_S,
@@ -38,7 +35,7 @@ from .serializers import (
     IncidentSerializer,
     VoteIncidentSerializer,
 )
-from .services import PositionHorsRoute, QuotaDepasse, ServiceIncident
+from .services import PositionHorsRoute, QuotaDepasse, ServiceIncident, incidents_actifs_par_topologie
 
 DUREE_IDEMPOTENCE_S = 24 * 3600
 
@@ -257,11 +254,11 @@ ECART_CAP_MAX_DEGRES = 45
 )
 class IncidentsSurTrajetView(APIView):
     """POST /api/incidents/along-route/ : matche par topologie (meme way_id
-    OSM + meme sens que le trajet, cf. _incidents_par_topologie) plutot que
-    par distance des que Valhalla/trace_attributes repondent -- un couloir de
-    distance ne separe jamais une contre-allee parallele de la route qu'elle
-    longe. Repli sur le couloir historique (+ cap, cf. _incidents_par_couloir)
-    si Valhalla est indisponible."""
+    OSM + meme sens que le trajet, cf. services.incidents_actifs_par_topologie)
+    plutot que par distance des que Valhalla/trace_attributes repondent -- un
+    couloir de distance ne separe jamais une contre-allee parallele de la
+    route qu'elle longe. Repli sur le couloir historique (+ cap, cf.
+    _incidents_par_couloir) si Valhalla est indisponible."""
 
     permission_classes = [AllowAny]
 
@@ -271,7 +268,7 @@ class IncidentsSurTrajetView(APIView):
         points = serializer.validated_data['geometry']
         buffer_m = serializer.validated_data['buffer_m']
 
-        incidents = self._incidents_par_topologie(points)
+        incidents = incidents_actifs_par_topologie(points)
         if incidents is None:
             incidents = self._incidents_par_couloir(points, buffer_m)
 
@@ -282,31 +279,6 @@ class IncidentsSurTrajetView(APIView):
         donnees = IncidentSerializer(incidents, many=True).data
         donnees.sort(key=lambda i: (-i['severity'], -float(i['confidence_score'])))
         return Response(donnees[:MAX_RESULTATS])
-
-    def _incidents_par_topologie(self, points):
-        """None si Valhalla est indisponible ou ne matche aucune arete sur
-        cette geometrie -- l'appelant retombe alors sur _incidents_par_couloir().
-        Une liste (potentiellement vide) sinon : vide signifie "aucun incident
-        sur ce trajet", pas un echec, ne doit jamais declencher le repli. Les
-        incidents sans way_id_osm (crees avant cette colonne, ou signales sans
-        verification routiere disponible) n'apparaissent jamais ici par
-        construction -- ils restent visibles via /nearby/ et /city/, juste
-        pas via ce matching precis (transitoire, cf. Incident.way_id_osm)."""
-        try:
-            aretes = attributs_trace(points)
-        except (ErreurTraceAttributes, DisjoncteurOuvert):
-            return None
-        if aretes is None:
-            return None
-
-        paires = {(arete['way_id'], arete['forward']) for arete in aretes}
-        q = Q(pk__in=[])
-        for way_id, forward in paires:
-            q |= Q(way_id_osm=way_id, forward_osm=forward)
-
-        return list(Incident.objects.filter(
-            q, statut__in=[StatutIncident.ACTIF, StatutIncident.EN_ATTENTE], expire_le__gt=timezone.now(),
-        ))
 
     def _incidents_par_couloir(self, points, buffer_m):
         """Repli historique (couloir de distance + cap, cf. discussion) --

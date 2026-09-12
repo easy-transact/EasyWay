@@ -181,6 +181,10 @@ class Manoeuvre(models.Model):
     road_class = models.CharField(
         max_length=20, choices=RoadClass.choices, default=RoadClass.URBAIN
     )
+    # Index (0-based) de l'etape (EtapeTrajet) atteinte si cette manoeuvre
+    # cloture un troncon intermediaire (trajet avec waypoints) ; null sinon,
+    # y compris pour l'arrivee finale. cf. ServiceItineraire._normaliser_trip.
+    arrivee_etape_index = models.PositiveIntegerField(null=True, blank=True)
 
     class Meta:
         db_table = 'manoeuvre'
@@ -191,6 +195,30 @@ class Manoeuvre(models.Model):
 
     def __str__(self):
         return f"{self.ordre}. {self.instruction}"
+
+
+class EtapeTrajet(models.Model):
+    """Arret intermediaire d'un Trajet (waypoint) -- meme role que Manoeuvre
+    vis-a-vis d'Itineraire : objet-valeur persiste uniquement via son
+    parent. Position brute seulement (lat/lon), pas de libelle : les
+    waypoints sont saisis comme coordonnees cote client, contrairement a
+    origine/destination qui portent un libelle affichable."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    trajet = models.ForeignKey(Trajet, on_delete=models.CASCADE, related_name='etapes')
+
+    ordre = models.PositiveIntegerField(help_text='position dans la sequence origine -> etapes -> destination')
+    position = gis_models.PointField(srid=4326, geography=True)
+
+    class Meta:
+        db_table = 'etape_trajet'
+        ordering = ['trajet', 'ordre']
+        constraints = [
+            models.UniqueConstraint(fields=['trajet', 'ordre'], name='uniq_etape_ordre_par_trajet'),
+        ]
+
+    def __str__(self):
+        return f"Etape {self.ordre} de {self.trajet_id}"
 
 
 FUSEAU_TRAFIC = ZoneInfo('Africa/Douala')  # toutes les VILLES_DISPONIBLES sont dans ce fuseau unique, sans heure d'ete --

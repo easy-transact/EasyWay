@@ -2,6 +2,7 @@ from datetime import timedelta
 
 from django.contrib.gis.geos import LineString, Point
 from django.utils import timezone
+from django.utils.dateparse import parse_date
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view, inline_serializer
 from rest_framework import serializers as drf_serializers
@@ -25,6 +26,7 @@ from .serializers import (
     TelemetriePositionsSerializer,
     TrajetCreationSerializer,
     TrajetMiseAJourSerializer,
+    TrajetModerationSerializer,
     TrajetSerializer,
     ZoneVitesseCreationSerializer,
     ZoneVitesseModificationSerializer,
@@ -72,6 +74,7 @@ class CalculItineraireView(APIView):
             eviter=[(p['lat'], p['lon']) for p in donnees['eviter']],
             cap_origine=donnees['cap_origine'],
             alternatives=donnees['alternatives'],
+            etapes=[(p['lat'], p['lon']) for p in donnees['etapes']],
         )
         return Response(ItineraireCandidatSerializer(candidats, many=True).data)
 
@@ -355,3 +358,34 @@ class ZoneVitesseDetailView(APIView):
         zone = get_object_or_404(ZoneVitesse, id=id)
         zone.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+@extend_schema(
+    tags=['Staff Trips'],
+    summary='Lister les voyages du jour',
+    description=(
+        'Reserve au staff (is_staff). Voyages demarres a la date donnee '
+        "(defaut aujourd'hui) -- Trajet n'a pas de date de creation separee, "
+        "demarre_le est la seule reference temporelle utilisable pour "
+        '"les voyages de la journee". incidents_on_route est calcule cote '
+        'serveur par topologie (meme mecanisme que /api/incidents/along-route/), '
+        'pas le compteur incidents_evites auto-declare par le client.'
+    ),
+    parameters=[
+        OpenApiParameter('date', OpenApiTypes.DATE, description='Defaut aujourd\'hui (heure locale).'),
+        OpenApiParameter('page', OpenApiTypes.INT),
+        OpenApiParameter('page_size', OpenApiTypes.INT),
+    ],
+    responses={200: TrajetModerationSerializer(many=True)},
+)
+class TrajetModerationListView(APIView):
+    permission_classes = [IsAdminUser]
+    pagination_class = StaffPagination
+
+    def get(self, request):
+        date_cible = parse_date(request.query_params.get('date') or '') or timezone.localdate()
+        trajets = Trajet.objects.filter(demarre_le__date=date_cible).order_by('-demarre_le')
+
+        paginateur = self.pagination_class()
+        page = paginateur.paginate_queryset(trajets, request)
+        return paginateur.get_paginated_response(TrajetModerationSerializer(page, many=True).data)

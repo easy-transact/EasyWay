@@ -35,32 +35,38 @@ class ServiceItineraire:
     def __init__(self, client=None):
         self.client = client or ClientValhalla()
 
-    def calculer(self, depart, arrivee, utilisateur, eviter=None, cap_origine=None, alternatives=True) -> list[dict]:
-        """depart/arrivee : (lat, lon). eviter : liste de (lat, lon) a exclure
-        du graphe de routage (ex. position d'un incident) -- transmis a
-        Valhalla via exclude_locations, jamais un simple reclassement des
-        candidats : Valhalla replanifie reellement autour du point.
-        cap_origine (0-359, optionnel) : cap du vehicule au depart, transmis
-        comme heading Valhalla sur la premiere location -- sans ca, un
-        recalcul en cours de route peut choisir l'arete la plus proche dans
-        le mauvais sens (voie a sens unique/chaussee separee) et demarrer par
-        un demi-tour immediat. alternatives=False : un seul itineraire
-        (le recommande), reellement propage jusqu'a ClientValhalla -- pas
-        juste tronque apres coup, pour eviter le cout des appels de variantes
-        quand l'appelant n'en a pas besoin. Retourne une liste d'itineraires
-        candidats normalises (voir _normaliser_trip), le premier etant
-        recommande."""
+    def calculer(
+        self, depart, arrivee, utilisateur, eviter=None, cap_origine=None, alternatives=True, etapes=None
+    ) -> list[dict]:
+        """depart/arrivee : (lat, lon). etapes (optionnel) : arrets
+        intermediaires dans l'ordre de passage -- chaque paire consecutive
+        devient un leg Valhalla distinct (cf. ClientValhalla._appeler), et
+        chaque manoeuvre de fin de troncon intermediaire porte
+        arrivee_etape_index dans le resultat normalise (voir _normaliser_trip).
+        eviter : liste de (lat, lon) a exclure du graphe de routage (ex.
+        position d'un incident) -- transmis a Valhalla via exclude_locations,
+        jamais un simple reclassement des candidats : Valhalla replanifie
+        reellement autour du point. cap_origine (0-359, optionnel) : cap du
+        vehicule au depart, transmis comme heading Valhalla sur la premiere
+        location -- sans ca, un recalcul en cours de route peut choisir
+        l'arete la plus proche dans le mauvais sens (voie a sens unique/
+        chaussee separee) et demarrer par un demi-tour immediat.
+        alternatives=False : un seul itineraire (le recommande), reellement
+        propage jusqu'a ClientValhalla -- pas juste tronque apres coup, pour
+        eviter le cout des appels de variantes quand l'appelant n'en a pas
+        besoin. Retourne une liste d'itineraires candidats normalises (voir
+        _normaliser_trip), le premier etant recommande."""
         options = self._options_depuis_parametres(utilisateur)
         if eviter:
             # cf. https://valhalla.github.io/valhalla/api/turn-by-turn/api-reference/#exclude-locations
             # -- cle top-level du payload /route, pas une costing_option.
             options['exclude_locations'] = [{'lat': lat, 'lon': lon} for lat, lon in eviter]
-        cle = self._cle_cache(depart, arrivee, options, cap_origine, alternatives)
+        cle = self._cle_cache(depart, arrivee, options, cap_origine, alternatives, etapes)
 
         trips = cache.get(cle)
         if trips is None:
             trips = self.client.calculer_itineraires(
-                depart, arrivee, options, cap_origine=cap_origine, alternatives=alternatives
+                depart, arrivee, options, cap_origine=cap_origine, alternatives=alternatives, etapes=etapes
             )
             cache.set(cle, trips, timeout=DUREE_CACHE_S)
 
@@ -84,11 +90,12 @@ class ServiceItineraire:
 
         return {'costing': costing, 'costing_options': {costing: costing_options}}
 
-    def _cle_cache(self, depart, arrivee, options, cap_origine, alternatives) -> str:
+    def _cle_cache(self, depart, arrivee, options, cap_origine, alternatives, etapes=None) -> str:
         brut = json.dumps(
             {
                 'depart': depart, 'arrivee': arrivee, 'options': options,
                 'cap_origine': cap_origine, 'alternatives': alternatives,
+                'etapes': etapes or [],
             },
             sort_keys=True,
         )
@@ -122,9 +129,17 @@ class ServiceItineraire:
         return RoadClass.URBAIN
 
     def _normaliser_trip(self, trip: dict, index: int) -> dict:
-        manoeuvres = [
-            m for leg in trip['legs'] for m in leg['maneuvers']
-        ]
+        legs = trip['legs']
+        manoeuvres = []
+        for indice_leg, leg in enumerate(legs):
+            leg_manoeuvres = leg['maneuvers']
+            for indice_m, m in enumerate(leg_manoeuvres):
+                # dernier maneuver d'un troncon non final == arrivee a une etape
+                # intermediaire -- marqueur demande pour "arrivee a l'arret N".
+                arrivee_etape = (
+                    indice_leg if indice_leg < len(legs) - 1 and indice_m == len(leg_manoeuvres) - 1 else None
+                )
+                manoeuvres.append((m, arrivee_etape))
         geometrie = ''.join(leg['shape'] for leg in trip['legs'])
 
         if trip.get('degrade'):
@@ -155,8 +170,9 @@ class ServiceItineraire:
                     'duree': round(m.get('time', 0)),
                     'nom_voie': ', '.join(m.get('street_names', [])),
                     'road_class': self._traduire_road_class(m),
+                    'arrivee_etape_index': arrivee_etape,
                 }
-                for m in manoeuvres
+                for m, arrivee_etape in manoeuvres
             ],
             'degrade': trip.get('degrade', False),
         }
