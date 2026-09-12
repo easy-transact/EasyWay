@@ -33,13 +33,17 @@ class DisjoncteurOuvert(Exception):
     l'attrapent, l'appelant ne la voit jamais."""
 
 
-def _normaliser(objet: dict) -> dict:
-    adresse = objet.get('address', {})
+def _extraire_ville(adresse: dict) -> str:
     ville = (
         adresse.get('municipality') or adresse.get('city')
         or adresse.get('town') or adresse.get('village') or ''
     )
-    ville = PREFIXE_COMMUNAUTE_URBAINE.sub('', ville).strip()
+    return PREFIXE_COMMUNAUTE_URBAINE.sub('', ville).strip()
+
+
+def _normaliser(objet: dict) -> dict:
+    adresse = objet.get('address', {})
+    ville = _extraire_ville(adresse)
     libelle = objet.get('name') or objet.get('display_name', '').split(',')[0]
     sous_libelle = ', '.join(filter(None, [
         adresse.get('suburb') or adresse.get('quarter'),
@@ -92,6 +96,28 @@ class ClientNominatim(ClientRecherche, ClientInverse):
         if not resultat or 'error' in resultat:
             return None
         return _normaliser(resultat)
+
+    def inverser_ville_quartier(self, lat, lon):
+        """Retourne {'ville': str, 'quartier': str|None} depuis Nominatim, ou
+        None si indisponible/sans resultat -- dedie au backfill des Lieu
+        importes sans addr:city/addr:suburb (cf. management command
+        backfill_ville_quartier), distinct de inverser() qui fusionne ces
+        deux champs dans sublabel pour /api/places/reverse/."""
+        try:
+            self._verifier_disjoncteur()
+            resultat = self._appeler_avec_retry(
+                '/reverse', {'lat': lat, 'lon': lon, 'format': 'jsonv2', 'addressdetails': 1}
+            )
+        except (DisjoncteurOuvert, ErreurGeocodage):
+            return None
+        self._reinitialiser_echecs()
+        if not resultat or 'error' in resultat:
+            return None
+        adresse = resultat.get('address', {})
+        return {
+            'ville': _extraire_ville(adresse),
+            'quartier': adresse.get('suburb') or adresse.get('quarter') or None,
+        }
 
     def replier_recherche(self, q):
         return []
