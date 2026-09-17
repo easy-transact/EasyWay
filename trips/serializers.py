@@ -391,6 +391,17 @@ class ZoneVitesseSerializer(serializers.ModelSerializer):
         return [[lat, lon] for lon, lat in zone.geometrie.coords]
 
 
+class LimiteVitesseSerializer(serializers.Serializer):
+    """GET /api/speed-limit/ : jamais persistee -- cf. LimiteVitesseView.
+    source='zone' quand une ZoneVitesse couvre la position, 'default' sinon
+    (repli sur LIMITE_VITESSE_DEFAUT_KMH)."""
+
+    speed_limit_kmh = serializers.IntegerField()
+    zone_id = serializers.UUIDField(allow_null=True)
+    zone_name = serializers.CharField(allow_null=True, allow_blank=True)
+    source = serializers.ChoiceField(choices=['zone', 'default'])
+
+
 class TrajetModerationSerializer(serializers.ModelSerializer):
     """GET /api/staff/trips/... : forme allegee pour la table de moderation
     (pas de routes/manoeuvres imbriquees, contrairement a TrajetSerializer,

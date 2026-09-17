@@ -1,6 +1,7 @@
 from datetime import timedelta
 
 from django.contrib.gis.geos import LineString, Point
+from django.contrib.gis.measure import D
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from drf_spectacular.types import OpenApiTypes
@@ -22,6 +23,7 @@ from .polyline import decoder_polyline6
 from .serializers import (
     CalculItineraireSerializer,
     ItineraireCandidatSerializer,
+    LimiteVitesseSerializer,
     NoterTrajetSerializer,
     TelemetriePositionsSerializer,
     TrajetCreationSerializer,
@@ -244,6 +246,72 @@ class TelemetriePositionsView(APIView):
             # regroupement cote consommateur (cf. cahier des charges, confidentialite)
 
         return Response(status=status.HTTP_202_ACCEPTED)
+
+
+# Couloir etroit (30m) autour de ZoneVitesse.geometrie : cette geometrie est
+# deja calee sur le graphe routier reel via ServiceItineraire au moment de la
+# creation (cf. ZoneVitesseListCreateView.post), meme raisonnement que le
+# BUFFER_M_DEFAUT du matching Incident (community/views.py) -- pas la peine
+# d'un couloir large pour une ligne deja precise.
+BUFFER_M_ZONE_VITESSE = 30
+# Limite de repli hors de toute ZoneVitesse definie par le staff -- valeur
+# communiquee par l'app mobile (limite urbaine usuelle au Cameroun), pas une
+# donnee officielle mesuree route par route.
+LIMITE_VITESSE_DEFAUT_KMH = 60
+
+
+@extend_schema(
+    tags=['Speed Zones'],
+    summary='Limite de vitesse applicable a une position',
+    description=(
+        "Cherche la ZoneVitesse active la plus proche (< 30m, meme couloir que le "
+        "matching des Incident sur le graphe routier) couvrant lat/lon ; si plusieurs "
+        "zones actives se chevauchent a cet endroit, la plus restrictive gagne. A "
+        f"defaut de zone, renvoie la limite de repli ({LIMITE_VITESSE_DEFAUT_KMH} km/h, "
+        "source='default'). La detection de depassement (position + vitesse instantanee) "
+        "reste cote client -- l'app a deja la vitesse GPS en temps reel, un aller-retour "
+        "reseau n'apporterait que de la latence sur une alerte qui doit etre immediate."
+    ),
+    parameters=[
+        OpenApiParameter('lat', OpenApiTypes.FLOAT, required=True),
+        OpenApiParameter('lon', OpenApiTypes.FLOAT, required=True),
+    ],
+    responses={200: LimiteVitesseSerializer, 400: MessageSerializer},
+)
+class LimiteVitesseView(APIView):
+    def get(self, request):
+        lat = request.query_params.get('lat')
+        lon = request.query_params.get('lon')
+        if lat is None or lon is None:
+            return Response({'detail': "'lat' and 'lon' are required."}, status=400)
+        try:
+            lat, lon = float(lat), float(lon)
+        except ValueError:
+            return Response({'detail': "'lat'/'lon' must be numbers."}, status=400)
+
+        position = Point(lon, lat, srid=4326)
+        zone = (
+            ZoneVitesse.objects.filter(
+                actif=True,
+                geometrie__isnull=False,
+                geometrie__distance_lte=(position, D(m=BUFFER_M_ZONE_VITESSE)),
+            )
+            .order_by('vitesse_max_kmh')  # la plus restrictive d'abord en cas de chevauchement
+            .first()
+        )
+        if zone is not None:
+            return Response(LimiteVitesseSerializer({
+                'speed_limit_kmh': zone.vitesse_max_kmh,
+                'zone_id': zone.id,
+                'zone_name': zone.nom,
+                'source': 'zone',
+            }).data)
+        return Response(LimiteVitesseSerializer({
+            'speed_limit_kmh': LIMITE_VITESSE_DEFAUT_KMH,
+            'zone_id': None,
+            'zone_name': None,
+            'source': 'default',
+        }).data)
 
 
 @extend_schema_view(

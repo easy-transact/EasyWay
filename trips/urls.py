@@ -10,6 +10,7 @@ urlpatterns = [
     path('trips/<uuid:id>/', views.TrajetDetailView.as_view(), name='trajet-detail'),
     path('trips/<uuid:id>/rate/', views.NoterTrajetView.as_view(), name='trajet-note'),
     path('telemetry/positions/', views.TelemetriePositionsView.as_view(), name='telemetrie-positions'),
+    path('speed-limit/', views.LimiteVitesseView.as_view(), name='limite-vitesse'),
 
     # Back-office (reserve au staff)
     path('staff/speed-zones/', views.ZoneVitesseListCreateView.as_view(), name='staff-zones-vitesse'),

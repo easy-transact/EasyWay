@@ -2,7 +2,7 @@ import math
 from collections import defaultdict
 
 import h3
-from django.contrib.gis.geos import LineString, Point
+from django.contrib.gis.geos import LineString, Point, Polygon
 from django.contrib.gis.measure import D
 from django.core.cache import cache
 from django.db import transaction
@@ -25,7 +25,15 @@ from .cache_incidents import (
     ecriture_recente,
     invalider_cache_cellule,
 )
-from .models import Incident, SensVote, StatutIncident, Vote
+from .models import (
+    DUREE_VIE_BASE_PAR_TYPE,
+    SOUS_TYPES_PAR_TYPE,
+    Incident,
+    SensVote,
+    StatutIncident,
+    TypeIncident,
+    Vote,
+)
 from .serializers import (
     IncidentAvecDoublonSerializer,
     IncidentCreationSerializer,
@@ -33,6 +41,7 @@ from .serializers import (
     IncidentRetraitSerializer,
     IncidentsSurTrajetSerializer,
     IncidentSerializer,
+    TypeIncidentSerializer,
     VoteIncidentSerializer,
 )
 from .services import PositionHorsRoute, QuotaDepasse, ServiceIncident, incidents_actifs_par_topologie
@@ -55,6 +64,13 @@ MAX_RESULTATS = 50
 RAYON_KM_DEFAUT = 10
 RAYON_KM_MAX = 20
 
+# Mode bbox : pense pour "les incidents dans le viewport de la carte" (un
+# rectangle, pas un cercle) -- meme raison d'etre que radius_km (pas de cache
+# par cellule, requete geographique directe), plafond en km de cote plutot
+# qu'en km² pour rester coherent avec RAYON_KM_MAX (diametre ~2x40km) sans
+# etre mesure sur donnees reelles non plus.
+BBOX_COTE_MAX_KM = 50
+
 
 def _distance_m(lat1, lon1, lat2, lon2):
     rayon_terre_m = 6_371_000
@@ -69,20 +85,21 @@ def _distance_m(lat1, lon1, lat2, lon2):
     tags=['Incidents'],
     summary='Lister les incidents actifs a proximite',
     description=(
-        "Deux modes, au choix : `cells` (cellules H3 resolution 8, mode habituel du "
+        "Trois modes, au choix : `cells` (cellules H3 resolution 8, mode habituel du "
         "client en conduite -- cache par cellule, invalide a l'ecriture plutot que "
-        "de compter sur le seul TTL, cf. cache_incidents.py) ou `lat`+`lon`+"
-        f"`radius_km` (requete geographique directe dans un rayon, sans passer par "
-        f"le cache par cellule -- pas adapte a un rayon de plusieurs km. Defaut "
-        f"{RAYON_KM_DEFAUT}km, maximum {RAYON_KM_MAX}km). Exactement un des deux "
-        "modes doit etre fourni."
+        "de compter sur le seul TTL, cf. cache_incidents.py), `lat`+`lon`+"
+        f"`radius_km` (rayon autour d'un point, sans passer par le cache par cellule "
+        f"-- pas adapte a un rayon de plusieurs km. Defaut {RAYON_KM_DEFAUT}km, "
+        f"maximum {RAYON_KM_MAX}km), ou `min_lat`+`min_lon`+`max_lat`+`max_lon` "
+        f"(rectangle -- pense pour le viewport d'une carte, maximum {BBOX_COTE_MAX_KM}km "
+        "de cote). Exactement un des trois modes doit etre fourni."
     ),
     parameters=[
         OpenApiParameter(
             'cells', OpenApiTypes.STR, required=False,
             description=(
                 f'Mode cellules H3 (resolution 8) en hexadecimal, separees par des virgules. '
-                f'Maximum {MAX_CELLULES}. Incompatible avec radius_km.'
+                f'Maximum {MAX_CELLULES}. Incompatible avec les deux autres modes.'
             ),
         ),
         OpenApiParameter(
@@ -102,6 +119,22 @@ def _distance_m(lat1, lon1, lat2, lon2):
         OpenApiParameter(
             'lon', OpenApiTypes.FLOAT, required=False,
             description="Meme role que lat selon le mode -- cf. description de lat.",
+        ),
+        OpenApiParameter(
+            'min_lat', OpenApiTypes.FLOAT, required=False,
+            description="Mode bbox : coin sud-ouest du rectangle (avec min_lon/max_lat/max_lon).",
+        ),
+        OpenApiParameter(
+            'min_lon', OpenApiTypes.FLOAT, required=False,
+            description="Mode bbox : cf. min_lat.",
+        ),
+        OpenApiParameter(
+            'max_lat', OpenApiTypes.FLOAT, required=False,
+            description="Mode bbox : coin nord-est du rectangle (avec min_lat/min_lon/max_lon).",
+        ),
+        OpenApiParameter(
+            'max_lon', OpenApiTypes.FLOAT, required=False,
+            description="Mode bbox : cf. max_lat.",
         ),
     ],
     responses={200: IncidentSerializer(many=True), 400: MessageSerializer},
@@ -130,6 +163,16 @@ class IncidentsProchesView(APIView):
     def get(self, request):
         cellules_hex = [c for c in request.query_params.get('cells', '').split(',') if c]
 
+        champs_bbox = ('min_lat', 'min_lon', 'max_lat', 'max_lon')
+        bbox_fournis = [request.query_params.get(c) for c in champs_bbox]
+        if any(v is not None for v in bbox_fournis):
+            if not all(v is not None for v in bbox_fournis):
+                return Response(
+                    {'detail': "bbox mode requires all of 'min_lat', 'min_lon', 'max_lat', 'max_lon'."},
+                    status=400,
+                )
+            return self._recherche_par_bbox(*bbox_fournis)
+
         lat = request.query_params.get('lat')
         lon = request.query_params.get('lon')
         if (lat is None) != (lon is None):
@@ -143,7 +186,12 @@ class IncidentsProchesView(APIView):
         if not cellules_hex:
             if lat is None:
                 return Response(
-                    {'detail': "Provide either 'cells' or 'lat'+'lon' (optionally with 'radius_km')."},
+                    {
+                        'detail': (
+                            "Provide either 'cells', 'lat'+'lon' (optionally with 'radius_km'), "
+                            "or 'min_lat'+'min_lon'+'max_lat'+'max_lon'."
+                        )
+                    },
                     status=400,
                 )
             return self._recherche_par_rayon(request, lat, lon)
@@ -170,7 +218,7 @@ class IncidentsProchesView(APIView):
 
         if manquantes:
             cellules_int = {c: h3.str_to_int(c) for c in manquantes}
-            incidents = Incident.objects.filter(
+            incidents = Incident.objects.select_related('auteur').filter(
                 cellule_h3_res8__in=cellules_int.values(),
                 statut__in=[StatutIncident.ACTIF, StatutIncident.EN_ATTENTE],
                 expire_le__gt=timezone.now(),
@@ -217,7 +265,7 @@ class IncidentsProchesView(APIView):
             )
 
         centre = Point(lon, lat, srid=4326)
-        incidents = Incident.objects.filter(
+        incidents = Incident.objects.select_related('auteur').filter(
             statut__in=[StatutIncident.ACTIF, StatutIncident.EN_ATTENTE],
             expire_le__gt=timezone.now(),
             position__distance_lte=(centre, D(km=radius_km)),
@@ -225,6 +273,48 @@ class IncidentsProchesView(APIView):
 
         donnees = IncidentSerializer(incidents, many=True).data
         donnees.sort(key=lambda i: _distance_m(lat, lon, i['lat'], i['lon']))
+        return Response(donnees[:MAX_RESULTATS])
+
+    def _recherche_par_bbox(self, min_lat, min_lon, max_lat, max_lon):
+        try:
+            min_lat, min_lon, max_lat, max_lon = (float(v) for v in (min_lat, min_lon, max_lat, max_lon))
+        except ValueError:
+            return Response(
+                {'detail': "'min_lat'/'min_lon'/'max_lat'/'max_lon' must be numbers."}, status=400
+            )
+        if min_lat >= max_lat or min_lon >= max_lon:
+            return Response(
+                {'detail': "'min_lat' must be less than 'max_lat', and 'min_lon' less than 'max_lon'."},
+                status=400,
+            )
+
+        largeur_km = _distance_m(min_lat, min_lon, min_lat, max_lon) / 1000
+        hauteur_km = _distance_m(min_lat, min_lon, max_lat, min_lon) / 1000
+        if largeur_km > BBOX_COTE_MAX_KM or hauteur_km > BBOX_COTE_MAX_KM:
+            return Response(
+                {
+                    'detail': (
+                        f"bbox too large (max {BBOX_COTE_MAX_KM}km per side). "
+                        "Narrow the request to the area actually visible to the user."
+                    )
+                },
+                status=400,
+            )
+
+        enveloppe = Polygon.from_bbox((min_lon, min_lat, max_lon, max_lat))
+        enveloppe.srid = 4326
+        # intersects (pas within) : reste sur la colonne geography telle
+        # quelle -- l'index spatial la supporte nativement, contrairement a
+        # within qui forcerait un cast ::geometry cote requete. Pour un point
+        # contre un polygone, les deux donnent le meme resultat de toute facon.
+        incidents = Incident.objects.select_related('auteur').filter(
+            statut__in=[StatutIncident.ACTIF, StatutIncident.EN_ATTENTE],
+            expire_le__gt=timezone.now(),
+            position__intersects=enveloppe,
+        )
+
+        donnees = IncidentSerializer(incidents, many=True).data
+        donnees.sort(key=lambda i: (-i['severity'], -float(i['confidence_score'])))
         return Response(donnees[:MAX_RESULTATS])
 
 
@@ -287,7 +377,7 @@ class IncidentsSurTrajetView(APIView):
         (meme cap) : limite structurelle de ce repli, pas un bug a corriger
         ici -- _incidents_par_topologie() est le vrai correctif."""
         ligne = LineString(points, srid=4326)
-        incidents = Incident.objects.filter(
+        incidents = Incident.objects.select_related('auteur').filter(
             statut__in=[StatutIncident.ACTIF, StatutIncident.EN_ATTENTE],
             expire_le__gt=timezone.now(),
             position__distance_lte=(ligne, D(m=buffer_m)),
@@ -368,7 +458,7 @@ class IncidentsParVilleView(APIView):
         if not nom_ville:
             return Response({'detail': "'name' is required."}, status=400)
 
-        incidents = Incident.objects.filter(
+        incidents = Incident.objects.select_related('auteur').filter(
             ville_normalisee__contains=normaliser(nom_ville),
             statut__in=[StatutIncident.ACTIF, StatutIncident.EN_ATTENTE],
             expire_le__gt=timezone.now(),
@@ -379,6 +469,37 @@ class IncidentsParVilleView(APIView):
         donnees = IncidentSerializer(incidents, many=True).data
         donnees.sort(key=lambda i: (-i['severity'], -float(i['confidence_score'])))
         return Response(donnees[:MAX_RESULTATS])
+
+
+@extend_schema(
+    tags=['Incidents'],
+    summary='Lister les types de signalement et leur duree de vie',
+    description=(
+        "Reference statique (types/sous-types valides pour POST /api/incidents/, "
+        "cf. IncidentCreationSerializer.validate) et duree de vie de base en minutes "
+        "avant expiration (avant prolongation eventuelle par confirmation, cf. "
+        "Incident.confirmer -- plafonnee au triple de cette valeur). Permet au client "
+        "de ne plus la recopier a la main."
+    ),
+    responses={200: TypeIncidentSerializer(many=True)},
+)
+class TypesIncidentView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        donnees = [
+            {
+                'type': type_incident,
+                'label': type_incident.label,
+                'subtypes': [
+                    {'value': sous_type, 'label': sous_type.label}
+                    for sous_type in SOUS_TYPES_PAR_TYPE.get(type_incident, [])
+                ],
+                'base_duration_minutes': DUREE_VIE_BASE_PAR_TYPE.get(type_incident, 60),
+            }
+            for type_incident in TypeIncident
+        ]
+        return Response(TypeIncidentSerializer(donnees, many=True).data)
 
 
 @extend_schema(
@@ -537,7 +658,7 @@ class VoterIncidentView(APIView):
 )
 class MesSignalementsView(APIView):
     def get(self, request):
-        incidents = request.user.incidents_signales.order_by('-cree_le')
+        incidents = request.user.incidents_signales.select_related('auteur').order_by('-cree_le')
         return Response(IncidentSerializer(incidents, many=True).data)
 
 

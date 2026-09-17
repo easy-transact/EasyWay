@@ -23,6 +23,11 @@ class IncidentSerializer(serializers.ModelSerializer):
     severity = serializers.IntegerField(source='severite', read_only=True)
     expires_at = serializers.DateTimeField(source='expire_le', read_only=True)
     created_at = serializers.DateTimeField(source='cree_le', read_only=True)
+    # Nom d'affichage choisi par l'auteur au signalement -- jamais son
+    # telephone (cf. author_phone, staff seulement). Masque (null) si
+    # l'auteur a active mode_invisible : ce toggle est deja le levier de
+    # consentement pour son identite, pas la peine d'un deuxieme mecanisme.
+    reporter_name = serializers.SerializerMethodField()
     # Identifiant OSM de la voie + sens de circulation (cf. Incident.way_id_osm/
     # forward_osm) : cale au signalement via Valhalla /locate, utilise cote
     # serveur pour le matching par topologie sur /along-route/ (plutot qu'un
@@ -38,6 +43,7 @@ class IncidentSerializer(serializers.ModelSerializer):
             'id', 'type', 'subtype', 'lat', 'lon', 'heading', 'street_name', 'city',
             'confirmations', 'disputes', 'confidence_score', 'estimated_impact',
             'status', 'severity', 'expires_at', 'created_at', 'way_id', 'forward',
+            'reporter_name',
         ]
         read_only_fields = fields
 
@@ -52,6 +58,12 @@ class IncidentSerializer(serializers.ModelSerializer):
     @extend_schema_field(serializers.IntegerField())
     def get_estimated_impact(self, incident):
         return incident.impact_estime()
+
+    @extend_schema_field(serializers.CharField(allow_null=True))
+    def get_reporter_name(self, incident):
+        if incident.auteur.mode_invisible:
+            return None
+        return incident.auteur.nom_complet
 
 
 class IncidentModerationSerializer(IncidentSerializer):
@@ -71,6 +83,21 @@ class IncidentModerationSerializer(IncidentSerializer):
     @extend_schema_field(serializers.CharField())
     def get_author_phone(self, incident):
         return incident.auteur.telephone
+
+
+class SousTypeIncidentSerializer(serializers.Serializer):
+    value = serializers.CharField()
+    label = serializers.CharField()
+
+
+class TypeIncidentSerializer(serializers.Serializer):
+    """GET /api/incidents/types/ : reference statique, jamais persistee --
+    cf. TypesIncidentView."""
+
+    type = serializers.CharField()
+    label = serializers.CharField()
+    subtypes = SousTypeIncidentSerializer(many=True)
+    base_duration_minutes = serializers.IntegerField()
 
 
 class IncidentRetraitSerializer(serializers.Serializer):

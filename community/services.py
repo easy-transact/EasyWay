@@ -52,7 +52,7 @@ def incidents_actifs_par_topologie(points: list[tuple[float, float]]) -> list[In
     for way_id, forward in paires:
         q |= Q(way_id_osm=way_id, forward_osm=forward)
 
-    return list(Incident.objects.filter(
+    return list(Incident.objects.select_related('auteur').filter(
         q, statut__in=[StatutIncident.ACTIF, StatutIncident.EN_ATTENTE], expire_le__gt=timezone.now(),
     ))
 

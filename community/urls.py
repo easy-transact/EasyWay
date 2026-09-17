@@ -5,6 +5,7 @@ from . import views
 app_name = 'community'
 
 urlpatterns = [
+    path('incidents/types/', views.TypesIncidentView.as_view(), name='incidents-types'),
     path('incidents/nearby/', views.IncidentsProchesView.as_view(), name='incidents-proches'),
     path('incidents/along-route/', views.IncidentsSurTrajetView.as_view(), name='incidents-sur-trajet'),
     path('incidents/city/', views.IncidentsParVilleView.as_view(), name='incidents-par-ville'),
