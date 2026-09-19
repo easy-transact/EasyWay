@@ -3,6 +3,7 @@ from zoneinfo import ZoneInfo
 
 from django.conf import settings
 from django.contrib.gis.db import models as gis_models
+from django.contrib.postgres.fields import ArrayField
 from django.db import models
 from django.utils import timezone
 
@@ -286,3 +287,68 @@ class ZoneVitesse(models.Model):
 
     def __str__(self):
         return self.nom or f"Zone {self.vitesse_max_kmh} km/h"
+
+
+class CorridorReference(models.Model):
+    """Trace de reference "de confiance" pour un corridor intercite bien
+    connu (ex. Douala <-> Bafoussam), importe depuis une source externe
+    verifiee (ex. export Google Maps) -- cf. ClientCorridorReference qui
+    l'utilise pour corriger la portion longue-distance d'un trajet reel dont
+    l'origine et la destination correspondent a ce corridor. La geometrie
+    Valhalla pour ce type de route s'est averee deja tres proche de la
+    source de confiance (cf. discussion, ~5.8m d'ecart moyen) -- le vrai
+    ecart est sur la duree, largement sous-estimee par Valhalla sur ce genre
+    de route (vitesse moyenne supposee trop optimiste).
+
+    Stocke dans un seul sens (ancrage_depart -> ancrage_arrivee) ; le sens
+    retour est gere a l'usage par projection sur la geometrie (cf.
+    ClientCorridorReference), pas par une deuxieme ligne."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    nom = models.CharField(max_length=255, unique=True)
+    ville_depart = models.CharField(max_length=255)
+    ville_arrivee = models.CharField(max_length=255)
+
+    ancrage_depart = gis_models.PointField(srid=4326, geography=True)
+    ancrage_arrivee = gis_models.PointField(srid=4326, geography=True)
+    # Rayon de matching autour de chaque ancrage (cf. services.corridors.trouver_corridor) :
+    # un trajet dont origine/destination tombent chacune a moins de ce rayon
+    # d'un ancrage (dans un sens ou l'autre) est considere comme suivant ce
+    # corridor. 25km couvre une agglomeration sans etre mesure sur donnees reelles.
+    rayon_ancrage_m = models.PositiveIntegerField(default=25000)
+
+    geometrie = gis_models.LineStringField(srid=4326, geography=True)
+    # Position normalisee (0-1) de chaque sommet de `geometrie` le long de la
+    # ligne, precalculee a l'import (cf. import_corridor_reference) -- evite
+    # de rappeler GEOSGeometry.project_normalized() par sommet a chaque
+    # requete pour trouver la sous-portion utilisee par un trajet partiel.
+    fractions_sommets = models.JSONField()
+    # Distance/duree de la source de confiance (ex. Google), pas la sortie de
+    # Valhalla -- c'est justement ce que ce modele corrige.
+    distance_m = models.PositiveIntegerField()
+    duree_s = models.PositiveIntegerField()
+    # Ex. ["N3", "N5"] -- utilise pour que _traduire_road_class (service_itineraire.py)
+    # classe correctement la portion corridor en NATIONALE plutot que URBAIN
+    # par defaut quand aucune manoeuvre Valhalla reelle n'est disponible.
+    libelles_voies = ArrayField(models.CharField(max_length=50), default=list, blank=True)
+    # Manoeuvres Valhalla brutes capturees a l'import entre ancrage_depart et
+    # ancrage_arrivee (cf. import_corridor_reference) -- turn-by-turn reel,
+    # distinct de distance_m/duree_s : sert au detail des instructions, pas
+    # au calcul de la duree globale (corrigee independamment).
+    manoeuvres_reference = models.JSONField(default=list, blank=True)
+
+    actif = models.BooleanField(default=True)
+    source = models.CharField(max_length=100, blank=True)
+
+    cree_le = models.DateTimeField(auto_now_add=True)
+    cree_par = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name='corridors_crees'
+    )
+
+    class Meta:
+        db_table = 'corridor_reference'
+        indexes = [gis_models.Index(fields=['geometrie'])]
+
+    def __str__(self):
+        return self.nom

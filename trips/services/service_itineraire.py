@@ -14,7 +14,9 @@ from accounts.models import TypeVehicule
 
 from ..models import NiveauTrafic, RoadClass
 from . import service_trafic
+from .client_corridor_reference import ClientCorridorReference
 from .client_valhalla import ClientValhalla
+from .corridors import trouver_corridor
 
 DUREE_CACHE_S = 180
 
@@ -65,7 +67,19 @@ class ServiceItineraire:
 
         trips = cache.get(cle)
         if trips is None:
-            trips = self.client.calculer_itineraires(
+            client = self.client
+            # Corridor de reference (cf. trips/models.py:CorridorReference) :
+            # geometrie/duree Valhalla verifiees proches pour ce genre de
+            # route en distance mais tres optimistes en duree -- utilise a la
+            # place du client normal quand depart/arrivee correspondent a un
+            # corridor connu. eviter/etapes non supportes avec un corridor en
+            # v1 (complexite de decoupage supplementaire, hors perimetre) --
+            # on retombe alors sur le client normal.
+            if not eviter and not etapes:
+                corridor = trouver_corridor(depart, arrivee)
+                if corridor is not None:
+                    client = ClientCorridorReference(corridor, client_valhalla=self.client)
+            trips = client.calculer_itineraires(
                 depart, arrivee, options, cap_origine=cap_origine, alternatives=alternatives, etapes=etapes
             )
             cache.set(cle, trips, timeout=DUREE_CACHE_S)

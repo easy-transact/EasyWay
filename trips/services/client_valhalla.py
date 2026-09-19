@@ -6,7 +6,6 @@ process, pour que son etat soit partage entre workers/process.
 """
 
 import copy
-import math
 
 import requests
 from django.conf import settings
@@ -14,17 +13,9 @@ from django.conf import settings
 from . import disjoncteur
 from .client_routage import ClientRoutage, ErreurRoutage
 from .disjoncteur import DisjoncteurOuvert
+from .geo import distance_haversine_m
 
 VITESSE_REPLI_KMH = 25  # vitesse urbaine moyenne prudente, pour l'estimation degradee
-
-
-def _distance_haversine_m(depart, arrivee):
-    lat1, lon1 = map(math.radians, depart)
-    lat2, lon2 = map(math.radians, arrivee)
-    d_lat = lat2 - lat1
-    d_lon = lon2 - lon1
-    a = math.sin(d_lat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(d_lon / 2) ** 2
-    return 2 * 6_371_000 * math.asin(math.sqrt(a))
 
 
 def _forme_complete(trip):
@@ -92,7 +83,7 @@ class ClientValhalla(ClientRoutage):
         legs = []
         distance_totale_m = 0
         for point_a, point_b in zip(points, points[1:]):
-            distance_m = _distance_haversine_m(point_a, point_b)
+            distance_m = distance_haversine_m(point_a, point_b)
             distance_totale_m += distance_m
             shape = encoder_polyline6([(point_a[1], point_a[0]), (point_b[1], point_b[0])])
             legs.append({'shape': shape, 'maneuvers': []})

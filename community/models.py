@@ -111,12 +111,12 @@ class SensVote(models.TextChoices):
 
 
 DUREE_VIE_BASE_PAR_TYPE = {
-    TypeIncident.DANGER: 60,
-    TypeIncident.POLICE: 60,
-    TypeIncident.EMBOUTEILLAGE: 30,
-    TypeIncident.ACCIDENT: 90,
+    TypeIncident.DANGER: 100,
+    TypeIncident.POLICE: 100,
+    TypeIncident.EMBOUTEILLAGE: 100,
+    TypeIncident.ACCIDENT: 100,
     TypeIncident.ROUTE_BARREE: 240,
-    TypeIncident.VOIE_BLOQUEE: 60,
+    TypeIncident.VOIE_BLOQUEE: 100,
     TypeIncident.MAUVAIS_TEMPS: 120,
     TypeIncident.RADAR: 480,
 }
