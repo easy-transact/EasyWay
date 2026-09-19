@@ -25,6 +25,13 @@ class StatutTrajet(models.TextChoices):
     ANNULE = 'ANNULE', 'Annule'
 
 
+# Utilisateur.points : compteur de gamification (cf. aussi
+# POINTS_PAR_SIGNALEMENT_VALIDE, community/models.py) -- affiche, sans effet
+# sur le fonctionnement du systeme (contrairement a score_reputation, qui
+# pese les votes).
+POINTS_PAR_TRAJET_TERMINE = 10
+
+
 class NiveauTrafic(models.TextChoices):
     NORMAL = 'NORMAL', 'Normal'
     MODERE = 'MODERE', 'Modere'
@@ -110,6 +117,10 @@ class Trajet(models.Model):
         elif nouveau_statut == StatutTrajet.TERMINE:
             self.termine_le = timezone.now()
             champs.append('termine_le')
+            # cf. POINTS_PAR_TRAJET_TERMINE : gamification, sans effet sur le
+            # fonctionnement du systeme (contrairement a score_reputation).
+            self.utilisateur.points += POINTS_PAR_TRAJET_TERMINE
+            self.utilisateur.save(update_fields=['points'])
         self.save(update_fields=champs)
 
     def demarrer(self):

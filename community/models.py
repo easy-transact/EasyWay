@@ -132,6 +132,12 @@ SEUIL_REPUTATION_PALIER_REDUCTION = Decimal('3')
 # Gain de reputation de l'auteur a chaque signalement qui atteint le seuil
 # de validation ci-dessus (un "bon signalement").
 POINTS_REPUTATION_PAR_VALIDATION = Decimal('0.5')
+# Utilisateur.points : compteur de gamification distinct de score_reputation
+# (qui mesure specifiquement la fiabilite des signalements et pese les votes,
+# cf. poids_de_vote) -- points recompense l'engagement general (cf. aussi
+# POINTS_PAR_TRAJET_TERMINE, trips/models.py), affiche mais sans effet sur le
+# fonctionnement du systeme.
+POINTS_PAR_SIGNALEMENT_VALIDE = 5
 
 
 class Incident(models.Model):
@@ -247,9 +253,12 @@ class Incident(models.Model):
             self.statut = StatutIncident.ACTIF
             champs.append('statut')
             # "Bon signalement" : l'auteur gagne des points de reputation des
-            # que la communaute valide son signalement.
+            # que la communaute valide son signalement, et des points de
+            # gamification (cf. POINTS_PAR_SIGNALEMENT_VALIDE, deux compteurs
+            # distincts -- l'un pese les votes, l'autre est juste affiche).
             self.auteur.score_reputation += POINTS_REPUTATION_PAR_VALIDATION
-            self.auteur.save(update_fields=['score_reputation'])
+            self.auteur.points += POINTS_PAR_SIGNALEMENT_VALIDE
+            self.auteur.save(update_fields=['score_reputation', 'points'])
         self.save(update_fields=champs)
 
     def infirmer(self, vote: 'Vote'):

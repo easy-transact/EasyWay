@@ -1,6 +1,7 @@
 from django.contrib.auth.tokens import default_token_generator
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db.models import Q
+from django.db.models import Q, Sum
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 from django.utils.encoding import force_str
 from django.utils.http import urlsafe_base64_decode
@@ -22,7 +23,8 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from community.models import TypeIncident
+from community.models import Incident, TypeIncident
+from trips.models import StatutTrajet, Trajet
 
 from .config_data import VERSION_MINIMALE_APP, VILLES_DISPONIBLES
 from .emails import envoyer_email_reinitialisation, envoyer_email_verification
@@ -398,8 +400,10 @@ class ParametresView(APIView):
     tags=['Account'],
     summary='Statistiques du compte connecte',
     description=(
-        "Stub : le module trajets n'est pas encore branche, retourne des zeros "
-        "pour que l'ecran Statistiques du mobile ait deja une forme stable a consommer."
+        "completed_trips/total_distance_km/reported_incidents sont calcules sur les "
+        "donnees reelles de l'utilisateur. time_saved_minutes reste a 0 -- aucune notion "
+        "de 'temps gagne grace a l'appli' (vs. un trajet non guide) n'est encore definie "
+        "nulle part dans le systeme ; mieux vaut un zero honnete qu'un chiffre invente."
     ),
     responses={
         200: inline_serializer(
@@ -414,14 +418,17 @@ class ParametresView(APIView):
     },
 )
 class StatistiquesView(APIView):
-    """Stub : le module trajets n'est pas encore branche, retourne des zeros
-    pour que l'ecran Statistiques du mobile ait deja une forme stable a consommer."""
-
     def get(self, request):
+        trajets_termines = Trajet.objects.filter(utilisateur=request.user, statut=StatutTrajet.TERMINE)
+        distance_totale_m = trajets_termines.aggregate(
+            total=Sum(Coalesce('distance_reelle', 'distance_prevue'))
+        )['total'] or 0
+
         return Response({
-            'completed_trips': 0,
-            'total_distance_km': 0,
-            'reported_incidents': 0,
+            'completed_trips': trajets_termines.count(),
+            'total_distance_km': round(distance_totale_m / 1000, 1),
+            'reported_incidents': Incident.objects.filter(auteur=request.user).count(),
+            # cf. description ci-dessus : pas encore de definition de "temps gagne".
             'time_saved_minutes': 0,
         })
 
