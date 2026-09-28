@@ -31,7 +31,7 @@ from django.contrib.gis.geos import Point
 from trips.polyline import decoder_polyline6, encoder_polyline6
 
 from .client_routage import ClientRoutage
-from .client_valhalla import ClientValhalla
+from .client_valhalla import ClientValhalla, selectionner_variantes
 from .geo import distance_haversine_m
 
 # cf. docstring de module : un trajet dont les deux extremites tombent a
@@ -62,6 +62,18 @@ def _concatener_sans_doublon(*listes_points):
     return resultat
 
 
+def _mettre_a_echelle(trip, facteur):
+    """Copie du trip avec ses durees (resume et manoeuvres) multipliees par facteur."""
+    return {
+        **trip,
+        'summary': {**trip['summary'], 'time': round(trip['summary']['time'] * facteur)},
+        'legs': [
+            {**leg, 'maneuvers': [{**m, 'time': m.get('time', 0) * facteur} for m in leg['maneuvers']]}
+            for leg in trip['legs']
+        ],
+    }
+
+
 class ClientCorridorReference(ClientRoutage):
     def __init__(self, corridor, client_valhalla=None):
         self.corridor = corridor
@@ -69,7 +81,7 @@ class ClientCorridorReference(ClientRoutage):
 
     def calculer_itineraires(self, depart, arrivee, options, cap_origine=None, alternatives=True, etapes=None):
         try:
-            return self._calculer(depart, arrivee, options, cap_origine)
+            trips = self._calculer(depart, arrivee, options, cap_origine)
         except Exception:
             # Un corridor de reference ne doit jamais rendre le routage moins
             # fiable qu'aujourd'hui -- toute erreur (connecteur Valhalla en
@@ -78,6 +90,25 @@ class ClientCorridorReference(ClientRoutage):
             return self.client_valhalla.calculer_itineraires(
                 depart, arrivee, options, cap_origine=cap_origine, alternatives=alternatives, etapes=etapes
             )
+        if alternatives:
+            trips = selectionner_variantes(
+                trips, self._variantes_valhalla(trips[0], depart, arrivee, options, cap_origine)
+            )
+        return trips
+
+    def _variantes_valhalla(self, trip_corridor, depart, arrivee, options, cap_origine=None):
+        """Le corridor reste la route recommandee ; les autres options
+        viennent de Valhalla (celle qui suit le corridor est ecartee par
+        selectionner_variantes, trace quasi identique). Les durees Valhalla
+        sont remises a l'echelle du corridor (duree du trajet corridor /
+        duree Valhalla de la meilleure route, qui le suit) : sans ca, une
+        variante Valhalla paraitrait plus rapide que le corridor alors que
+        Valhalla sous-estime simplement toutes les durees de la region."""
+        trips = self.client_valhalla.calculer_itineraires(depart, arrivee, options, cap_origine=cap_origine)
+        if not trips or trips[0].get('degrade') or not trips[0]['summary']['time']:
+            return []
+        facteur = trip_corridor['summary']['time'] / trips[0]['summary']['time']
+        return [_mettre_a_echelle(trip, facteur) for trip in trips]
 
     def replier(self, depart, arrivee, etapes=None):
         return self.client_valhalla.replier(depart, arrivee, etapes)

@@ -7,6 +7,10 @@ db.sqlite3
 staticfiles/
 media/
 
+# Cles de service (Firebase Admin SDK, etc.) -- jamais commitees.
+*firebase-adminsdk*.json
+*serviceAccountKey*.json
+
 # Celery beat's local schedule state (celery -A config beat, run locally
 # during dev) -- runtime artifact, not project source, was accidentally
 # tracked before this line existed.

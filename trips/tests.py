@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, Mock, patch
 import redis
 import requests
 from django.core.cache import cache
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 from django.urls import reverse
 from django.utils import timezone
 
@@ -17,6 +17,7 @@ from .exceptions import TransitionInvalide
 from .models import FUSEAU_TRAFIC, EchantillonVitesse, NiveauTrafic, StatutTrajet, Trajet
 from .polyline import decoder_polyline6, encoder_polyline6
 from .services import client_locate, service_trafic
+from .services.client_corridor_reference import ClientCorridorReference
 from .services.client_meili import ErreurMeili
 from .services.client_routage import ClientRoutage
 from .services.client_valhalla import ClientValhalla
@@ -384,6 +385,133 @@ class DisjoncteurValhallaTests(TestCase):
         self.assertEqual(len(candidats), 1)
         self.assertTrue(candidats[0]['degrade'])
         self.assertGreater(candidats[0]['distance'], 0)
+
+
+def _trip_long(points, duree_s):
+    """Trip Valhalla d'un seul leg sur la ligne `points` ((lon, lat))."""
+    return {
+        'summary': {'length': 35.0, 'time': duree_s},
+        'legs': [{'shape': encoder_polyline6(points), 'maneuvers': [{'length': 35.0, 'time': duree_s}]}],
+    }
+
+
+# ~35 km entre Douala et le nord : au-dessus de DISTANCE_MIN_DETOUR_KM.
+TRACE_DIRECT = [(9.70, 4.00), (9.70, 4.30)]
+TRACE_EST = [(9.70, 4.00), (9.80, 4.15), (9.70, 4.30)]
+TRACE_OUEST = [(9.70, 4.00), (9.60, 4.15), (9.70, 4.30)]
+# Ne s'ecarte de TRACE_DIRECT que sur ~1 km : pas une vraie option.
+TRACE_QUASI_DIRECT = [(9.70, 4.00), (9.70, 4.149), (9.705, 4.15), (9.70, 4.151), (9.70, 4.30)]
+
+
+def _reponse_valhalla(corps):
+    reponse = Mock(status_code=200)
+    reponse.json.return_value = corps
+    reponse.raise_for_status = lambda: None
+    return reponse
+
+
+class VariantesParDetourTests(SimpleTestCase):
+    """Trajets longs : quand Valhalla ne renvoie qu'une route, on en force
+    d'autres en excluant un carre sur la meilleure (exclude_polygons), puis
+    on ne garde que les variantes assez rapides et vraiment differentes."""
+
+    def setUp(self):
+        cache.clear()
+
+    def _calculer(self, reponses_detour):
+        """reponses_detour : une reponse (corps ou exception) par carre, dans l'ordre des appels."""
+        restantes = list(reponses_detour)
+
+        def post(url, json, timeout):
+            if 'exclude_polygons' not in json:
+                return _reponse_valhalla({'trip': _trip_long(TRACE_DIRECT, 1000)})
+            reponse = restantes.pop(0)
+            if isinstance(reponse, Exception):
+                raise reponse
+            return _reponse_valhalla({'trip': reponse})
+
+        with patch('trips.services.client_valhalla.requests.post', side_effect=post) as post_simule:
+            trips = ClientValhalla().calculer_itineraires((4.0, 9.7), (4.3, 9.7), {'costing': 'auto'})
+        return trips, post_simule
+
+    def test_retient_les_variantes_distinctes_et_assez_rapides(self):
+        trips, post_simule = self._calculer([
+            _trip_long(TRACE_EST, 1100),
+            _trip_long(TRACE_OUEST, 1200),
+            _trip_long(TRACE_EST, 1150),
+            _trip_long(TRACE_DIRECT, 1000),
+            _trip_long(TRACE_DIRECT, 1000),
+        ])
+        self.assertEqual([t['summary']['time'] for t in trips], [1000, 1100, 1200])
+        appels_detour = [c.kwargs['json'] for c in post_simule.call_args_list if 'exclude_polygons' in c.kwargs['json']]
+        self.assertEqual(len(appels_detour), 5)
+        self.assertTrue(all(appel['alternates'] == 0 for appel in appels_detour))
+
+    def test_ecarte_les_variantes_trop_lentes_ou_quasi_identiques(self):
+        trips, _ = self._calculer([
+            _trip_long(TRACE_EST, 2000),  # 2x la meilleure
+            _trip_long(TRACE_QUASI_DIRECT, 1010),
+            _trip_long(TRACE_DIRECT, 1000),
+            _trip_long(TRACE_DIRECT, 1000),
+            _trip_long(TRACE_DIRECT, 1000),
+        ])
+        self.assertEqual(len(trips), 1)
+
+    def test_echec_dune_variante_ne_compte_pas_pour_le_disjoncteur(self):
+        # Un carre peut couper le seul chemin possible : Valhalla repond 400 "no path".
+        trips, _ = self._calculer([requests.exceptions.HTTPError('400 no path')] * 5)
+        self.assertEqual(len(trips), 1)
+        self.assertFalse(trips[0].get('degrade', False))
+        self.assertIsNone(cache.get(CLE_ECHECS))
+
+    def test_carres_trop_proches_dune_etape_ignores(self):
+        # Etape au milieu du trajet : le carre a 0.5 la rendrait inaccessible.
+        with patch(
+            'trips.services.client_valhalla.requests.post',
+            return_value=_reponse_valhalla({'trip': _trip_long(TRACE_DIRECT, 1000)}),
+        ) as post_simule:
+            ClientValhalla().calculer_itineraires(
+                (4.0, 9.7), (4.3, 9.7), {'costing': 'auto'}, etapes=[(4.15, 9.7)]
+            )
+        self.assertEqual(post_simule.call_count, 1 + 4)
+
+
+class VariantesCorridorReferenceTests(SimpleTestCase):
+    """Un corridor de reference reste la route recommandee, mais ne doit
+    plus masquer les autres options que Valhalla trouve."""
+
+    def test_ajoute_les_variantes_valhalla_a_lechelle_du_corridor(self):
+        trip_corridor = {**_trip_long(TRACE_DIRECT, 1500), 'degrade': False}
+        valhalla = Mock()
+        # La meilleure route Valhalla suit le corridor (ecartee comme doublon) ;
+        # sa duree (1000) sous-estime celle du corridor (1500) -> facteur 1.5.
+        valhalla.calculer_itineraires.return_value = [
+            _trip_long(TRACE_DIRECT, 1000), _trip_long(TRACE_EST, 1100),
+        ]
+        client = ClientCorridorReference(corridor=Mock(), client_valhalla=valhalla)
+        with patch.object(client, '_calculer', return_value=[trip_corridor]):
+            trips = client.calculer_itineraires((4.0, 9.7), (4.3, 9.7), {'costing': 'auto'})
+
+        self.assertEqual(len(trips), 2)
+        self.assertIs(trips[0], trip_corridor)
+        self.assertEqual(trips[1]['summary']['time'], 1650)
+        self.assertEqual(trips[1]['legs'][0]['maneuvers'][0]['time'], 1650)
+
+    def test_alternatives_false_sans_appel_valhalla_supplementaire(self):
+        valhalla = Mock()
+        client = ClientCorridorReference(corridor=Mock(), client_valhalla=valhalla)
+        with patch.object(client, '_calculer', return_value=[_trip_long(TRACE_DIRECT, 1500)]):
+            trips = client.calculer_itineraires((4.0, 9.7), (4.3, 9.7), {'costing': 'auto'}, alternatives=False)
+        self.assertEqual(len(trips), 1)
+        valhalla.calculer_itineraires.assert_not_called()
+
+    def test_valhalla_en_repli_naffiche_pas_de_ligne_droite(self):
+        valhalla = Mock()
+        valhalla.calculer_itineraires.return_value = [{**_trip_long(TRACE_EST, 900), 'degrade': True}]
+        client = ClientCorridorReference(corridor=Mock(), client_valhalla=valhalla)
+        with patch.object(client, '_calculer', return_value=[_trip_long(TRACE_DIRECT, 1500)]):
+            trips = client.calculer_itineraires((4.0, 9.7), (4.3, 9.7), {'costing': 'auto'})
+        self.assertEqual(len(trips), 1)
 
 
 def _arete_factice(correlated_lat=4.0, correlated_lon=9.7, destination_only=False, use='road', way_id=1, forward=True):
