@@ -32,6 +32,9 @@ logger = logging.getLogger(__name__)
 FENETRE_HISTORIQUE = timezone.timedelta(weeks=8)  # capture un rythme hebdo recent sans trainer une donnee perimee -- pas mesure sur donnees reelles, a ajuster
 RATIO_MODERE = 0.7  # vitesse recente < 70% de la typique -> MODERE -- pas mesure, a ajuster une fois l'historique disponible
 RATIO_DENSE = 0.4  # < 40% de la typique -> DENSE -- idem
+# Un bucket de 5 min n'est persiste qu'apres sa fermeture (+ marge, cf.
+# tasks.MARGE_FLUSH_S) : 15 min de validite + ce decalage.
+FENETRE_RECENTE = timezone.timedelta(minutes=20)
 DUREE_CACHE_TRAFIC_S = 60  # le trafic bouge plus vite que le calcul d'itineraire (DUREE_CACHE_S=180, service_itineraire.py)
 _SEVERITE = {NiveauTrafic.NORMAL: 0, NiveauTrafic.MODERE: 1, NiveauTrafic.DENSE: 2}
 
@@ -53,11 +56,14 @@ def vitesse_typique(identifiant_arete, jour_semaine, heure_jour):
 
 
 def vitesse_recente(identifiant_arete):
-    """Derniere observation connue pour cette arete, tous jours/heures
-    confondus -- proxy de "ce qui s'y passe la, maintenant". None si l'arete
-    n'a jamais ete observee."""
+    """Derniere observation de cette arete dans la FENETRE_RECENTE -- proxy
+    de "ce qui s'y passe la, maintenant". None si rien de recent : une
+    mesure d'il y a plusieurs jours ne dit rien du trafic actuel."""
     plus_recent = (
-        EchantillonVitesse.objects.filter(identifiant_arete=identifiant_arete)
+        EchantillonVitesse.objects.filter(
+            identifiant_arete=identifiant_arete,
+            debut_intervalle__gte=timezone.now() - FENETRE_RECENTE,
+        )
         .order_by('-debut_intervalle')
         .first()
     )

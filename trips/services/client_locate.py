@@ -42,7 +42,7 @@ def localiser(lat: float, lon: float, cap: int | None = None) -> dict | None:
     'forward'} pour l'arete routiere connue de Valhalla la plus proche :
     distance_m et lat/lon du point correle sur cette arete, destination_only
     (True pour une allee privee/un parking -- jamais une route publique),
-    use (classification Valhalla, ex. 'road', 'driveway', 'footway'), way_id
+    use (classification Valhalla, ex. 'road', 'driveway', 'footway'), graph_id, way_id
     (identifiant OSM stable de la voie, cf. community.models.Incident.way_id_osm
     -- matching par topologie plutot que par distance dans
     IncidentsSurTrajetView) et forward (sens de circulation sur cette arete).
@@ -89,6 +89,9 @@ def localiser(lat: float, lon: float, cap: int | None = None) -> dict | None:
         'use': arete['edge']['classification']['use'],
         'way_id': arete['edge_info']['way_id'],
         'forward': arete['edge']['forward'],
+        # GraphId de l'arete dirigee (cle de traffic.tar, cf. tuiles_trafic.py) --
+        # instable d'une generation de tuiles a l'autre, contrairement a way_id.
+        'graph_id': arete.get('edge_id', {}).get('value'),
     }
 
 

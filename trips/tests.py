@@ -16,7 +16,7 @@ from accounts.tests import connecter, numero_telephone_test
 from .exceptions import TransitionInvalide
 from .models import FUSEAU_TRAFIC, EchantillonVitesse, NiveauTrafic, StatutTrajet, Trajet
 from .polyline import decoder_polyline6, encoder_polyline6
-from .services import client_locate, service_trafic
+from .services import client_locate, service_trafic, trafic_temps_reel, tuiles_trafic
 from .services.client_corridor_reference import ClientCorridorReference
 from .services.client_meili import ErreurMeili
 from .services.client_routage import ClientRoutage
@@ -512,6 +512,173 @@ class VariantesCorridorReferenceTests(SimpleTestCase):
         with patch.object(client, '_calculer', return_value=[_trip_long(TRACE_DIRECT, 1500)]):
             trips = client.calculer_itineraires((4.0, 9.7), (4.3, 9.7), {'costing': 'auto'})
         self.assertEqual(len(trips), 1)
+
+
+# GraphId d'une arete : niveau 1, tuile 34029, index 3 (cf. tuiles_trafic.py).
+TUILE_TEST = 1 | (34029 << 3)
+NB_ARETES_TUILE_TEST = 10
+
+
+def _graph_id(index_arete, tuile=TUILE_TEST):
+    return tuile | (index_arete << 25)
+
+
+def _creer_traffic_tar(dossier):
+    """traffic.tar minimal au format de valhalla_build_extract --with-traffic :
+    index.bin, puis une tuile de NB_ARETES_TUILE_TEST vitesses a zero."""
+    import io
+    import os
+    import struct
+    import tarfile
+
+    chemin = os.path.join(dossier, 'traffic.tar')
+    with tarfile.open(chemin, 'w') as archive:
+        for nom, contenu in [
+            ('index.bin', b'\0' * 16),
+            ('1/034/029.gph', struct.pack('<2Q4I', TUILE_TEST, 0, NB_ARETES_TUILE_TEST, 3, 0, 0)
+             + b'\0' * 8 * NB_ARETES_TUILE_TEST),
+        ]:
+            info = tarfile.TarInfo(nom)
+            info.size = len(contenu)
+            archive.addfile(info, io.BytesIO(contenu))
+    return chemin
+
+
+def _lire_vitesse(chemin, index_arete):
+    """(speed_valid, vitesse globale km/h) de l'arete, decodes comme Valhalla."""
+    import struct
+    import tarfile
+
+    with tarfile.open(chemin) as archive:
+        membre = archive.getmember('1/034/029.gph')
+    with open(chemin, 'rb') as fichier:
+        fichier.seek(membre.offset_data + 32 + 8 * index_arete)
+        (valeur,) = struct.unpack('<Q', fichier.read(8))
+    brute = valeur & 0x7f
+    breakpoint1 = (valeur >> 28) & 0xff
+    return breakpoint1 != 0 and brute != 127, brute * 2
+
+
+class TuilesTraficTests(SimpleTestCase):
+    def setUp(self):
+        import tempfile
+
+        self.dossier = tempfile.TemporaryDirectory()
+        self.chemin = _creer_traffic_tar(self.dossier.name)
+
+    def tearDown(self):
+        self.dossier.cleanup()
+
+    def test_ecrit_la_vitesse_a_la_position_de_larete(self):
+        nb = tuiles_trafic.ecrire_vitesses(self.chemin, {_graph_id(3): 30})
+        self.assertEqual(nb, 1)
+        self.assertEqual(_lire_vitesse(self.chemin, 3), (True, 30))
+        self.assertEqual(_lire_vitesse(self.chemin, 2), (False, 0))
+        self.assertEqual(_lire_vitesse(self.chemin, 4), (False, 0))
+
+    def test_vitesse_tres_lente_jamais_codee_comme_route_fermee(self):
+        # Vitesse brute 0 = route fermee pour Valhalla : 1 km/h doit rester 2 km/h.
+        tuiles_trafic.ecrire_vitesses(self.chemin, {_graph_id(0): 1})
+        self.assertEqual(_lire_vitesse(self.chemin, 0), (True, 2))
+
+    def test_effacer_rend_la_vitesse_invalide(self):
+        tuiles_trafic.ecrire_vitesses(self.chemin, {_graph_id(3): 30})
+        tuiles_trafic.effacer(self.chemin, [_graph_id(3)])
+        self.assertEqual(_lire_vitesse(self.chemin, 3)[0], False)
+
+    def test_arete_inconnue_ignoree(self):
+        # Carte regeneree depuis la mesure : tuile absente ou index hors bornes.
+        nb = tuiles_trafic.ecrire_vitesses(self.chemin, {
+            _graph_id(3, tuile=1 | (99 << 3)): 30,
+            _graph_id(NB_ARETES_TUILE_TEST): 30,
+        })
+        self.assertEqual(nb, 0)
+
+    def test_fichier_absent(self):
+        with self.assertRaises(tuiles_trafic.TraficIndisponible):
+            tuiles_trafic.ecrire_vitesses(self.chemin + '.absent', {_graph_id(3): 30})
+
+
+class RedisTraficFactice:
+    """Juste ce qu'utilise trafic_temps_reel : set, hashes et un ZSET."""
+
+    def __init__(self, hashes=None):
+        self.hashes = hashes or {}
+        self.zset = {}
+
+    def smembers(self, _cle):
+        return set(self.hashes)
+
+    def hgetall(self, cle):
+        return self.hashes.get(cle, {})
+
+    def zadd(self, _cle, valeurs):
+        self.zset.update(valeurs)
+
+    def zrangebyscore(self, _cle, minimum, maximum):
+        return [membre for membre, score in self.zset.items() if minimum <= score <= maximum]
+
+    def zrem(self, _cle, *membres):
+        for membre in membres:
+            self.zset.pop(str(membre), None)
+
+
+def _bucket(graph_id, bucket_epoch, **par_trajet):
+    """par_trajet : trajet_id=(somme, nombre)."""
+    champs = {}
+    for trajet, (somme, nombre) in par_trajet.items():
+        champs[f't:{trajet}:somme'] = str(somme)
+        champs[f't:{trajet}:nombre'] = str(nombre)
+    return {f'trafic:accumulateur:{graph_id}:{bucket_epoch}': champs}
+
+
+class TraficTempsReelTests(SimpleTestCase):
+    MAINTENANT = 1_790_000_100  # 100 s dans un bucket de 5 min
+    BUCKET_COURANT = 1_790_000_000
+
+    def test_mediane_par_conducteur_a_partir_de_deux(self):
+        connexion = RedisTraficFactice({
+            # Un conducteur a beaucoup de points : il ne compte qu'une fois.
+            **_bucket(_graph_id(1), self.BUCKET_COURANT, a=(100, 10), b=(40, 1), c=(60, 2)),
+            **_bucket(_graph_id(2), self.BUCKET_COURANT, a=(20, 1)),  # un seul conducteur
+        })
+        vitesses = trafic_temps_reel.vitesses_mesurees(connexion, self.MAINTENANT)
+        self.assertEqual(vitesses, {_graph_id(1): 30})
+
+    def test_combine_les_buckets_recents_et_ignore_les_anciens(self):
+        precedent = self.BUCKET_COURANT - 300
+        ancien = self.BUCKET_COURANT - 900
+        connexion = RedisTraficFactice({
+            **_bucket(_graph_id(1), self.BUCKET_COURANT, a=(20, 1)),
+            **_bucket(_graph_id(1), precedent, b=(40, 1)),
+            **_bucket(_graph_id(2), ancien, a=(20, 1), b=(40, 1)),
+        })
+        vitesses = trafic_temps_reel.vitesses_mesurees(connexion, self.MAINTENANT)
+        self.assertEqual(vitesses, {_graph_id(1): 30})
+
+    def test_publier_mesure_prioritaire_et_effacement_des_perimees(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as dossier:
+            chemin = _creer_traffic_tar(dossier)
+            connexion = RedisTraficFactice(
+                _bucket(_graph_id(1), self.BUCKET_COURANT, a=(40, 1), b=(40, 1))
+            )
+            # Arete 5 publiee il y a 20 min, jamais rafraichie depuis.
+            tuiles_trafic.ecrire_vitesses(chemin, {_graph_id(5): 30})
+            connexion.zset[str(_graph_id(5))] = self.MAINTENANT - 1200
+
+            with patch.object(trafic_temps_reel, 'vitesses_signalements', return_value={
+                _graph_id(1): 5,  # mesure disponible : le signalement ne l'emporte pas
+                _graph_id(2): 15,
+            }):
+                compteurs = trafic_temps_reel.publier(chemin, connexion, self.MAINTENANT)
+
+            self.assertEqual(compteurs, {'ecrites': 2, 'effacees': 1})
+            self.assertEqual(_lire_vitesse(chemin, 1), (True, 40))
+            self.assertEqual(_lire_vitesse(chemin, 2), (True, 16))
+            self.assertEqual(_lire_vitesse(chemin, 5)[0], False)
+            self.assertNotIn(str(_graph_id(5)), connexion.zset)
 
 
 def _arete_factice(correlated_lat=4.0, correlated_lon=9.7, destination_only=False, use='road', way_id=1, forward=True):
@@ -1192,6 +1359,14 @@ class ServiceTraficTests(TestCase):
 
     def test_vitesse_recente_sans_historique_est_none(self):
         self.assertIsNone(service_trafic.vitesse_recente(424242))
+
+    def test_vitesse_recente_ignore_une_mesure_ancienne(self):
+        # Une mesure d'hier ne dit rien du trafic de maintenant.
+        EchantillonVitesse.objects.create(
+            identifiant_arete=self.ARETE, debut_intervalle=timezone.now() - timezone.timedelta(days=1),
+            jour_semaine=2, heure_jour=8, vitesse_moyenne=Decimal('10.00'), nombre_echantillons=1,
+        )
+        self.assertIsNone(service_trafic.vitesse_recente(self.ARETE))
 
     def test_niveau_relatif_sans_donnees_est_normal(self):
         self.assertEqual(service_trafic.niveau_relatif(None, None), NiveauTrafic.NORMAL)

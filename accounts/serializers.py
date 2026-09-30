@@ -100,6 +100,10 @@ class ParametresSerializer(serializers.ModelSerializer):
     units = serializers.ChoiceField(choices=Unite.choices, source='unites', required=False)
     speedometer_enabled = serializers.BooleanField(source='compteur_vitesse_actif', required=False)
     speed_alert_enabled = serializers.BooleanField(source='alerte_vitesse_active', required=False)
+    show_speed_limit = serializers.BooleanField(source='afficher_limite_vitesse', required=False)
+    speed_tolerance_kmh = serializers.IntegerField(
+        source='tolerance_vitesse_kmh', required=False, min_value=0, max_value=30
+    )
     notifications_enabled = serializers.BooleanField(source='notifications_globales', required=False)
     notify_announcements = serializers.BooleanField(source='notif_annonces', required=False)
     notify_frequent_incidents = serializers.BooleanField(source='notif_incidents_frequents', required=False)
@@ -112,7 +116,7 @@ class ParametresSerializer(serializers.ModelSerializer):
         fields = [
             'avoid_tolls', 'avoid_unpaved_roads', 'avoid_difficult_intersections', 'map_style',
             'voice_guidance_enabled', 'voice_language', 'units', 'speedometer_enabled', 'speed_alert_enabled',
-            'notifications_enabled', 'notify_announcements', 'notify_frequent_incidents',
+            'show_speed_limit', 'speed_tolerance_kmh', 'notifications_enabled', 'notify_announcements', 'notify_frequent_incidents',
             'notify_police_alerts', 'notify_route_change', 'notify_news',
         ]
 
@@ -135,6 +139,14 @@ class JetonsSerializer(serializers.Serializer):
 
     access = serializers.CharField(help_text='Short-lived JWT (15 min) to send as Authorization: Bearer <access>.')
     refresh = serializers.CharField(help_text='Long-lived JWT (30 days) used on /auth/refresh/.')
+
+
+class RafraichissementRequeteSerializer(serializers.Serializer):
+    """Documentation only: request body of /auth/refresh/. SimpleJWT's
+    TokenRefreshSerializer serves both directions, so drf-spectacular listed
+    `access` as required in the request too -- only `refresh` is sent."""
+
+    refresh = serializers.CharField()
 
 
 class MessageSerializer(serializers.Serializer):

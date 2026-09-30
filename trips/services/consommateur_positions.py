@@ -41,6 +41,7 @@ VITESSE_MAX_PLAUSIBLE_KMH = 180  # au-dela, artefact de saut GPS plutot qu'une v
 PREFIXE_ACCUMULATEUR = 'trafic:accumulateur'
 ENSEMBLE_BUCKETS_ACTIFS = 'trafic:buckets:actifs'
 TAILLE_BUCKET_S = 5 * 60
+PREFIXE_CHAMP_TRAJET = 't:'
 
 
 class ConsommateurPositions:
@@ -151,13 +152,21 @@ class ConsommateurPositions:
 
             identifiant_arete = edges[index_arete]['id']
             bucket = self._bucket_5min(self._parser_horodatage(paires[i][1]['horodatage']))
-            self._accumuler(identifiant_arete, bucket, vitesse_kmh)
+            self._accumuler(identifiant_arete, bucket, vitesse_kmh, paires[i][1].get('trajet_id'))
 
-    def _accumuler(self, identifiant_arete, bucket_epoch, vitesse_kmh):
+    def _accumuler(self, identifiant_arete, bucket_epoch, vitesse_kmh, trajet_id=None):
+        """somme_vitesse/nombre : tous trajets confondus, lus par le flush vers
+        EchantillonVitesse. Champs PREFIXE_CHAMP_TRAJET{trajet_id}:somme/:nombre
+        en plus, dans le meme hash : la publication temps reel (cf.
+        vitesses_temps_reel) en tire une vitesse par conducteur, pour une
+        mediane qui ne compte qu'une fois un vehicule a nombreux points."""
         cle = f'{PREFIXE_ACCUMULATEUR}:{identifiant_arete}:{bucket_epoch}'
         with self.connexion.pipeline() as pipe:
             pipe.hincrbyfloat(cle, 'somme_vitesse', vitesse_kmh)
             pipe.hincrby(cle, 'nombre', 1)
+            if trajet_id is not None:
+                pipe.hincrbyfloat(cle, f'{PREFIXE_CHAMP_TRAJET}{trajet_id}:somme', vitesse_kmh)
+                pipe.hincrby(cle, f'{PREFIXE_CHAMP_TRAJET}{trajet_id}:nombre', 1)
             pipe.expire(cle, DUREE_ACCUMULATEUR_S)
             pipe.sadd(ENSEMBLE_BUCKETS_ACTIFS, cle)
             pipe.execute()

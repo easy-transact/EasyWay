@@ -278,6 +278,10 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'community.tasks.expirer_incidents',
         'schedule': 60.0,
     },
+    'purger-incidents-anciens': {
+        'task': 'community.tasks.purger_incidents_anciens',
+        'schedule': 24 * 3600.0,
+    },
     'consommer-positions': {
         'task': 'trips.tasks.consommer_positions',
         # Assez frequent pour vider le flux sans laisser trainer les positions
@@ -291,12 +295,24 @@ CELERY_BEAT_SCHEDULE = {
         # bucket ne peut de toute facon pas se fermer plus souvent que ca.
         'schedule': 300.0,
     },
+    'publier-trafic-temps-reel': {
+        'task': 'trips.tasks.publier_trafic_temps_reel',
+        # Un bouchon doit influencer le routage en 1-2 min ; le bucket en
+        # cours est lu tel quel, pas besoin d'attendre sa fermeture.
+        'schedule': 90.0,
+    },
 }
 
 # P5 (trips/services/producteur_evenements.py) : DB Redis distincte (/3) pour
 # le flux Streams des positions GPS brutes -- retention courte (~2h, purgee
 # par MAXLEN sur XADD), jamais partagee avec le cache ou le broker Celery.
 TELEMETRIE_REDIS_URL = env('TELEMETRIE_REDIS_URL', default='redis://localhost:6379/3')
+
+# traffic.tar de Valhalla (mjolnir.traffic_extract), ecrit par
+# trips.tasks.publier_trafic_temps_reel -- chemin vu par le worker Celery,
+# qui doit monter custom_files en lecture-ecriture. Vide = trafic temps reel
+# desactive (dev sans traffic.tar).
+TRAFIC_TAR_PATH = env('TRAFIC_TAR_PATH', default='')
 
 
 # Static files (CSS, JavaScript, Images)

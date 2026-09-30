@@ -169,6 +169,9 @@ class Parametres(models.Model):
     unites = models.CharField(max_length=5, choices=Unite.choices, default=Unite.KILOMETRES)
     compteur_vitesse_actif = models.BooleanField(default=False)
     alerte_vitesse_active = models.BooleanField(default=True)
+    afficher_limite_vitesse = models.BooleanField(default=True)
+    # Depassement tolere avant l'alerte, au-dessus de la limite de la zone.
+    tolerance_vitesse_kmh = models.PositiveSmallIntegerField(default=5)
 
     notifications_globales = models.BooleanField(default=True)
     notif_annonces = models.BooleanField(default=True)

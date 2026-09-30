@@ -3,14 +3,20 @@ from drf_spectacular.utils import extend_schema
 from rest_framework_simplejwt.views import TokenRefreshView
 
 from . import views
+from .serializers import JetonsSerializer, RafraichissementRequeteSerializer
 
 app_name = 'accounts'
 
 # Stock TokenRefreshView/serializer, unmodified: access/refresh (English) is
 # now the project-wide convention, so SimpleJWT's own field names already
-# match -- no custom serializer needed, just tagged to join the rest of the
-# Authentification group instead of drf-spectacular's default 'auth' tag.
-RafraichirView = extend_schema(tags=['Authentication'])(TokenRefreshView)
+# match. Only the documented schema is overridden: the stock serializer made
+# drf-spectacular declare `access` as required in the request. The response
+# is JetonsSerializer since ROTATE_REFRESH_TOKENS also returns a new refresh.
+RafraichirView = extend_schema(
+    tags=['Authentication'],
+    request=RafraichissementRequeteSerializer,
+    responses=JetonsSerializer,
+)(TokenRefreshView)
 
 urlpatterns = [
     # Authentification

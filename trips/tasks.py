@@ -4,8 +4,11 @@ from datetime import datetime, timezone as dt_timezone
 from decimal import Decimal
 
 from celery import shared_task
+from django.conf import settings
 
 from .models import FUSEAU_TRAFIC, EchantillonVitesse
+from .services import trafic_temps_reel
+from .services.tuiles_trafic import TraficIndisponible
 from .services.consommateur_positions import (
     ENSEMBLE_BUCKETS_ACTIFS,
     SEUIL_INACTIVITE_MS,
@@ -72,6 +75,24 @@ def flusher_echantillons_vitesse():
             continue
 
     return nb_flushes
+
+
+@shared_task
+def publier_trafic_temps_reel():
+    """Celery Beat, toutes les 90 s : vitesses des 5 dernieres minutes vers le
+    traffic.tar de Valhalla (cf. services/trafic_temps_reel.py). Desactivee
+    tant que TRAFIC_TAR_PATH n'est pas configure. Un fichier absent ou
+    illisible est journalise, jamais propage : le routage continue sans
+    trafic temps reel."""
+    chemin = settings.TRAFIC_TAR_PATH
+    if not chemin:
+        return None
+    maintenant = int(datetime.now(tz=dt_timezone.utc).timestamp())
+    try:
+        return trafic_temps_reel.publier(chemin, connexion_redis_telemetrie(), maintenant)
+    except TraficIndisponible as exc:
+        logger.warning('traffic.tar indisponible, trafic temps reel non publie: %s', exc)
+        return None
 
 
 def _flusher_un_bucket(connexion, cle, identifiant_arete, bucket_epoch) -> bool:

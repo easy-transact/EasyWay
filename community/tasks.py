@@ -23,3 +23,23 @@ def expirer_incidents():
         invalider_cache_cellule(cellule)
 
     return nb
+
+
+# Les signalements termines restent en base (votes compris) pour l'etat des
+# routes, qui les exploite sur cette fenetre -- au-dela, simple purge pour que
+# la table ne grossisse pas indefiniment.
+RETENTION_INCIDENTS_TERMINES_JOURS = 120
+
+
+@shared_task
+def purger_incidents_anciens():
+    """Celery Beat, quotidien (cf. CELERY_BEAT_SCHEDULE). Supprime les
+    incidents EXPIRE/RETIRE/FUSIONNE dont la fin remonte a plus de
+    RETENTION_INCIDENTS_TERMINES_JOURS ; leurs votes partent avec eux
+    (cascade). Deja invisibles de l'API, aucun cache a invalider."""
+    limite = timezone.now() - timezone.timedelta(days=RETENTION_INCIDENTS_TERMINES_JOURS)
+    nb, _detail = Incident.objects.filter(
+        statut__in=[StatutIncident.EXPIRE, StatutIncident.RETIRE, StatutIncident.FUSIONNE],
+        expire_le__lte=limite,
+    ).delete()
+    return nb

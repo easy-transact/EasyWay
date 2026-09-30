@@ -249,6 +249,8 @@ Success 200:
   "units": "KM" | "MI",
   "speedometer_enabled": true,
   "speed_alert_enabled": true,
+  "show_speed_limit": true,
+  "speed_tolerance_kmh": 5,
   "notifications_enabled": true,
   "notify_announcements": true,
   "notify_frequent_incidents": true,
@@ -256,6 +258,9 @@ Success 200:
   "notify_route_change": true,
   "notify_news": true
 }
+Note: show_speed_limit (display the zone limit on the speedometer) and
+speed_tolerance_kmh (0-30, km/h above the limit before the alert fires) are
+stored server-side so they follow the user across phones.
 Note: avoid_tolls/avoid_unpaved_roads feed directly into route calculation
 (routes/calculate — see 5.1). avoid_difficult_intersections is stored but
 has NO effect on routing — Valhalla has no equivalent lever, flagged as a

@@ -97,6 +97,15 @@ class ServiceItineraire:
             # surface= directement via costing_options.
             'use_tolls': 0.0 if parametres.eviter_peages else 1.0,
             'use_tracks': 0.0 if parametres.eviter_non_bitumees else 1.0,
+            # Vitesses par ordre de priorite (Valhalla 3.5.1, GraphTile::GetSpeed) :
+            # trafic temps reel publie dans traffic.tar (cf. trafic_temps_reel.py),
+            # puis profils historiques, puis vitesse de la classe de route.
+            # Pas de date_time dans la requete : le temps reel s'applique sans
+            # (seconds_from_now=0), alors qu'un date_time bascule Valhalla sur
+            # un A* dependant du temps qui ne produit plus AUCUNE alternate
+            # (verifie en local). Contrepartie : l'historique ('predicted') ne
+            # sert qu'aux departs differes, qui passeraient un date_time.
+            'speed_types': ['current', 'predicted', 'constrained', 'freeflow'],
         }
         # eviter_intersections_difficiles : aucun levier Valhalla equivalent
         # (pas de notion de "complexite d'intersection" dans ses costing

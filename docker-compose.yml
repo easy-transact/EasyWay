@@ -53,9 +53,15 @@ services:
       - force_rebuild=False
       - build_elevation=False
       - build_admins=True
-      - build_time_zones=False
+      # True : fuseaux horaires dans les tuiles, sans quoi un date_time est
+      # interprete en UTC (profils historiques decales d'1 h a Douala).
+      # Changer cette valeur demande UN rebuild (force_rebuild=True une fois).
+      - build_time_zones=True
       - build_transit=False
       - server_threads=2
+      # Squelette traffic.tar (mjolnir.traffic_extract) rempli toutes les 90 s
+      # par trips.tasks.publier_trafic_temps_reel (celery_worker).
+      - traffic_name=traffic.tar
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8002/status || exit 1"]
       interval: 10s
@@ -192,6 +198,11 @@ services:
       VALHALLA_URL: http://valhalla:8002
       NOMINATIM_URL: http://nominatim:8080
       PHOTON_URL: http://photon:2322
+      TRAFIC_TAR_PATH: /custom_files/traffic.tar
+    # Lecture-ecriture : seul service qui ecrit dans traffic.tar, que Valhalla
+    # relit en mmap a chaque calcul (web garde un montage :ro).
+    volumes:
+      - ./valhalla/custom_files:/custom_files
 
   celery_beat:
     build: .
