@@ -31,6 +31,7 @@ urlpatterns = [
     path('api/', include('places.urls')),
     path('api/', include('trips.urls')),
     path('api/', include('community.urls')),
+    path('api/', include('infractions.urls')),
 
     # Fichiers televerses (avatars) servis par Django lui-meme, y compris en
     # prod : aucun serveur devant gunicorn ne sert /media/ (ea-nginx -> Apache

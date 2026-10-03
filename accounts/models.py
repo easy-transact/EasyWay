@@ -1,5 +1,5 @@
 import uuid
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from django.contrib.auth.base_user import AbstractBaseUser, BaseUserManager
 from django.contrib.auth.models import PermissionsMixin
@@ -144,7 +144,7 @@ class Utilisateur(AbstractBaseUser, PermissionsMixin):
         en 1 a 5 etoiles, arrondi a la demi-etoile : 0 -> 1, 50 -> 3, 100+ -> 5."""
         score = max(Decimal('0'), min(SCORE_REPUTATION_MAX, self.score_reputation))
         etoiles = 1 + 4 * score / SCORE_REPUTATION_MAX
-        return (etoiles * 2).quantize(Decimal('1')) / 2
+        return (etoiles * 2).quantize(Decimal('1'), rounding=ROUND_HALF_UP) / 2
 
     def peut_signaler(self):
         return self.is_active and not self.est_banni

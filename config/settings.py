@@ -71,6 +71,7 @@ INSTALLED_APPS = [
     'trips',
     'community',
     'ads_admin',
+    'infractions',
 ]
 
 MIDDLEWARE = [

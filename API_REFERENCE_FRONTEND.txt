@@ -180,7 +180,10 @@ USER OBJECT (returned inside "user" above):
   "email_verified": true | false,
   "plan": "GRATUITE" | "PREMIUM",
   "reputation_score": 0,
-  "points": 0,
+  "reputation_stars": 1,          // 1-5 by half-stars, from reputation_score (0-100 scale, capped)
+  "points": 0,                    // reward points (fuel vouchers), number with up to 2 decimals:
+                                  // +1 when one of your reports gets validated, +0.25 per report of
+                                  // someone else you confirm (vote or duplicate report). Disputes: 0.
   "invisible_mode": false,
   "plan_limits": {
     "plan": "GRATUITE" | "PREMIUM",
@@ -849,6 +852,45 @@ Errors:
 
 
 ============================================================
+9. INFRACTIONS  (base: infractions/)        Auth: none
+============================================================
+Official list of road offences and fines (gendarmerie, Cameroon). Amounts
+are FCFA integers.
+
+INFRACTION OBJECT:
+{
+  "id": "<uuid>",
+  "code": "12" | null,              // number/article from the source list
+  "label": "Défaut de triangle de pré-signalisation",
+  "category": "Équipement" | "",
+  "fine_amount": 25000,
+  "fine_amount_max": 50000 | null,  // only when the fine is a range
+  "legal_reference": "..." | "",
+  "additional_penalties": "..." | "",  // impound, licence withdrawal...
+  "is_active": true,
+  "created_at": "...", "updated_at": "..."
+}
+
+9.1 GET infractions/?search=&category=&min_fine=&max_fine=
+Active infractions only, NOT paginated, sorted by category then label.
+search ignores accents/case and also matches code/legal_reference.
+9.2 GET infractions/categories/
+  [ { "category": "Vitesse", "count": 12 }, ... ]
+
+Staff (back-office, is_staff only):
+- GET  staff/infractions/?search=&category=&active=&page=&page_size=  (paginated, includes inactive)
+- POST staff/infractions/            body = INFRACTION OBJECT fields -> 201
+- PATCH/DELETE staff/infractions/<id>/
+- POST staff/infractions/import/     JSON { "infractions": [...], "dry_run": false }
+  or multipart "file" (CSV ; or , / JSON). French or English column names
+  (code/numero, libelle/label, categorie, amende ("25 000 FCFA" or a range
+  "5 000 - 25 000"), amende_max, reference, sanctions, actif). Upsert by
+  code, else by label. -> { "created", "updated", "errors": [{row, errors}], "dry_run" }
+  Template: infractions/modele_import_infractions.csv.
+  CLI equivalent: python manage.py import_infractions <file> [--dry-run]
+
+
+============================================================
 ENUM REFERENCE (values as stored/returned — NOT translated)
 ============================================================
 TypeVehicule (vehicle_type):     VOITURE, MOTO, TAXI, CAMION, BUS, UTILITAIRE
@@ -862,9 +904,7 @@ TypeIncident (incident type):    DANGER, POLICE, EMBOUTEILLAGE, ACCIDENT, ROUTE_
 StatutIncident (incident status): EN_ATTENTE, ACTIF, EXPIRE, RETIRE, FUSIONNE
 VoteIncident direction (request only, not stored as-is): confirm, dispute
 
-Incident base lifetime by type (minutes, before any vote extends/reduces it):
-  DANGER 60, POLICE 60, EMBOUTEILLAGE 30, ACCIDENT 90, ROUTE_BARREE 240,
-  VOIE_BLOQUEE 60, MAUVAIS_TEMPS 120, RADAR 480.
+Incident base lifetime: see section 8 (INCIDENT OBJECT) or GET incidents/types/.
 
 
 ============================================================
