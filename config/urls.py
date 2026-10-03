@@ -15,9 +15,9 @@ Including another URLconf
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
 from django.conf import settings
-from django.conf.urls.static import static
 from django.contrib import admin
-from django.urls import include, path
+from django.urls import include, path, re_path
+from django.views.static import serve
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, SpectacularRedocView
 
 urlpatterns = [
@@ -31,12 +31,19 @@ urlpatterns = [
     path('api/', include('places.urls')),
     path('api/', include('trips.urls')),
     path('api/', include('community.urls')),
+
+    # Fichiers televerses (avatars) servis par Django lui-meme, y compris en
+    # prod : aucun serveur devant gunicorn ne sert /media/ (ea-nginx -> Apache
+    # -> gunicorn, cf. docker-compose.prod.yml), donc le static() habituel,
+    # inactif quand DEBUG=False, laissait chaque avatar_url en 404. serve()
+    # refuse les chemins hors MEDIA_ROOT ; volume faible (un avatar par
+    # compte), a deplacer vers le proxy si ca devient un goulot.
+    re_path(r'^media/(?P<path>.*)$', serve, {'document_root': settings.MEDIA_ROOT}),
 ]
 
 if settings.DEBUG:
     from . import dev_views
 
-    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
     urlpatterns += [
         path('api/dev/valhalla/status/', dev_views.valhalla_status, name='dev-valhalla-status'),
         path('api/dev/valhalla/route/', dev_views.valhalla_route, name='dev-valhalla-route'),

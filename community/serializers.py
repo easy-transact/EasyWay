@@ -28,6 +28,16 @@ class IncidentSerializer(serializers.ModelSerializer):
     # l'auteur a active mode_invisible : ce toggle est deja le levier de
     # consentement pour son identite, pas la peine d'un deuxieme mecanisme.
     reporter_name = serializers.SerializerMethodField()
+    # Id du createur (meme regle de masquage que reporter_name). Pas
+    # d'exception pour l'auteur lui-meme : ce serializer est mis en cache par
+    # cellule H3 et partage entre tous les demandeurs (cf. IncidentsProchesView),
+    # il ne peut donc pas dependre de request.user -- l'auteur retrouve ses
+    # propres signalements via /users/me/reports/.
+    reporter_id = serializers.SerializerMethodField()
+    # Nombre d'utilisateurs ayant confirme (= valide) le signalement : meme
+    # valeur que `confirmations`, nommee comme le front l'utilise dans le
+    # detail d'un signalement (cf. reunion du 29/09).
+    validations_count = serializers.IntegerField(source='confirmations', read_only=True)
     # Identifiant OSM de la voie + sens de circulation (cf. Incident.way_id_osm/
     # forward_osm) : cale au signalement via Valhalla /locate, utilise cote
     # serveur pour le matching par topologie sur /along-route/ (plutot qu'un
@@ -43,7 +53,7 @@ class IncidentSerializer(serializers.ModelSerializer):
             'id', 'type', 'subtype', 'lat', 'lon', 'heading', 'street_name', 'city',
             'confirmations', 'disputes', 'confidence_score', 'estimated_impact',
             'status', 'severity', 'expires_at', 'created_at', 'way_id', 'forward',
-            'reporter_name',
+            'reporter_name', 'reporter_id', 'validations_count',
         ]
         read_only_fields = fields
 
@@ -64,6 +74,12 @@ class IncidentSerializer(serializers.ModelSerializer):
         if incident.auteur.mode_invisible:
             return None
         return incident.auteur.nom_complet
+
+    @extend_schema_field(serializers.UUIDField(allow_null=True))
+    def get_reporter_id(self, incident):
+        if incident.auteur.mode_invisible:
+            return None
+        return str(incident.auteur_id)
 
 
 class IncidentModerationSerializer(IncidentSerializer):
@@ -88,6 +104,8 @@ class IncidentModerationSerializer(IncidentSerializer):
 class SousTypeIncidentSerializer(serializers.Serializer):
     value = serializers.CharField()
     label = serializers.CharField()
+    # Peut differer de celle du type (ex. CARAMBOLAGE 6h vs ACCIDENT 4h).
+    base_duration_minutes = serializers.IntegerField()
 
 
 class TypeIncidentSerializer(serializers.Serializer):
@@ -98,6 +116,9 @@ class TypeIncidentSerializer(serializers.Serializer):
     label = serializers.CharField()
     subtypes = SousTypeIncidentSerializer(many=True)
     base_duration_minutes = serializers.IntegerField()
+    # Hors agglomeration (ex. EMBOUTEILLAGE 45 min vs 30 en ville) ; egale a
+    # base_duration_minutes pour les types qui ne dependent pas du lieu.
+    base_duration_outside_city_minutes = serializers.IntegerField()
 
 
 class IncidentRetraitSerializer(serializers.Serializer):

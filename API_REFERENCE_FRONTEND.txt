@@ -256,7 +256,10 @@ Success 200:
   "notify_frequent_incidents": true,
   "notify_police_alerts": true,
   "notify_route_change": true,
-  "notify_news": true
+  "notify_news": true,
+  "auto_updates_enabled": true,
+  "loading_radius_km": 10,       // 1-20, use it as radius_km for incidents/nearby/
+  "invisible_mode": false        // same flag as PATCH users/me/ invisible_mode (either endpoint works)
 }
 Note: show_speed_limit (display the zone limit on the speedometer) and
 speed_tolerance_kmh (0-30, km/h above the limit before the alert fires) are
@@ -324,6 +327,29 @@ the Ville reference table (places app, 13k+ imported villages/towns) that
 powers places/search's "ville" result source (section 4.1). Don't confuse
 the two if you need an exhaustive city list — that's a places/search query,
 not this endpoint.
+
+------------------------------------------------------------
+3.2 POST waitlist/                         Auth: none (10 req/hour per IP)
+Pre-launch waitlist form — no account, no password is created.
+Request:
+{
+  "full_name": "Awa Ngono",                 // required
+  "phone": "677 00 11 22",                  // required, normalized to E.164
+  "email": "awa@example.com",               // optional
+  "city": "Douala",                         // optional
+  "profile": "AUTOMOBILISTE",               // optional (default) | CHAUFFEUR_PRO | FLOTTE | AGENCE_VOYAGE
+  "vehicle_type": "VOITURE",                // optional, same enum as register
+  "source": "landing-page"                  // optional free text (campaign, referrer...)
+}
+Success 201 (new) / 200 (phone already on the list, existing entry returned unchanged):
+{ "id": "<uuid>", "full_name": ..., "phone": "+237677001122", "email": ...,
+  "city": ..., "profile": ..., "vehicle_type": ..., "source": ..., "created_at": ... }
+Errors: 400 { "phone": ["..."] } for an invalid number; 429 when throttled.
+
+Staff (back-office, is_staff only):
+- GET staff/waitlist/?search=&profile=&contacted=&page=&page_size=
+  Paginated (count/next/previous/results), newest first; same fields + "contacted".
+- PATCH staff/waitlist/<id>/  { "contacted": true } -> 200 with the updated entry.
 
 
 ============================================================
@@ -672,8 +698,20 @@ INCIDENT OBJECT (shared shape, returned by every read endpoint below):
   "status": "EN_ATTENTE" | "ACTIF" | "EXPIRE" | "RETIRE" | "FUSIONNE",
   "severity": 1,
   "expires_at": "2026-08-27T13:00:00Z",
-  "created_at": "2026-08-27T12:00:00Z"
+  "created_at": "2026-08-27T12:00:00Z",
+  "way_id": 123456 | null, "forward": true | null,
+  "reporter_name": "..." | null, // null if the reporter enabled invisible mode
+  "reporter_id": "<uuid>" | null,// creator's user id, same masking rule as reporter_name
+  "validations_count": 3         // number of users who confirmed it (same value as confirmations)
 }
+Lifetime (expires_at) at creation, in minutes — then +10 per confirmation
+(capped at 3x the base) and -10 per dispute. Also served by
+GET incidents/types/ (base_duration_minutes, per-subtype
+subtypes[].base_duration_minutes, base_duration_outside_city_minutes):
+  ACCIDENT 240 (subtype CARAMBOLAGE 360)
+  EMBOUTEILLAGE 30 in town, 45 outside towns (decided server-side from
+    reverse geocoding; unknown -> 30)
+  ROUTE_BARREE 240, MAUVAIS_TEMPS 120, RADAR 480, other types 100
 Important: status alone is not authoritative for "is this still valid" —
 it only flips from ACTIF to EXPIRE via a periodic background job (up to
 ~60s of lag, longer if that job is down). Every list/detail endpoint below

@@ -15,7 +15,7 @@ from trips.services import client_locate
 from trips.services.disjoncteur import DisjoncteurOuvert
 
 from .cache_incidents import cle_cache_cellule, ecriture_recente, invalider_cache_cellule
-from .models import Incident, StatutIncident, TypeIncident, Vote
+from .models import Incident, SousTypeIncident, StatutIncident, TypeIncident, Vote
 from .services import PositionHorsRoute, QuotaDepasse, ServiceIncident
 from .tasks import expirer_incidents
 
@@ -42,11 +42,11 @@ def creer_incident(auteur, type_incident=TypeIncident.EMBOUTEILLAGE, lat=DOUALA_
     return Incident.objects.create(**valeurs)
 
 
-def patcher_nominatim_incident(test_case, libelle=None, ville=None):
+def patcher_nominatim_incident(test_case, libelle=None, ville=None, urbain=None):
     patcheur = patch('community.services.ClientNominatim')
     classe_simulee = patcheur.start()
     classe_simulee.return_value.inverser.return_value = (
-        {'label': libelle, 'city': ville or '', 'source': 'nominatim'} if libelle else None
+        {'label': libelle, 'city': ville or '', 'source': 'nominatim', 'urban': urbain} if libelle else None
     )
     test_case.addCleanup(patcheur.stop)
 
@@ -286,6 +286,62 @@ class ServiceIncidentSignalerTests(TestCase):
         patcher_locate_incident(self, effet_de_bord=DisjoncteurOuvert())
         incident, _ = ServiceIncident().signaler(creer_utilisateur(), TypeIncident.EMBOUTEILLAGE, self._point())
         self.assertIsNotNone(incident.id)
+
+
+class DureeDeVieSignalementTests(TestCase):
+    """Durees fixees en reunion du 29/09 : accident 4h, carambolage 6h,
+    embouteillage 30 min en ville / 45 min hors ville."""
+
+    def setUp(self):
+        patcher_locate_incident(self)
+        cache.clear()
+        self.auteur = creer_utilisateur()
+
+    def _signaler(self, type_incident, sous_type='', urbain=None):
+        patcher_nominatim_incident(self, libelle='Route', ville='Douala', urbain=urbain)
+        incident, _ = ServiceIncident().signaler(
+            self.auteur, type_incident, Point(DOUALA_LON, DOUALA_LAT, srid=4326), sous_type=sous_type
+        )
+        return incident
+
+    def _duree_minutes(self, incident):
+        return round((incident.expire_le - incident.cree_le).total_seconds() / 60)
+
+    def test_accident_4h_carambolage_6h(self):
+        self.assertEqual(self._duree_minutes(self._signaler(TypeIncident.ACCIDENT)), 240)
+        # Sinon le carambolage, meme type au meme endroit, corroborerait cet
+        # accident comme doublon au lieu de creer un incident.
+        Incident.objects.all().delete()
+        incident = self._signaler(TypeIncident.ACCIDENT, sous_type=SousTypeIncident.CARAMBOLAGE)
+        self.assertEqual(self._duree_minutes(incident), 360)
+
+    def test_embouteillage_en_ville_30_min(self):
+        incident = self._signaler(TypeIncident.EMBOUTEILLAGE, urbain=True)
+        self.assertTrue(incident.en_agglomeration)
+        self.assertEqual(self._duree_minutes(incident), 30)
+
+    def test_embouteillage_hors_ville_45_min(self):
+        incident = self._signaler(TypeIncident.EMBOUTEILLAGE, urbain=False)
+        self.assertFalse(incident.en_agglomeration)
+        self.assertEqual(self._duree_minutes(incident), 45)
+
+    def test_lieu_inconnu_retombe_sur_la_duree_en_ville(self):
+        self.assertEqual(self._duree_minutes(self._signaler(TypeIncident.EMBOUTEILLAGE)), 30)
+
+    def test_prolongation_par_vote_plafonnee_au_triple_de_la_duree_hors_ville(self):
+        incident = self._signaler(TypeIncident.EMBOUTEILLAGE, urbain=False)
+        for _ in range(20):
+            incident.confirmer(Vote(poids=Decimal('0')))
+        restant = (incident.expire_le - timezone.now()).total_seconds() / 60
+        self.assertAlmostEqual(restant, 45 * 3, delta=1)
+
+    def test_types_exposent_durees_par_sous_type_et_hors_ville(self):
+        types = {t['type']: t for t in self.client.get(reverse('community:incidents-types')).json()}
+        self.assertEqual(types['EMBOUTEILLAGE']['base_duration_minutes'], 30)
+        self.assertEqual(types['EMBOUTEILLAGE']['base_duration_outside_city_minutes'], 45)
+        sous_types = {s['value']: s['base_duration_minutes'] for s in types['ACCIDENT']['subtypes']}
+        self.assertEqual(sous_types['CARAMBOLAGE'], 360)
+        self.assertEqual(sous_types['ACCIDENT'], 240)
 
 
 class IncidentCreationApiTests(TestCase):
@@ -832,6 +888,18 @@ class IncidentDetailApiTests(TestCase):
         reponse = self.client.get(reverse('community:incident-detail', kwargs={'id': self.incident.id}))
         self.assertEqual(reponse.json()['estimated_impact'], 2)
 
+    def test_detail_inclut_createur_et_nombre_de_validations(self):
+        corps = self.client.get(reverse('community:incident-detail', kwargs={'id': self.incident.id})).json()
+        self.assertEqual(corps['reporter_id'], str(self.auteur.id))
+        self.assertEqual(corps['validations_count'], 3)
+
+    def test_createur_masque_en_mode_invisible(self):
+        self.auteur.mode_invisible = True
+        self.auteur.save(update_fields=['mode_invisible'])
+        corps = self.client.get(reverse('community:incident-detail', kwargs={'id': self.incident.id})).json()
+        self.assertIsNone(corps['reporter_id'])
+        self.assertIsNone(corps['reporter_name'])
+
     def test_incident_expire_introuvable(self):
         # Meme regle que /nearby/, /along-route/, /city/ : un incident dont la
         # periode de validite est passee ne doit reapparaitre nulle part,
@@ -953,6 +1021,22 @@ class VoteApiTests(TestCase):
             self._voter(incident, 'confirm', jetons=connecter(self.client, votant.telephone))
         self.auteur.refresh_from_db()
         self.assertEqual(self.auteur.score_reputation, Decimal('0.5'))
+
+    def test_bareme_points_1_par_signalement_valide_025_par_confirmation(self):
+        incident = creer_incident(self.auteur, statut=StatutIncident.EN_ATTENTE)
+        self._voter(incident, 'confirm')
+        for i in (2, 3):
+            votant = creer_utilisateur(f'votant{i}@easyway.local')
+            self._voter(incident, 'confirm', jetons=connecter(self.client, votant.telephone))
+        self.auteur.refresh_from_db()
+        self.votant.refresh_from_db()
+        self.assertEqual(self.auteur.points, Decimal('1'))
+        self.assertEqual(self.votant.points, Decimal('0.25'))
+
+    def test_infirmation_ne_rapporte_pas_de_points(self):
+        self._voter(creer_incident(self.auteur), 'dispute')
+        self.votant.refresh_from_db()
+        self.assertEqual(self.votant.points, Decimal('0'))
 
     def test_score_confiance_pondere_par_reputation(self):
         votant_fort = creer_utilisateur('fort@easyway.local', score_reputation=200)

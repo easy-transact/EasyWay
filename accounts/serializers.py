@@ -6,7 +6,18 @@ from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from .google_oauth import JetonGoogleInvalide, verifier_jeton_google
-from .models import Appareil, Droits, Formule, Parametres, Plateforme, TypeVehicule, Unite, Utilisateur
+from .models import (
+    Appareil,
+    Droits,
+    Formule,
+    InscriptionListeAttente,
+    Parametres,
+    Plateforme,
+    ProfilListeAttente,
+    TypeVehicule,
+    Unite,
+    Utilisateur,
+)
 from .utils import NumeroTelephoneInvalide, valider_et_normaliser_telephone
 
 # Les champs ci-dessous sont delibrement declares avec `source=` plutot que
@@ -44,6 +55,12 @@ class UtilisateurSerializer(serializers.ModelSerializer):
     reputation_score = serializers.DecimalField(
         source='score_reputation', max_digits=6, decimal_places=1, read_only=True
     )
+    # 1 a 5, par demi-etoile -- cf. Utilisateur.etoiles_reputation.
+    reputation_stars = serializers.FloatField(source='etoiles_reputation', read_only=True)
+    # Nombre JSON (pas une chaine comme les autres DecimalField de l'API) :
+    # etait un entier avant le passage aux 0,25 point, le client le lit
+    # deja comme un nombre.
+    points = serializers.FloatField(read_only=True)
     invisible_mode = serializers.BooleanField(source='mode_invisible', read_only=True)
     plan_limits = DroitsSerializer(source='droits', read_only=True)
 
@@ -51,7 +68,7 @@ class UtilisateurSerializer(serializers.ModelSerializer):
         model = Utilisateur
         fields = [
             'id', 'email', 'full_name', 'phone', 'city', 'vehicle_type',
-            'avatar_url', 'email_verified', 'plan', 'reputation_score', 'points',
+            'avatar_url', 'email_verified', 'plan', 'reputation_score', 'reputation_stars', 'points',
             'invisible_mode', 'plan_limits',
         ]
         read_only_fields = fields
@@ -110,6 +127,16 @@ class ParametresSerializer(serializers.ModelSerializer):
     notify_police_alerts = serializers.BooleanField(source='notif_alertes_police', required=False)
     notify_route_change = serializers.BooleanField(source='notif_changement_itineraire', required=False)
     notify_news = serializers.BooleanField(source='notif_nouveautes', required=False)
+    auto_updates_enabled = serializers.BooleanField(source='mises_a_jour_auto', required=False)
+    # Plafond = community.views.RAYON_KM_MAX (20 km, cf. reunion du 29/09) --
+    # pas importe : community.views importe deja ce module (import circulaire).
+    loading_radius_km = serializers.IntegerField(
+        source='rayon_chargement_km', required=False, min_value=1, max_value=20
+    )
+    # Colonne de Utilisateur (pas de Parametres) : deja modifiable via PATCH
+    # /users/me/, exposee ici aussi pour que l'ecran Parametres de l'appli
+    # lise/ecrive toutes ses bascules au meme endroit.
+    invisible_mode = serializers.BooleanField(source='utilisateur.mode_invisible', required=False)
 
     class Meta:
         model = Parametres
@@ -118,7 +145,15 @@ class ParametresSerializer(serializers.ModelSerializer):
             'voice_guidance_enabled', 'voice_language', 'units', 'speedometer_enabled', 'speed_alert_enabled',
             'show_speed_limit', 'speed_tolerance_kmh', 'notifications_enabled', 'notify_announcements', 'notify_frequent_incidents',
             'notify_police_alerts', 'notify_route_change', 'notify_news',
+            'auto_updates_enabled', 'loading_radius_km', 'invisible_mode',
         ]
+
+    def update(self, parametres, validated_data):
+        utilisateur = validated_data.pop('utilisateur', {})
+        if 'mode_invisible' in utilisateur:
+            parametres.utilisateur.mode_invisible = utilisateur['mode_invisible']
+            parametres.utilisateur.save(update_fields=['mode_invisible'])
+        return super().update(parametres, validated_data)
 
 
 class AppareilSerializer(serializers.ModelSerializer):
@@ -306,6 +341,9 @@ class UtilisateurModerationSerializer(serializers.ModelSerializer):
     reputation_score = serializers.DecimalField(
         source='score_reputation', max_digits=6, decimal_places=1, read_only=True
     )
+    reputation_stars = serializers.FloatField(source='etoiles_reputation', read_only=True)
+    # Solde a convertir en bons carburant cote back-office.
+    points = serializers.FloatField(read_only=True)
     is_banned = serializers.BooleanField(source='est_banni', read_only=True)
     banned_until = serializers.DateTimeField(source='banni_jusqu_a', read_only=True)
 
@@ -313,7 +351,7 @@ class UtilisateurModerationSerializer(serializers.ModelSerializer):
         model = Utilisateur
         fields = [
             'id', 'phone', 'full_name', 'email', 'city', 'plan', 'reputation_score',
-            'is_banned', 'banned_until', 'is_staff', 'date_joined',
+            'reputation_stars', 'points', 'is_banned', 'banned_until', 'is_staff', 'date_joined',
         ]
         read_only_fields = fields
 
@@ -321,3 +359,53 @@ class UtilisateurModerationSerializer(serializers.ModelSerializer):
 class BanUtilisateurSerializer(serializers.Serializer):
     # Absent/null = ban permanent (jusqu'a un debannir() explicite).
     until = serializers.DateTimeField(required=False, allow_null=True, default=None)
+
+
+class ListeAttenteSerializer(serializers.ModelSerializer):
+    """POST /api/waitlist/ (public). `phone` est declare explicitement : sans
+    ca ModelSerializer ajouterait un UniqueValidator sur telephone, alors
+    qu'un numero deja inscrit doit etre traite par la vue (200, pas 400)."""
+
+    full_name = serializers.CharField(source='nom_complet', max_length=150)
+    phone = serializers.CharField(source='telephone')
+    email = serializers.EmailField(required=False, allow_null=True, allow_blank=True)
+    city = serializers.CharField(source='ville', max_length=100, required=False, allow_null=True, allow_blank=True)
+    profile = serializers.ChoiceField(
+        choices=ProfilListeAttente.choices, source='profil', default=ProfilListeAttente.AUTOMOBILISTE
+    )
+    vehicle_type = serializers.ChoiceField(
+        choices=TypeVehicule.choices, source='type_vehicule', required=False, allow_null=True
+    )
+    source = serializers.CharField(max_length=100, required=False, allow_null=True, allow_blank=True)
+    created_at = serializers.DateTimeField(source='cree_le', read_only=True)
+
+    class Meta:
+        model = InscriptionListeAttente
+        fields = [
+            'id', 'full_name', 'phone', 'email', 'city', 'profile', 'vehicle_type', 'source', 'created_at',
+        ]
+        read_only_fields = ['id', 'created_at']
+
+    def validate_phone(self, phone):
+        try:
+            return valider_et_normaliser_telephone(phone)
+        except NumeroTelephoneInvalide as exc:
+            raise serializers.ValidationError(str(exc)) from exc
+
+    def validate_email(self, email):
+        return Utilisateur.objects.normalize_email(email) if email else None
+
+
+class ListeAttenteModerationSerializer(ListeAttenteSerializer):
+    """GET /api/staff/waitlist/ : l'inscription + son etat de suivi."""
+
+    contacted = serializers.BooleanField(source='contacte', read_only=True)
+
+    class Meta(ListeAttenteSerializer.Meta):
+        fields = ListeAttenteSerializer.Meta.fields + ['contacted']
+
+
+class ListeAttenteSuiviSerializer(serializers.Serializer):
+    """PATCH /api/staff/waitlist/<id>/ : marque une inscription recontactee."""
+
+    contacted = serializers.BooleanField(source='contacte')

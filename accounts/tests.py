@@ -1,4 +1,5 @@
 import itertools
+from decimal import Decimal
 
 from django.contrib.auth.tokens import default_token_generator
 from django.core.cache import cache
@@ -7,7 +8,7 @@ from django.urls import reverse
 from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_encode
 
-from .models import Appareil, Droits, Formule, Parametres, Utilisateur
+from .models import Appareil, Droits, Formule, InscriptionListeAttente, Parametres, Utilisateur
 from .tokens import email_verification_token
 
 MOT_DE_PASSE = 'CorrectHorse9!'
@@ -45,6 +46,14 @@ def connecter(client, identifiant, mot_de_passe=MOT_DE_PASSE):
         content_type='application/json',
     )
     return {'HTTP_AUTHORIZATION': f"Bearer {reponse.json()['tokens']['access']}"}
+
+
+class EtoilesReputationTests(TestCase):
+    def test_conversion_score_0_100_en_1_a_5_etoiles(self):
+        attendu = {'0': 1, '10': 1.5, '50': 3, '87': 4.5, '100': 5, '250': 5, '-3': 1}
+        for score, etoiles in attendu.items():
+            utilisateur = Utilisateur(score_reputation=Decimal(score))
+            self.assertEqual(utilisateur.etoiles_reputation(), Decimal(str(etoiles)), score)
 
 
 class DroitsTests(TestCase):
@@ -300,6 +309,33 @@ class CompteAuthentifieTests(TestCase):
         self.utilisateur.parametres.refresh_from_db()
         self.assertFalse(self.utilisateur.parametres.notif_nouveautes)
 
+    def test_parametres_maj_auto_rayon_et_mode_invisible(self):
+        reponse = self.client.patch(
+            reverse('accounts:moi-parametres'),
+            {'auto_updates_enabled': False, 'loading_radius_km': 15, 'invisible_mode': True},
+            content_type='application/json',
+            **self.jetons,
+        )
+        self.assertEqual(reponse.status_code, 200)
+        self.assertEqual(reponse.json()['loading_radius_km'], 15)
+        self.utilisateur.refresh_from_db()
+        self.assertTrue(self.utilisateur.mode_invisible)
+        self.assertFalse(self.utilisateur.parametres.mises_a_jour_auto)
+        self.assertEqual(self.utilisateur.parametres.rayon_chargement_km, 15)
+
+        reponse = self.client.get(reverse('accounts:moi-parametres'), **self.jetons)
+        self.assertTrue(reponse.json()['invisible_mode'])
+
+    def test_parametres_rayon_plafonne_a_20_km(self):
+        reponse = self.client.patch(
+            reverse('accounts:moi-parametres'),
+            {'loading_radius_km': 25},
+            content_type='application/json',
+            **self.jetons,
+        )
+        self.assertEqual(reponse.status_code, 400)
+        self.assertIn('loading_radius_km', reponse.json())
+
     def test_statistiques_stub(self):
         reponse = self.client.get(reverse('accounts:moi-statistiques'), **self.jetons)
         self.assertEqual(reponse.status_code, 200)
@@ -426,3 +462,62 @@ class UtilisateurModerationApiTests(TestCase):
         url = reverse('accounts:staff-utilisateur-bannir', kwargs={'id': self.cible.id})
         reponse = self.client.post(url, {}, content_type='application/json', **jetons)
         self.assertEqual(reponse.status_code, 403)
+
+
+class ListeAttenteTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.url = reverse('accounts:liste-attente')
+
+    def _inscrire(self, **donnees):
+        corps = {'full_name': 'Awa Ngono', 'phone': '677 00 11 22', **donnees}
+        return self.client.post(self.url, corps, content_type='application/json')
+
+    def test_inscription_publique_normalise_le_telephone(self):
+        reponse = self._inscrire(profile='AGENCE_VOYAGE', city='Douala', email='Awa@Example.COM')
+        self.assertEqual(reponse.status_code, 201)
+        corps = reponse.json()
+        self.assertEqual(corps['phone'], '+237677001122')
+        self.assertEqual(corps['profile'], 'AGENCE_VOYAGE')
+        self.assertEqual(corps['email'], 'Awa@example.com')
+        self.assertEqual(InscriptionListeAttente.objects.count(), 1)
+
+    def test_numero_deja_inscrit_retourne_200_sans_doublon(self):
+        self._inscrire()
+        reponse = self._inscrire(phone='+237677001122', full_name='Autre Nom')
+        self.assertEqual(reponse.status_code, 200)
+        self.assertEqual(reponse.json()['full_name'], 'Awa Ngono')
+        self.assertEqual(InscriptionListeAttente.objects.count(), 1)
+
+    def test_telephone_invalide_rejete(self):
+        reponse = self._inscrire(phone='123')
+        self.assertEqual(reponse.status_code, 400)
+        self.assertIn('phone', reponse.json())
+
+    def test_profil_par_defaut_automobiliste(self):
+        self.assertEqual(self._inscrire().json()['profile'], 'AUTOMOBILISTE')
+
+    def test_liste_staff_filtre_et_suivi(self):
+        self._inscrire()
+        self._inscrire(phone='677001133', full_name='Flotte SARL', profile='FLOTTE')
+
+        normal = creer_utilisateur(email='normal@easyway.local')
+        reponse = self.client.get(reverse('accounts:staff-liste-attente'), **connecter(self.client, normal.telephone))
+        self.assertEqual(reponse.status_code, 403)
+
+        staff = creer_utilisateur(email='staff@easyway.local', is_staff=True)
+        auth = connecter(self.client, staff.telephone)
+        reponse = self.client.get(reverse('accounts:staff-liste-attente') + '?profile=FLOTTE', **auth)
+        self.assertEqual(reponse.status_code, 200)
+        resultats = reponse.json()['results']
+        self.assertEqual([r['full_name'] for r in resultats], ['Flotte SARL'])
+        self.assertFalse(resultats[0]['contacted'])
+
+        reponse = self.client.patch(
+            reverse('accounts:staff-liste-attente-suivi', args=[resultats[0]['id']]),
+            {'contacted': True}, content_type='application/json', **auth,
+        )
+        self.assertEqual(reponse.status_code, 200)
+        self.assertTrue(reponse.json()['contacted'])
+        reponse = self.client.get(reverse('accounts:staff-liste-attente') + '?contacted=false', **auth)
+        self.assertEqual([r['full_name'] for r in reponse.json()['results']], ['Awa Ngono'])

@@ -26,13 +26,13 @@ from .cache_incidents import (
     invalider_cache_cellule,
 )
 from .models import (
-    DUREE_VIE_BASE_PAR_TYPE,
     SOUS_TYPES_PAR_TYPE,
     Incident,
     SensVote,
     StatutIncident,
     TypeIncident,
     Vote,
+    duree_de_vie_base,
 )
 from .serializers import (
     IncidentAvecDoublonSerializer,
@@ -478,8 +478,10 @@ class IncidentsParVilleView(APIView):
         "Reference statique (types/sous-types valides pour POST /api/incidents/, "
         "cf. IncidentCreationSerializer.validate) et duree de vie de base en minutes "
         "avant expiration (avant prolongation eventuelle par confirmation, cf. "
-        "Incident.confirmer -- plafonnee au triple de cette valeur). Permet au client "
-        "de ne plus la recopier a la main."
+        "Incident.confirmer -- plafonnee au triple de cette valeur). La duree peut "
+        "dependre du sous-type (subtypes[].base_duration_minutes, ex. CARAMBOLAGE) et "
+        "du lieu (base_duration_outside_city_minutes, ex. EMBOUTEILLAGE hors ville). "
+        "Permet au client de ne plus la recopier a la main."
     ),
     responses={200: TypeIncidentSerializer(many=True)},
 )
@@ -492,10 +494,15 @@ class TypesIncidentView(APIView):
                 'type': type_incident,
                 'label': type_incident.label,
                 'subtypes': [
-                    {'value': sous_type, 'label': sous_type.label}
+                    {
+                        'value': sous_type,
+                        'label': sous_type.label,
+                        'base_duration_minutes': duree_de_vie_base(type_incident, sous_type),
+                    }
                     for sous_type in SOUS_TYPES_PAR_TYPE.get(type_incident, [])
                 ],
-                'base_duration_minutes': DUREE_VIE_BASE_PAR_TYPE.get(type_incident, 60),
+                'base_duration_minutes': duree_de_vie_base(type_incident),
+                'base_duration_outside_city_minutes': duree_de_vie_base(type_incident, en_agglomeration=False),
             }
             for type_incident in TypeIncident
         ]

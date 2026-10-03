@@ -22,12 +22,12 @@ from trips.services.disjoncteur import DisjoncteurOuvert
 
 from .cache_incidents import invalider_cache_cellule
 from .models import (
-    DUREE_VIE_BASE_PAR_TYPE,
     RESOLUTION_H3_FIN,
     Incident,
     SensVote,
     StatutIncident,
     Vote,
+    duree_de_vie_base,
 )
 
 
@@ -97,6 +97,7 @@ class ServiceIncident:
                 incident, est_doublon = doublon, True
             else:
                 geocodage = self._geocoder_inverse(position)
+                en_agglomeration = geocodage.get('urban') if geocodage else None
                 incident = Incident.objects.create(
                     auteur=utilisateur,
                     type=type_incident,
@@ -108,13 +109,14 @@ class ServiceIncident:
                     nom_voie=geocodage['label'] if geocodage else '',
                     ville=geocodage['city'] if geocodage else '',
                     ville_normalisee=normaliser(geocodage['city']) if geocodage and geocodage['city'] else '',
+                    en_agglomeration=en_agglomeration,
                     # Toujours EN_ATTENTE a la creation, quelle que soit la reputation
                     # de l'auteur : promu ACTIF par Incident.confirmer() une fois le
                     # score de confiance corrobore par d'autres utilisateurs
                     # (seuil reduit si l'auteur est deja repute, cf. seuil_validation()).
                     statut=StatutIncident.EN_ATTENTE,
                     expire_le=timezone.now() + timezone.timedelta(
-                        minutes=DUREE_VIE_BASE_PAR_TYPE.get(type_incident, 60)
+                        minutes=duree_de_vie_base(type_incident, sous_type, en_agglomeration)
                     ),
                 )
                 est_doublon = False

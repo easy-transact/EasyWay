@@ -5,7 +5,10 @@ import h3
 from django.conf import settings
 from django.contrib.gis.db import models as gis_models
 from django.db import models
+from django.db.models import F
 from django.utils import timezone
+
+from accounts.models import Utilisateur
 
 RESOLUTION_H3_FIN = 8  # ~460m de cote -- rayon de recherche des doublons (150m),
 # et depuis le passage de /proches/ en resolution 8, fenetre de requete/cache
@@ -110,16 +113,42 @@ class SensVote(models.TextChoices):
     INFIRMATION = 'INFIRMATION', 'Infirmation'
 
 
+# Durees de vie de base, en minutes, avant prolongation/reduction par les
+# votes (cf. Incident.confirmer/infirmer). ACCIDENT/EMBOUTEILLAGE fixes en
+# reunion du 29/09 : accident 4h, carambolage 6h (sous-type, cf.
+# DUREE_VIE_PAR_SOUS_TYPE), embouteillage 30 min en ville / 45 min hors
+# ville (cf. DUREE_VIE_HORS_AGGLOMERATION) -- un bouchon de rase campagne
+# met plus longtemps a se resorber, faute d'itineraire de delestage.
 DUREE_VIE_BASE_PAR_TYPE = {
     TypeIncident.DANGER: 100,
     TypeIncident.POLICE: 100,
-    TypeIncident.EMBOUTEILLAGE: 100,
-    TypeIncident.ACCIDENT: 100,
+    TypeIncident.EMBOUTEILLAGE: 30,
+    TypeIncident.ACCIDENT: 240,
     TypeIncident.ROUTE_BARREE: 240,
     TypeIncident.VOIE_BLOQUEE: 100,
     TypeIncident.MAUVAIS_TEMPS: 120,
     TypeIncident.RADAR: 480,
 }
+DUREE_VIE_PAR_SOUS_TYPE = {
+    SousTypeIncident.CARAMBOLAGE: 360,
+}
+# Remplace DUREE_VIE_BASE_PAR_TYPE quand le signalement est hors agglomeration
+# (Incident.en_agglomeration=False). Inconnu (None, Nominatim indisponible)
+# = valeur en ville : la plupart des signalements sont urbains, et les votes
+# prolongent de toute facon un incident qui dure.
+DUREE_VIE_HORS_AGGLOMERATION = {
+    TypeIncident.EMBOUTEILLAGE: 45,
+}
+
+
+def duree_de_vie_base(type_incident, sous_type='', en_agglomeration=None) -> int:
+    """Duree de vie de base (minutes) d'un signalement : le sous-type prime
+    (ex. carambolage), puis le lieu (hors agglomeration), puis le type."""
+    if sous_type in DUREE_VIE_PAR_SOUS_TYPE:
+        return DUREE_VIE_PAR_SOUS_TYPE[sous_type]
+    if en_agglomeration is False and type_incident in DUREE_VIE_HORS_AGGLOMERATION:
+        return DUREE_VIE_HORS_AGGLOMERATION[type_incident]
+    return DUREE_VIE_BASE_PAR_TYPE.get(type_incident, 60)
 
 # Seuil de score_confiance (somme des poids de vote, cf. Utilisateur.poids_de_vote)
 # a atteindre pour qu'un signalement EN_ATTENTE passe ACTIF et devienne visible
@@ -132,12 +161,14 @@ SEUIL_REPUTATION_PALIER_REDUCTION = Decimal('3')
 # Gain de reputation de l'auteur a chaque signalement qui atteint le seuil
 # de validation ci-dessus (un "bon signalement").
 POINTS_REPUTATION_PAR_VALIDATION = Decimal('0.5')
-# Utilisateur.points : compteur de gamification distinct de score_reputation
-# (qui mesure specifiquement la fiabilite des signalements et pese les votes,
-# cf. poids_de_vote) -- points recompense l'engagement general (cf. aussi
-# POINTS_PAR_TRAJET_TERMINE, trips/models.py), affiche mais sans effet sur le
-# fonctionnement du systeme.
-POINTS_PAR_SIGNALEMENT_VALIDE = 5
+# Utilisateur.points : points de recompense (convertis en bons carburant via
+# une station partenaire), distincts de score_reputation (fiabilite des
+# signalements, pese les votes, cf. poids_de_vote) -- sans effet sur le
+# fonctionnement du systeme. Bareme fixe en reunion du 29/09 : 1 point par
+# signalement personnel valide par la communaute, 0,25 par confirmation du
+# signalement d'un autre (vote ou re-signalement d'un doublon).
+POINTS_PAR_SIGNALEMENT_VALIDE = Decimal('1')
+POINTS_PAR_VALIDATION_TIERCE = Decimal('0.25')
 
 
 class Incident(models.Model):
@@ -162,6 +193,11 @@ class Incident(models.Model):
     # Lieu.nom_normalise : permet un filtre par ville insensible a la casse
     # et aux accents sans extension Postgres (unaccent) supplementaire.
     ville_normalisee = models.CharField(max_length=255, blank=True)
+    # En ville (True) ou hors agglomeration (False), deduit du geocodage
+    # inverse au signalement (cf. client_nominatim._est_en_agglomeration) --
+    # module la duree de vie (cf. duree_de_vie_base). None si Nominatim etait
+    # indisponible, ou pour un incident anterieur a cette colonne.
+    en_agglomeration = models.BooleanField(null=True, blank=True)
     # Cales sur le graphe routier Valhalla au signalement (cf.
     # ServiceIncident._verifier_position_routiere) : identifiant de voie OSM
     # + sens de circulation dessus. Remplace le matching par distance pure
@@ -216,7 +252,7 @@ class Incident(models.Model):
         super().save(*args, **kwargs)
 
     def duree_de_base(self):
-        return DUREE_VIE_BASE_PAR_TYPE.get(self.type, 60)
+        return duree_de_vie_base(self.type, self.sous_type, self.en_agglomeration)
 
     def est_actif(self) -> bool:
         return self.statut == StatutIncident.ACTIF
@@ -237,6 +273,11 @@ class Incident(models.Model):
         return SEUIL_CONFIANCE_VALIDATION
 
     def confirmer(self, vote: 'Vote'):
+        # F() plutot qu'un += sur vote.votant : l'instance de l'appelant
+        # (request.user) n'a pas a etre verrouillee pour ce simple compteur.
+        Utilisateur.objects.filter(pk=vote.votant_id).update(
+            points=F('points') + POINTS_PAR_VALIDATION_TIERCE
+        )
         self.confirmations += 1
         self.score_confiance += vote.poids
         # Prolongation plafonnee au triple de la duree de base (section 4.5).
@@ -257,8 +298,12 @@ class Incident(models.Model):
             # gamification (cf. POINTS_PAR_SIGNALEMENT_VALIDE, deux compteurs
             # distincts -- l'un pese les votes, l'autre est juste affiche).
             self.auteur.score_reputation += POINTS_REPUTATION_PAR_VALIDATION
-            self.auteur.points += POINTS_PAR_SIGNALEMENT_VALIDE
-            self.auteur.save(update_fields=['score_reputation', 'points'])
+            self.auteur.save(update_fields=['score_reputation'])
+            # F() : un save() de self.auteur.points ecraserait les 0,25
+            # gagnes entre-temps par l'auteur en confirmant d'autres signalements.
+            Utilisateur.objects.filter(pk=self.auteur_id).update(
+                points=F('points') + POINTS_PAR_SIGNALEMENT_VALIDE
+            )
         self.save(update_fields=champs)
 
     def infirmer(self, vote: 'Vote'):

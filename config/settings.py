@@ -146,6 +146,7 @@ REST_FRAMEWORK = {
         'inscription': '10/hour',
         'connexion': '20/hour',
         'mot-de-passe': '5/hour',
+        'liste-attente': '10/hour',
     },
 }
 

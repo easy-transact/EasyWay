@@ -31,6 +31,11 @@ class Unite(models.TextChoices):
     MILES = 'MI', 'Miles'
 
 
+# Echelle interne de score_reputation convertie en etoiles (cf.
+# Utilisateur.etoiles_reputation) -- au-dela, toujours 5 etoiles.
+SCORE_REPUTATION_MAX = Decimal('100')
+
+
 class UtilisateurManager(BaseUserManager):
     use_in_migrations = True
 
@@ -87,7 +92,10 @@ class Utilisateur(AbstractBaseUser, PermissionsMixin):
     # Part a 0 (nouveau compte) et progresse par +0.5 a chaque signalement
     # de l'utilisateur valide par la communaute (cf. Incident.confirmer).
     score_reputation = models.DecimalField(max_digits=6, decimal_places=1, default=Decimal('0'))
-    points = models.IntegerField(default=0)
+    # Points de recompense (bons carburant, cf. reunion du 29/09) -- decimal
+    # pour les 0,25 point par validation d'un signalement tiers (cf.
+    # community.models.POINTS_PAR_VALIDATION_TIERCE).
+    points = models.DecimalField(max_digits=8, decimal_places=2, default=Decimal('0'))
 
     est_banni = models.BooleanField(default=False)
     banni_jusqu_a = models.DateTimeField(null=True, blank=True)
@@ -130,6 +138,13 @@ class Utilisateur(AbstractBaseUser, PermissionsMixin):
         # basse 0,2 conservee si un malus de reputation est introduit un jour.
         poids = Decimal('1') + (self.score_reputation * Decimal('0.15'))
         return max(Decimal('0.2'), min(Decimal('2.0'), poids))
+
+    def etoiles_reputation(self) -> Decimal:
+        """Affichage de score_reputation (echelle interne 0-100, plafonnee)
+        en 1 a 5 etoiles, arrondi a la demi-etoile : 0 -> 1, 50 -> 3, 100+ -> 5."""
+        score = max(Decimal('0'), min(SCORE_REPUTATION_MAX, self.score_reputation))
+        etoiles = 1 + 4 * score / SCORE_REPUTATION_MAX
+        return (etoiles * 2).quantize(Decimal('1')) / 2
 
     def peut_signaler(self):
         return self.is_active and not self.est_banni
@@ -179,6 +194,14 @@ class Parametres(models.Model):
     notif_alertes_police = models.BooleanField(default=True)
     notif_changement_itineraire = models.BooleanField(default=True)
     notif_nouveautes = models.BooleanField(default=True)
+
+    # Mise a jour automatique de l'appli/des donnees hors ligne (applique
+    # cote client) -- stocke ici pour suivre l'utilisateur d'un appareil a
+    # l'autre, comme le reste des preferences.
+    mises_a_jour_auto = models.BooleanField(default=True)
+    # Rayon de chargement des incidents autour de l'utilisateur (cf.
+    # radius_km de /incidents/nearby/, meme defaut et meme plafond).
+    rayon_chargement_km = models.PositiveSmallIntegerField(default=10)
 
     class Meta:
         db_table = 'parametres'
@@ -241,3 +264,42 @@ class Droits(models.Model):
             'routage_avance': self.routage_avance,
             'packs_hors_ligne': self.packs_hors_ligne,
         }.get(fonction, False)
+
+
+class ProfilListeAttente(models.TextChoices):
+    AUTOMOBILISTE = 'AUTOMOBILISTE', 'Automobiliste'
+    CHAUFFEUR_PRO = 'CHAUFFEUR_PRO', 'Chauffeur professionnel (taxi, moto-taxi, VTC)'
+    FLOTTE = 'FLOTTE', 'Gestionnaire de flotte / entreprise'
+    AGENCE_VOYAGE = 'AGENCE_VOYAGE', 'Agence de voyage'
+
+
+class InscriptionListeAttente(models.Model):
+    """Pre-inscription avant ouverture publique de l'application (formulaire
+    du site vitrine) -- distincte de Utilisateur : aucun mot de passe, aucun
+    compte cree, juste de quoi recontacter la personne au lancement. Le
+    telephone (forme E.164, cf. accounts.utils) est la cle d'unicite, comme
+    pour Utilisateur : une deuxieme soumission du meme numero ne cree pas de
+    doublon."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    nom_complet = models.CharField(max_length=150)
+    telephone = models.CharField(max_length=20, unique=True)
+    email = models.EmailField(null=True, blank=True)
+    ville = models.CharField(max_length=100, null=True, blank=True)
+    profil = models.CharField(
+        max_length=20, choices=ProfilListeAttente.choices, default=ProfilListeAttente.AUTOMOBILISTE
+    )
+    type_vehicule = models.CharField(max_length=20, choices=TypeVehicule.choices, null=True, blank=True)
+    # Ou la personne a trouve le formulaire (site, campagne, parrain...) -- libre.
+    source = models.CharField(max_length=100, null=True, blank=True)
+    cree_le = models.DateTimeField(auto_now_add=True)
+    # Coche depuis le back-office une fois la personne invitee/recontactee.
+    contacte = models.BooleanField(default=False)
+
+    class Meta:
+        db_table = 'inscription_liste_attente'
+        ordering = ['-cree_le']
+        indexes = [models.Index(fields=['profil', 'contacte'])]
+
+    def __str__(self):
+        return f"{self.nom_complet} ({self.telephone})"

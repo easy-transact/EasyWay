@@ -41,6 +41,19 @@ def _extraire_ville(adresse: dict) -> str:
     return PREFIXE_COMMUNAUTE_URBAINE.sub('', ville).strip()
 
 
+# Cles d'adresse Nominatim propres a une agglomeration (ville/bourg et leurs
+# quartiers). `municipality` exclu volontairement : au Cameroun c'est la
+# commune, qui couvre aussi la campagne alentour (cf. _extraire_ville).
+CLES_AGGLOMERATION = ('city', 'town', 'city_district', 'suburb', 'quarter', 'neighbourhood')
+
+
+def _est_en_agglomeration(adresse: dict) -> bool:
+    """True si le point est en ville (ou bourg), False en rase campagne
+    (seulement village/hameau/commune, ou aucune localite) -- module la duree
+    de vie d'un embouteillage (cf. community.models.duree_de_vie_base)."""
+    return any(adresse.get(cle) for cle in CLES_AGGLOMERATION)
+
+
 def _normaliser(objet: dict) -> dict:
     adresse = objet.get('address', {})
     ville = _extraire_ville(adresse)
@@ -59,6 +72,7 @@ def _normaliser(objet: dict) -> dict:
         'distance_m': None,
         'source': 'nominatim',
         'city': ville,
+        'urban': _est_en_agglomeration(adresse),
     }
 
 

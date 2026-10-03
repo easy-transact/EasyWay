@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
 
-from .models import Appareil, Droits, Parametres, Utilisateur
+from .models import Appareil, Droits, InscriptionListeAttente, Parametres, Utilisateur
 
 
 @admin.register(Utilisateur)
@@ -31,6 +31,14 @@ class DroitsAdmin(admin.ModelAdmin):
         'formule', 'max_adresses_enregistrees', 'publicite_active',
         'routage_avance', 'packs_hors_ligne', 'retention_historique_jours',
     ]
+
+
+@admin.register(InscriptionListeAttente)
+class InscriptionListeAttenteAdmin(admin.ModelAdmin):
+    list_display = ['nom_complet', 'telephone', 'email', 'ville', 'profil', 'cree_le', 'contacte']
+    list_filter = ['profil', 'contacte', 'type_vehicule']
+    list_editable = ['contacte']
+    search_fields = ['nom_complet', 'telephone', 'email', 'ville']
 
 
 admin.site.register(Parametres)

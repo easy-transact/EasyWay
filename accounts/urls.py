@@ -53,8 +53,17 @@ urlpatterns = [
     # Configuration publique
     path('config/', views.ConfigView.as_view(), name='config'),
 
+    # Liste d'attente (pre-inscription publique, sans compte)
+    path('waitlist/', views.ListeAttenteView.as_view(), name='liste-attente'),
+
     # Back-office (moderation, reserve au staff)
     path('staff/users/', views.UtilisateurModerationListView.as_view(), name='staff-utilisateurs'),
     path('staff/users/<uuid:id>/ban/', views.UtilisateurBanView.as_view(), name='staff-utilisateur-bannir'),
     path('staff/users/<uuid:id>/unban/', views.UtilisateurUnbanView.as_view(), name='staff-utilisateur-debannir'),
+    path('staff/waitlist/', views.ListeAttenteModerationListView.as_view(), name='staff-liste-attente'),
+    path(
+        'staff/waitlist/<uuid:id>/',
+        views.ListeAttenteSuiviView.as_view(),
+        name='staff-liste-attente-suivi',
+    ),
 ]

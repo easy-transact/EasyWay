@@ -28,7 +28,7 @@ from trips.models import StatutTrajet, Trajet
 
 from .config_data import VERSION_MINIMALE_APP, VILLES_DISPONIBLES
 from .emails import envoyer_email_reinitialisation, envoyer_email_verification
-from .models import Appareil, Parametres, TypeVehicule, Utilisateur
+from .models import Appareil, InscriptionListeAttente, Parametres, ProfilListeAttente, TypeVehicule, Utilisateur
 from .pagination import StaffPagination
 from .serializers import (
     AppareilSerializer,
@@ -41,6 +41,9 @@ from .serializers import (
     ExisteSerializer,
     InscriptionSerializer,
     JetonsSerializer,
+    ListeAttenteModerationSerializer,
+    ListeAttenteSerializer,
+    ListeAttenteSuiviSerializer,
     MessageSerializer,
     ParametresSerializer,
     UtilisateurMiseAJourSerializer,
@@ -585,3 +588,99 @@ class UtilisateurUnbanView(APIView):
         utilisateur = get_object_or_404(Utilisateur, id=id)
         utilisateur.debannir()
         return Response(UtilisateurModerationSerializer(utilisateur).data)
+
+
+@extend_schema(
+    tags=['Waitlist'],
+    summary="S'inscrire sur la liste d'attente",
+    description=(
+        "Public, sans compte. Le telephone est normalise (E.164) et sert de cle "
+        "d'unicite : 201 a la premiere inscription, 200 avec l'inscription existante "
+        "(inchangee) si ce numero est deja inscrit."
+    ),
+    request=ListeAttenteSerializer,
+    responses={201: ListeAttenteSerializer, 200: ListeAttenteSerializer},
+)
+class ListeAttenteView(APIView):
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'liste-attente'
+
+    def post(self, request):
+        serializer = ListeAttenteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        existante = InscriptionListeAttente.objects.filter(
+            telephone=serializer.validated_data['telephone']
+        ).first()
+        if existante:
+            return Response(ListeAttenteSerializer(existante).data, status=status.HTTP_200_OK)
+
+        inscription = serializer.save()
+        return Response(ListeAttenteSerializer(inscription).data, status=status.HTTP_201_CREATED)
+
+
+@extend_schema(
+    tags=['Staff Waitlist'],
+    summary="Lister la liste d'attente",
+    description=(
+        "Reserve au staff (is_staff). `search` filtre (icontains) sur telephone/nom/"
+        "email/ville ; `profile` filtre sur le profil ; `contacted=true`/`false` sur "
+        "l'etat de suivi. Plus recentes d'abord."
+    ),
+    parameters=[
+        OpenApiParameter('search', OpenApiTypes.STR),
+        OpenApiParameter('profile', OpenApiTypes.STR, enum=ProfilListeAttente.values),
+        OpenApiParameter('contacted', OpenApiTypes.BOOL),
+        OpenApiParameter('page', OpenApiTypes.INT),
+        OpenApiParameter('page_size', OpenApiTypes.INT),
+    ],
+    responses={200: ListeAttenteModerationSerializer(many=True)},
+)
+class ListeAttenteModerationListView(APIView):
+    permission_classes = [IsAdminUser]
+    pagination_class = StaffPagination
+
+    def get(self, request):
+        inscriptions = InscriptionListeAttente.objects.all()
+
+        recherche = request.query_params.get('search', '').strip()
+        if recherche:
+            inscriptions = inscriptions.filter(
+                Q(telephone__icontains=recherche)
+                | Q(nom_complet__icontains=recherche)
+                | Q(email__icontains=recherche)
+                | Q(ville__icontains=recherche)
+            )
+
+        profil = request.query_params.get('profile')
+        if profil:
+            inscriptions = inscriptions.filter(profil=profil)
+
+        contacte = request.query_params.get('contacted')
+        if contacte is not None:
+            inscriptions = inscriptions.filter(contacte=contacte.lower() == 'true')
+
+        paginateur = self.pagination_class()
+        page = paginateur.paginate_queryset(inscriptions.order_by('-cree_le'), request)
+        return paginateur.get_paginated_response(ListeAttenteModerationSerializer(page, many=True).data)
+
+
+@extend_schema(
+    tags=['Staff Waitlist'],
+    summary="Marquer une inscription comme recontactee",
+    description='Reserve au staff (is_staff).',
+    request=ListeAttenteSuiviSerializer,
+    responses={200: ListeAttenteModerationSerializer},
+)
+class ListeAttenteSuiviView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def patch(self, request, id):
+        serializer = ListeAttenteSuiviSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        inscription = get_object_or_404(InscriptionListeAttente, id=id)
+        inscription.contacte = serializer.validated_data['contacte']
+        inscription.save(update_fields=['contacte'])
+        return Response(ListeAttenteModerationSerializer(inscription).data)
