@@ -6,6 +6,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import environ
+from django.core.exceptions import ImproperlyConfigured
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -82,6 +83,9 @@ MIDDLEWARE = [
     # cache par URL seule, sans tenir compte d'Authorization -- doit tourner
     # avant tout middleware qui pourrait court-circuiter la reponse.
     'config.middleware.NoStoreApiMiddleware',
+    # Apres NoStoreApiMiddleware/CorsMiddleware : un 401 de signature garde
+    # ainsi no-store et les en-tetes CORS. cf. config/signature_hmac.py.
+    'config.signature_hmac.SignatureHmacMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -197,7 +201,39 @@ CORS_ALLOWED_ORIGINS = env.list(
 # meme qu'elle atteigne Django.
 from corsheaders.defaults import default_headers  # noqa: E402
 
-CORS_ALLOW_HEADERS = list(default_headers) + ['idempotency-key']
+CORS_ALLOW_HEADERS = list(default_headers) + [
+    'idempotency-key', 'x-ew-key-id', 'x-ew-timestamp', 'x-ew-nonce', 'x-ew-signature',
+]
+
+# Signature HMAC des requetes de l'app mobile (cf. config/signature_hmac.py).
+# HMAC_MODE : off | log | enforce. Deploiement conseille : "log" tant que
+# des versions de l'appli sans signature circulent (les echecs sont
+# journalises sans bloquer), puis "enforce".
+HMAC_MODE = env('HMAC_MODE', default='off')
+# "v1=<secret>,v2=<secret>" -- plusieurs cles actives a la fois pour une
+# rotation sans couper les anciennes versions de l'appli.
+HMAC_CLES = env.dict('HMAC_CLES', default={})
+# Ecart tolere entre l'horloge du telephone et celle du serveur.
+HMAC_TOLERANCE_S = env.int('HMAC_TOLERANCE_S', default=300)
+# Clients qui ne peuvent pas garder un secret (navigateur : back-office,
+# formulaire de liste d'attente du site) ou endpoints sans interet a signer
+# (documentation). login/refresh : le back-office s'y connecte aussi ; deja
+# proteges par mot de passe + throttling.
+HMAC_CHEMINS_EXEMPTES = [
+    '/api/staff/',
+    '/api/auth/login/',
+    '/api/auth/refresh/',
+    '/api/waitlist/',
+    '/api/infractions/categories/',
+    '/api/docs/',
+    '/api/schema/',
+    '/api/redoc/',
+    '/api/dev/',
+]
+if HMAC_MODE not in ('off', 'log', 'enforce'):
+    raise ImproperlyConfigured(f"HMAC_MODE doit valoir off, log ou enforce (recu : {HMAC_MODE!r}).")
+if HMAC_MODE != 'off' and not HMAC_CLES:
+    raise ImproperlyConfigured('HMAC_MODE active sans aucune cle dans HMAC_CLES.')
 
 # Routage (ClientValhalla, trips/services/) : instance Valhalla du
 # docker-compose local, ou service manage si deploye separement.

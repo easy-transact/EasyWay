@@ -1,0 +1,121 @@
+"""Signature HMAC des requetes app mobile -> API (cf. reunion du 29/09).
+
+Chaque requete /api/ porte quatre en-tetes :
+    X-EW-Key-Id     identifiant de la cle (ex. "v1") -- permet une rotation
+                    sans casser les versions de l'appli encore installees
+    X-EW-Timestamp  secondes Unix au moment de l'envoi
+    X-EW-Nonce      valeur aleatoire unique par requete (16 a 64 caracteres)
+    X-EW-Signature  hex(HMAC-SHA256(cle, chaine_canonique))
+
+    chaine_canonique = METHODE + "\\n" + CHEMIN_ET_QUERY + "\\n" + TIMESTAMP
+                       + "\\n" + NONCE + "\\n" + hex(SHA256(corps))
+
+CHEMIN_ET_QUERY : exactement tels qu'envoyes, sans schema ni hote (ex.
+"/api/incidents/nearby/?lat=4.05&lon=9.7"). Corps multipart (televersement
+d'avatar) : "UNSIGNED-PAYLOAD" a la place du hash -- un client mobile n'a
+pas acces aux octets exacts d'un FormData (boundary generee par la couche
+reseau).
+
+Ce que ca protege : requete alteree en transit, rejeu d'une requete
+capturee (fenetre de HMAC_TOLERANCE_S + nonce a usage unique), scripts qui
+appellent l'API sans passer par l'appli. Ce que ca NE protege PAS : la cle
+est embarquee dans l'appli, donc extractible par quelqu'un de determine --
+c'est une barriere supplementaire, pas une authentification (le JWT reste
+l'authentification, HTTPS reste le chiffrement).
+
+HMAC_MODE : "off" (rien), "log" (verifie et journalise les echecs sans
+bloquer -- a utiliser le temps que toutes les versions de l'appli signent),
+"enforce" (401 si la signature est absente/invalide).
+"""
+
+import hashlib
+import hmac
+import logging
+import re
+import time
+
+from django.conf import settings
+from django.core.cache import cache
+from django.http import JsonResponse
+
+journal = logging.getLogger('easyway.signature_hmac')
+
+MODES = ('off', 'log', 'enforce')
+CORPS_NON_SIGNE = 'UNSIGNED-PAYLOAD'
+FORMAT_NONCE = re.compile(r'^[A-Za-z0-9_-]{16,64}$')
+
+
+class SignatureInvalide(Exception):
+    pass
+
+
+def chaine_canonique(methode: str, chemin: str, timestamp: str, nonce: str, empreinte_corps: str) -> str:
+    return '\n'.join([methode.upper(), chemin, timestamp, nonce, empreinte_corps])
+
+
+def empreinte_corps(corps: bytes, content_type: str = '') -> str:
+    if content_type.startswith('multipart/'):
+        return CORPS_NON_SIGNE
+    return hashlib.sha256(corps or b'').hexdigest()
+
+
+def signer(cle: str, chaine: str) -> str:
+    return hmac.new(cle.encode(), chaine.encode(), hashlib.sha256).hexdigest()
+
+
+def verifier(request):
+    """Leve SignatureInvalide (message destine au journal et au client) si la
+    requete n'est pas correctement signee."""
+    id_cle = request.headers.get('X-EW-Key-Id', '')
+    timestamp = request.headers.get('X-EW-Timestamp', '')
+    nonce = request.headers.get('X-EW-Nonce', '')
+    signature = request.headers.get('X-EW-Signature', '')
+    if not (id_cle and timestamp and nonce and signature):
+        raise SignatureInvalide('Missing signature headers.')
+
+    cle = settings.HMAC_CLES.get(id_cle)
+    if not cle:
+        raise SignatureInvalide('Unknown key id.')
+    if not timestamp.isdigit() or abs(time.time() - int(timestamp)) > settings.HMAC_TOLERANCE_S:
+        raise SignatureInvalide('Timestamp outside the allowed window.')
+    if not FORMAT_NONCE.match(nonce):
+        raise SignatureInvalide('Invalid nonce format.')
+
+    attendue = signer(cle, chaine_canonique(
+        request.method, request.get_full_path(), timestamp, nonce,
+        empreinte_corps(request.body, request.content_type or ''),
+    ))
+    if not hmac.compare_digest(attendue, signature.lower()):
+        raise SignatureInvalide('Invalid signature.')
+
+    # Nonce verifie en dernier : une requete a signature invalide ne doit pas
+    # "bruler" un nonce. add() est atomique (SET NX Redis). Retour None = Redis
+    # indisponible (IGNORE_EXCEPTIONS, cf. CACHES) : on accepte plutot que de
+    # bloquer toute l'API -- la fenetre de timestamp limite deja le rejeu.
+    if cache.add(f'hmac:nonce:{id_cle}:{nonce}', 1, timeout=settings.HMAC_TOLERANCE_S * 2) is False:
+        raise SignatureInvalide('Nonce already used.')
+
+
+class SignatureHmacMiddleware:
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        if self._a_verifier(request):
+            try:
+                verifier(request)
+            except SignatureInvalide as exc:
+                journal.warning(
+                    'Signature HMAC refusee (%s) : %s %s', exc, request.method, request.get_full_path()
+                )
+                if settings.HMAC_MODE == 'enforce':
+                    return JsonResponse({'detail': str(exc), 'code': 'invalid_signature'}, status=401)
+        return self.get_response(request)
+
+    def _a_verifier(self, request):
+        if settings.HMAC_MODE not in ('log', 'enforce'):
+            return False
+        # Preflight CORS : jamais signe par un navigateur.
+        if request.method == 'OPTIONS' or not request.path.startswith('/api/'):
+            return False
+        return not any(request.path.startswith(prefixe) for prefixe in settings.HMAC_CHEMINS_EXEMPTES)

@@ -20,6 +20,34 @@ POST https://easyway-api.easy-transact.net/api/auth/login/).
     Authorization: Bearer <access>
 - Idempotency-Key header is required specifically on POST incidents/ — see
   that section, nowhere else in the API uses this pattern.
+- REQUEST SIGNING (HMAC, mobile app): every /api/ request must carry
+    X-EW-Key-Id: v1                 (key id, given with the secret)
+    X-EW-Timestamp: 1790000000      (unix seconds; +/-5 min of server time)
+    X-EW-Nonce: <random, 16-64 chars [A-Za-z0-9_-], NEW for every request>
+    X-EW-Signature: hex(HMAC-SHA256(secret, canonical))
+  canonical = METHOD + "\n" + PATH_AND_QUERY + "\n" + TIMESTAMP + "\n"
+              + NONCE + "\n" + hex(SHA256(raw body bytes))
+  PATH_AND_QUERY exactly as sent, no scheme/host ("/api/incidents/nearby/?lat=4.05&lon=9.7").
+  No body -> SHA256 of empty string. multipart (avatar upload) -> the
+  literal "UNSIGNED-PAYLOAD" instead of the hash. Sign the exact string you
+  send (JSON.stringify once, reuse it as the body).
+  Not required on: staff/*, auth/login/, auth/refresh/, waitlist/,
+  infractions/categories/, docs/schema. Failure (only once the server is
+  in enforce mode) -> 401 { "detail": "...", "code": "invalid_signature" }.
+  Reference (React Native, crypto-js):
+    import CryptoJS from 'crypto-js';
+    function signHeaders(method, pathAndQuery, bodyString, isMultipart) {
+      const ts = String(Math.floor(Date.now() / 1000));
+      const nonce = CryptoJS.lib.WordArray.random(16).toString();       // 32 hex chars
+      const bodyHash = isMultipart ? 'UNSIGNED-PAYLOAD' : CryptoJS.SHA256(bodyString || '').toString();
+      const canonical = [method.toUpperCase(), pathAndQuery, ts, nonce, bodyHash].join('\n');
+      return {
+        'X-EW-Key-Id': HMAC_KEY_ID,
+        'X-EW-Timestamp': ts,
+        'X-EW-Nonce': nonce,
+        'X-EW-Signature': CryptoJS.HmacSHA256(canonical, HMAC_SECRET).toString(),
+      };
+    }
 - Field NAMES and free-text error messages are English everywhere. Enum
   VALUES (status/type/plan/vehicle_type/etc.) are NOT translated — they're
   still the original French model choice values (e.g. "ACTIF", "VOITURE",
