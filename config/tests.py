@@ -83,9 +83,22 @@ class SignatureHmacTests(SimpleTestCase):
         self.assertNotEqual(self.client.options(URL).status_code, 401)
 
     @override_settings(HMAC_MODE='log')
-    def test_mode_log_ne_bloque_pas(self):
+    def test_mode_log_ne_bloque_pas_et_indique_le_statut(self):
         with self.assertLogs('easyway.signature_hmac', level='WARNING'):
-            self.assertEqual(self.client.get(URL).status_code, 200)
+            reponse = self.client.get(URL)
+        self.assertEqual(reponse.status_code, 200)
+        self.assertEqual(reponse['X-EW-Signature-Status'], 'invalid: Missing signature headers.')
+
+    @override_settings(HMAC_MODE='log')
+    def test_mode_log_journalise_les_signatures_valides(self):
+        with self.assertLogs('easyway.signature_hmac', level='INFO') as journaux:
+            reponse = self.client.get(URL, **entetes_signes('GET', URL))
+        self.assertEqual(reponse['X-EW-Signature-Status'], 'valid')
+        self.assertIn('Signature HMAC valide (cle v1)', journaux.output[0])
+
+    def test_pas_d_entete_de_statut_en_enforce(self):
+        reponse = self.client.get(URL, **entetes_signes('GET', URL))
+        self.assertNotIn('X-EW-Signature-Status', reponse)
 
     @override_settings(HMAC_MODE='off')
     def test_mode_off_ne_verifie_rien(self):

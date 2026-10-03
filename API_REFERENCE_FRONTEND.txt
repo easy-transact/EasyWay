@@ -34,11 +34,15 @@ POST https://easyway-api.easy-transact.net/api/auth/login/).
   Not required on: staff/*, auth/login/, auth/refresh/, waitlist/,
   infractions/categories/, docs/schema. Failure (only once the server is
   in enforce mode) -> 401 { "detail": "...", "code": "invalid_signature" }.
+  While the server is in "log" mode (accepts everything), every checked
+  response carries X-EW-Signature-Status: "valid" or "invalid: <reason>"
+  -- use it to confirm the app's signatures before the switch to enforce.
   Reference (React Native, crypto-js):
     import CryptoJS from 'crypto-js';
+    import * as Crypto from 'expo-crypto';
     function signHeaders(method, pathAndQuery, bodyString, isMultipart) {
       const ts = String(Math.floor(Date.now() / 1000));
-      const nonce = CryptoJS.lib.WordArray.random(16).toString();       // 32 hex chars
+      const nonce = Crypto.randomUUID();   // expo-crypto; CryptoJS random needs a polyfill on RN
       const bodyHash = isMultipart ? 'UNSIGNED-PAYLOAD' : CryptoJS.SHA256(bodyString || '').toString();
       const canonical = [method.toUpperCase(), pathAndQuery, ts, nonce, bodyHash].join('\n');
       return {

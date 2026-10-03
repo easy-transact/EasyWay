@@ -233,6 +233,16 @@ HMAC_CHEMINS_EXEMPTES = [
     '/api/redoc/',
     '/api/dev/',
 ]
+# Sans config LOGGING, Python n'affiche que WARNING et plus : les succes de
+# signature (INFO, cf. signature_hmac.py) n'apparaitraient pas dans
+# `docker logs web`. Seul le logger "easyway" est concerne.
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'handlers': {'console': {'class': 'logging.StreamHandler'}},
+    'loggers': {'easyway': {'handlers': ['console'], 'level': 'INFO', 'propagate': False}},
+}
+
 if HMAC_MODE not in ('off', 'log', 'enforce'):
     raise ImproperlyConfigured(f"HMAC_MODE doit valoir off, log ou enforce (recu : {HMAC_MODE!r}).")
 if HMAC_MODE != 'off' and not HMAC_CLES:

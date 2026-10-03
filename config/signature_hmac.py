@@ -26,6 +26,12 @@ l'authentification, HTTPS reste le chiffrement).
 HMAC_MODE : "off" (rien), "log" (verifie et journalise les echecs sans
 bloquer -- a utiliser le temps que toutes les versions de l'appli signent),
 "enforce" (401 si la signature est absente/invalide).
+
+En mode "log", chaque requete verifiee est journalisee (succes en INFO,
+echec en WARNING) et la reponse porte X-EW-Signature-Status ("valid" ou
+"invalid: <raison>") : le serveur acceptant tout, c'est le seul moyen pour
+l'equipe mobile de confirmer que ses signatures sont bonnes avant le
+passage en "enforce". Jamais pose en "enforce" (un 401 dit deja tout).
 """
 
 import hashlib
@@ -101,16 +107,29 @@ class SignatureHmacMiddleware:
         self.get_response = get_response
 
     def __call__(self, request):
-        if self._a_verifier(request):
-            try:
-                verifier(request)
-            except SignatureInvalide as exc:
-                journal.warning(
-                    'Signature HMAC refusee (%s) : %s %s', exc, request.method, request.get_full_path()
-                )
-                if settings.HMAC_MODE == 'enforce':
-                    return JsonResponse({'detail': str(exc), 'code': 'invalid_signature'}, status=401)
-        return self.get_response(request)
+        if not self._a_verifier(request):
+            return self.get_response(request)
+
+        try:
+            verifier(request)
+        except SignatureInvalide as exc:
+            journal.warning(
+                'Signature HMAC invalide (%s) : %s %s', exc, request.method, request.get_full_path()
+            )
+            if settings.HMAC_MODE == 'enforce':
+                return JsonResponse({'detail': str(exc), 'code': 'invalid_signature'}, status=401)
+            statut = f'invalid: {exc}'
+        else:
+            journal.info(
+                'Signature HMAC valide (cle %s) : %s %s',
+                request.headers.get('X-EW-Key-Id'), request.method, request.get_full_path(),
+            )
+            statut = 'valid'
+
+        reponse = self.get_response(request)
+        if settings.HMAC_MODE == 'log':
+            reponse['X-EW-Signature-Status'] = statut
+        return reponse
 
     def _a_verifier(self, request):
         if settings.HMAC_MODE not in ('log', 'enforce'):
