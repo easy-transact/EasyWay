@@ -173,7 +173,10 @@ SPECTACULAR_SETTINGS = {
 # rafraichissement" ; deconnexion = "revoquerFamille(jeton)" -> rotation +
 # blacklist du refresh token approxime la revocation de famille de jetons).
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=15),
+    # 24h (reunion) : moins de rafraichissements cote appli. Contrepartie : un
+    # jeton d'acces reste valable jusqu'a son expiration meme apres logout
+    # (seul le refresh est blackliste). Ajustable sans redeploiement du code.
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=env.int('JWT_ACCESS_LIFETIME_MINUTES', default=24 * 60)),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=30),
     'ROTATE_REFRESH_TOKENS': True,
     'BLACKLIST_AFTER_ROTATION': True,
