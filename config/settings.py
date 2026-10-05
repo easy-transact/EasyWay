@@ -66,6 +66,7 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt.token_blacklist',
     'drf_spectacular',
     'corsheaders',
+    'channels',
 
     'accounts',
     'places',
@@ -112,6 +113,9 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = 'config.wsgi.application'
+# Service `ws` (uvicorn, docker-compose) : WebSocket /ws/incidents/ uniquement --
+# le HTTP reste servi par gunicorn/WSGI. cf. config/asgi.py.
+ASGI_APPLICATION = 'config.asgi.application'
 
 
 # Database
@@ -358,6 +362,19 @@ CELERY_BEAT_SCHEDULE = {
 # le flux Streams des positions GPS brutes -- retention courte (~2h, purgee
 # par MAXLEN sur XADD), jamais partagee avec le cache ou le broker Celery.
 TELEMETRIE_REDIS_URL = env('TELEMETRIE_REDIS_URL', default='redis://localhost:6379/3')
+
+# Signalements en temps reel (community/consumers.py, community/temps_reel.py) :
+# relais Redis entre le service `ws` (connexions WebSocket) et les processus
+# qui publient (web, celery_worker). DB distincte (/4) -- ni cache, ni broker,
+# ni telemetrie.
+CHANNEL_LAYERS = {
+    'default': {
+        'BACKEND': 'channels_redis.core.RedisChannelLayer',
+        'CONFIG': {'hosts': [env('CHANNELS_REDIS_URL', default='redis://localhost:6379/4')]},
+    },
+}
+# Sans message `auth` valide dans ce delai apres l'ouverture, le serveur ferme.
+TEMPS_REEL_DELAI_AUTH_S = 5
 
 # traffic.tar de Valhalla (mjolnir.traffic_extract), ecrit par
 # trips.tasks.publier_trafic_temps_reel -- chemin vu par le worker Celery,

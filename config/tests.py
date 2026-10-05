@@ -103,3 +103,57 @@ class SignatureHmacTests(SimpleTestCase):
     @override_settings(HMAC_MODE='off')
     def test_mode_off_ne_verifie_rien(self):
         self.assertEqual(self.client.get(URL).status_code, 200)
+
+
+URL_WS = '/ws/incidents/'
+
+
+def entetes_ws(entetes_django):
+    """En-tetes WSGI (HTTP_X_EW_KEY_ID) -> en-tetes ASGI ([(b'x-ew-key-id', ...)])."""
+    return [
+        (nom[len('HTTP_'):].replace('_', '-').lower().encode(), valeur.encode())
+        for nom, valeur in entetes_django.items()
+    ]
+
+
+@override_settings(
+    HMAC_MODE='enforce',
+    HMAC_CLES={'v1': CLE},
+    CACHES={'default': {'BACKEND': 'django.core.cache.backends.locmem.LocMemCache'}},
+    CHANNEL_LAYERS={'default': {'BACKEND': 'channels.layers.InMemoryChannelLayer'}},
+)
+class SignatureHmacWebSocketTests(SimpleTestCase):
+    """Demande d'ouverture de /ws/incidents/ signee comme GET a corps vide."""
+
+    def setUp(self):
+        cache.clear()
+
+    async def _connecter(self, entetes=(), chemin=URL_WS):
+        from channels.testing import WebsocketCommunicator
+
+        from config.asgi import application
+
+        communicateur = WebsocketCommunicator(application, chemin, headers=list(entetes))
+        connecte, _ = await communicateur.connect()
+        if connecte:
+            await communicateur.disconnect()
+        return connecte
+
+    async def test_ouverture_signee_acceptee(self):
+        self.assertTrue(await self._connecter(entetes_ws(entetes_signes('GET', URL_WS))))
+
+    async def test_ouverture_sans_signature_refusee(self):
+        self.assertFalse(await self._connecter())
+
+    async def test_ouverture_signee_sur_un_autre_chemin_refusee(self):
+        self.assertFalse(await self._connecter(entetes_ws(entetes_signes('GET', '/api/incidents/nearby/'))))
+
+    async def test_rejeu_de_l_ouverture_refuse(self):
+        entetes = entetes_ws(entetes_signes('GET', URL_WS))
+        self.assertTrue(await self._connecter(entetes))
+        self.assertFalse(await self._connecter(entetes))
+
+    @override_settings(HMAC_MODE='log')
+    async def test_mode_log_ne_bloque_pas(self):
+        with self.assertLogs('easyway.signature_hmac', level='WARNING'):
+            self.assertTrue(await self._connecter())

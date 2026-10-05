@@ -20,6 +20,14 @@ DUREE_CACHE_CELLULE_S = 30
 # jusqu'a l'expiration de son propre TTL plutot que jusqu'a ce delete().
 DUREE_VERROU_ECRITURE_S = 2
 
+# Le decoupage H3 cote client n'a pas de limite fiable -- un viewport dezoome
+# ou un bug de calcul peut envoyer des centaines de cellules. Le serveur est
+# le seul a connaitre le volume reel derriere chaque cellule, donc c'est lui
+# qui doit refuser une requete trop large plutot que de la servir en silence.
+# Partage par /nearby/?cells= (views.py) et l'abonnement temps reel
+# (consumers.py). Valeur pas mesuree sur donnees reelles.
+MAX_CELLULES = 50
+
 
 def cle_cache_cellule(cellule_h3: int) -> str:
     return f'incidents:cellule:{h3.int_to_str(cellule_h3)}'

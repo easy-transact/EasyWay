@@ -21,6 +21,7 @@ from places.utils import normaliser
 
 from .cache_incidents import (
     DUREE_CACHE_CELLULE_S,
+    MAX_CELLULES,
     cle_cache_cellule,
     ecriture_recente,
     invalider_cache_cellule,
@@ -34,6 +35,7 @@ from .models import (
     Vote,
     duree_de_vie_base,
 )
+from . import temps_reel
 from .serializers import (
     IncidentAvecDoublonSerializer,
     IncidentCreationSerializer,
@@ -48,12 +50,8 @@ from .services import PositionHorsRoute, QuotaDepasse, ServiceIncident, incident
 
 DUREE_IDEMPOTENCE_S = 24 * 3600
 
-# Le decoupage H3 cote client n'a pas de limite fiable -- un viewport dezoome
-# ou un bug de calcul peut envoyer des centaines de cellules. Le serveur est
-# le seul a connaitre le volume reel derriere chaque cellule, donc c'est lui
-# qui doit refuser une requete trop large plutot que de la servir en silence.
-# Valeurs pas mesurees sur donnees reelles -- a ajuster avec de l'usage reel.
-MAX_CELLULES = 50
+# MAX_CELLULES (cf. cache_incidents.py) : meme plafond que l'abonnement temps
+# reel (consumers.py). Valeur pas mesuree sur donnees reelles.
 MAX_RESULTATS = 50
 
 # Mode rayon (lat/lon/radius_km, sans cells) : requete geographique directe,
@@ -615,6 +613,7 @@ class IncidentDetailView(APIView):
         incident = get_object_or_404(Incident, id=id, auteur=request.user)
         incident.retirer(motif="Retire par l'auteur")
         invalider_cache_cellule(incident.cellule_h3_res8)
+        temps_reel.publier_retrait(incident.id, incident.cellule_h3_res8, temps_reel.RAISON_RETIRE_AUTEUR)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -655,6 +654,17 @@ class VoterIncidentView(APIView):
                 incident.infirmer(vote)
 
         invalider_cache_cellule(incident.cellule_h3_res8)
+        # Incident.infirmer() ne change pas le statut, il avance expire_le :
+        # un vote "Plus rien" qui le fait passer dans le passe retire de fait
+        # le signalement (deja exclu de /nearby/ par le filtre expire_le).
+        # Vote sur un incident deja retire/expire/fusionne : rien a publier,
+        # un incident.updated le ferait reapparaitre chez les abonnes.
+        if incident.statut not in (StatutIncident.ACTIF, StatutIncident.EN_ATTENTE):
+            pass
+        elif incident.expire_le <= timezone.now():
+            temps_reel.publier_retrait(incident.id, incident.cellule_h3_res8, temps_reel.RAISON_CONTESTE)
+        else:
+            temps_reel.publier_incident(incident, temps_reel.MODIFIE)
         return Response(IncidentSerializer(incident).data)
 
 
@@ -722,6 +732,7 @@ class IncidentRetraitStaffView(APIView):
         incident = get_object_or_404(Incident, id=id)
         incident.retirer(motif=serializer.validated_data['reason'])
         invalider_cache_cellule(incident.cellule_h3_res8)
+        temps_reel.publier_retrait(incident.id, incident.cellule_h3_res8, temps_reel.RAISON_MODERE)
         return Response(IncidentModerationSerializer(incident).data)
 
 
@@ -741,7 +752,8 @@ class IncidentSupprimerView(APIView):
 
     def delete(self, request, id):
         incident = get_object_or_404(Incident, id=id)
-        cellule = incident.cellule_h3_res8
+        cellule, incident_id = incident.cellule_h3_res8, incident.id
         incident.delete()
         invalider_cache_cellule(cellule)
+        temps_reel.publier_retrait(incident_id, cellule, temps_reel.RAISON_MODERE)
         return Response(IncidentModerationSerializer(incident).data)

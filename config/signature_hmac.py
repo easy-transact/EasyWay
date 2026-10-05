@@ -40,6 +40,7 @@ import logging
 import re
 import time
 
+from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.core.cache import cache
 from django.http import JsonResponse
@@ -72,10 +73,20 @@ def signer(cle: str, chaine: str) -> str:
 def verifier(request):
     """Leve SignatureInvalide (message destine au journal et au client) si la
     requete n'est pas correctement signee."""
-    id_cle = request.headers.get('X-EW-Key-Id', '')
-    timestamp = request.headers.get('X-EW-Timestamp', '')
-    nonce = request.headers.get('X-EW-Nonce', '')
-    signature = request.headers.get('X-EW-Signature', '')
+    verifier_entetes(
+        request.method, request.get_full_path(), request.headers,
+        request.body, request.content_type or '',
+    )
+
+
+def verifier_entetes(methode: str, chemin: str, entetes, corps: bytes, content_type: str = ''):
+    """Coeur de verifier(), sans objet requete Django -- partage avec la
+    poignee de main WebSocket (SignatureHmacWsMiddleware). `entetes` : mapping
+    interroge en minuscules (request.headers l'accepte, insensible a la casse)."""
+    id_cle = entetes.get('x-ew-key-id', '')
+    timestamp = entetes.get('x-ew-timestamp', '')
+    nonce = entetes.get('x-ew-nonce', '')
+    signature = entetes.get('x-ew-signature', '')
     if not (id_cle and timestamp and nonce and signature):
         raise SignatureInvalide('Missing signature headers.')
 
@@ -88,8 +99,7 @@ def verifier(request):
         raise SignatureInvalide('Invalid nonce format.')
 
     attendue = signer(cle, chaine_canonique(
-        request.method, request.get_full_path(), timestamp, nonce,
-        empreinte_corps(request.body, request.content_type or ''),
+        methode, chemin, timestamp, nonce, empreinte_corps(corps, content_type),
     ))
     if not hmac.compare_digest(attendue, signature.lower()):
         raise SignatureInvalide('Invalid signature.')
@@ -138,3 +148,37 @@ class SignatureHmacMiddleware:
         if request.method == 'OPTIONS' or not request.path.startswith('/api/'):
             return False
         return not any(request.path.startswith(prefixe) for prefixe in settings.HMAC_CHEMINS_EXEMPTES)
+
+
+class SignatureHmacWsMiddleware:
+    """Meme verification que SignatureHmacMiddleware, sur la demande
+    d'ouverture WebSocket (cf. config/asgi.py) : signee comme un
+    GET <chemin> a corps vide. En "enforce", une poignee de main mal signee
+    est refusee avant accept() (le client voit un 403) ; en "log", seulement
+    journalisee -- aucun en-tete de reponse possible sur un WebSocket."""
+
+    def __init__(self, application):
+        self.application = application
+
+    async def __call__(self, scope, receive, send):
+        if scope['type'] != 'websocket' or settings.HMAC_MODE not in ('log', 'enforce'):
+            return await self.application(scope, receive, send)
+
+        chemin = scope['path']
+        if scope.get('query_string'):
+            chemin += '?' + scope['query_string'].decode('latin-1')
+        entetes = {nom.decode('latin-1').lower(): valeur.decode('latin-1') for nom, valeur in scope['headers']}
+
+        try:
+            await sync_to_async(verifier_entetes)('GET', chemin, entetes, b'')
+        except SignatureInvalide as exc:
+            journal.warning('Signature HMAC invalide (%s) : WS %s', exc, chemin)
+            if settings.HMAC_MODE == 'enforce':
+                # Message recu avant toute reponse = websocket.connect ; un
+                # close a ce stade est traduit en refus HTTP 403 par le serveur.
+                await receive()
+                return await send({'type': 'websocket.close', 'code': 4401})
+        else:
+            journal.info('Signature HMAC valide (cle %s) : WS %s', entetes.get('x-ew-key-id'), chemin)
+
+        return await self.application(scope, receive, send)

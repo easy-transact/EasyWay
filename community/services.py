@@ -20,6 +20,7 @@ from trips.services import client_locate
 from trips.services.client_trace_attributes import ErreurTraceAttributes, attributs_trace
 from trips.services.disjoncteur import DisjoncteurOuvert
 
+from . import temps_reel
 from .cache_incidents import invalider_cache_cellule
 from .models import (
     RESOLUTION_H3_FIN,
@@ -122,6 +123,9 @@ class ServiceIncident:
                 est_doublon = False
 
         invalider_cache_cellule(incident.cellule_h3_res8)
+        # Doublon fusionne : l'existant a change (confirmations, eventuellement
+        # statut) -- l'application le met a jour, aucun nouveau signalement.
+        temps_reel.publier_incident(incident, temps_reel.MODIFIE if est_doublon else temps_reel.CREE)
         return incident, est_doublon
 
     def _verifier_quota(self, utilisateur):
