@@ -1,7 +1,7 @@
 """
 ASGI config for config project.
 
-Servi par le service `ws` (uvicorn, cf. docker-compose) pour le WebSocket
+Servi par le service `ws` (daphne, cf. docker-compose) pour le WebSocket
 /ws/incidents/ (signalements en temps reel, community/consumers.py). Le HTTP
 de l'API reste servi par gunicorn/WSGI (config/wsgi.py) ; la branche 'http'
 ci-dessous ne sert qu'a ne pas casser un appel HTTP qui arriverait ici.

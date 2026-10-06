@@ -113,7 +113,7 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = 'config.wsgi.application'
-# Service `ws` (uvicorn, docker-compose) : WebSocket /ws/incidents/ uniquement --
+# Service `ws` (daphne, docker-compose) : WebSocket /ws/incidents/ uniquement --
 # le HTTP reste servi par gunicorn/WSGI. cf. config/asgi.py.
 ASGI_APPLICATION = 'config.asgi.application'
 

@@ -145,6 +145,7 @@ services:
       CELERY_BROKER_URL: redis://redis:6379/2
       CELERY_RESULT_BACKEND: redis://redis:6379/2
       TELEMETRIE_REDIS_URL: redis://redis:6379/3
+      CHANNELS_REDIS_URL: redis://redis:6379/4
       VALHALLA_URL: http://valhalla:8002
       NOMINATIM_URL: http://nominatim:8080
       PHOTON_URL: http://photon:2322
@@ -160,6 +161,34 @@ services:
       # cf. .pbf deja utilise par valhalla/nominatim, .gpkg pas la par
       # defaut, a deposer manuellement dans ce dossier avant l'import).
       - ./valhalla/custom_files:/custom_files:ro
+
+  # WebSocket /ws/incidents/ (signalements en temps reel, cf.
+  # community/consumers.py et REALTIME_INCIDENTS_FRONTEND.txt). Meme image que
+  # web, servie par daphne (ASGI) au lieu de gunicorn : le HTTP de l'API reste
+  # entierement sur web, ce service ne porte que les connexions longues.
+  # web/celery_worker publient vers lui via Redis (/4, CHANNELS_REDIS_URL).
+  # entrypoint: [] : migrate/collectstatic deja faits par web.
+  ws:
+    build: .
+    container_name: ws
+    restart: unless-stopped
+    entrypoint: []
+    command: daphne -b 0.0.0.0 -p 8001 --proxy-headers config.asgi:application
+    # HEALTHCHECK du Dockerfile = curl sur le port 8000 de web, faux ici.
+    healthcheck:
+      disable: true
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8001:8001"
+    env_file: .env
+    environment:
+      DATABASE_URL: postgis://easyway:${POSTGRES_PASSWORD}@db:5432/easyway
+      REDIS_URL: redis://redis:6379/1
+      CHANNELS_REDIS_URL: redis://redis:6379/4
 
   celery_worker:
     build: .
@@ -184,6 +213,7 @@ services:
       CELERY_BROKER_URL: redis://redis:6379/2
       CELERY_RESULT_BACKEND: redis://redis:6379/2
       TELEMETRIE_REDIS_URL: redis://redis:6379/3
+      CHANNELS_REDIS_URL: redis://redis:6379/4
       VALHALLA_URL: http://valhalla:8002
       NOMINATIM_URL: http://nominatim:8080
       PHOTON_URL: http://photon:2322
@@ -213,6 +243,7 @@ services:
       CELERY_BROKER_URL: redis://redis:6379/2
       CELERY_RESULT_BACKEND: redis://redis:6379/2
       TELEMETRIE_REDIS_URL: redis://redis:6379/3
+      CHANNELS_REDIS_URL: redis://redis:6379/4
       VALHALLA_URL: http://valhalla:8002
       NOMINATIM_URL: http://nominatim:8080
       PHOTON_URL: http://photon:2322

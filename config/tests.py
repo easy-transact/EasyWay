@@ -2,9 +2,13 @@ import hashlib
 import time
 import uuid
 
+from channels.testing import WebsocketCommunicator
 from django.core.cache import cache
 from django.test import SimpleTestCase, override_settings
 
+# Import au chargement du module, pas dans un test : get_asgi_application()
+# reapplique LOGGING, ce qui annulerait un assertLogs deja ouvert.
+from .asgi import application
 from .signature_hmac import CORPS_NON_SIGNE, chaine_canonique, signer
 
 CLE = 'secret-de-test'
@@ -129,10 +133,6 @@ class SignatureHmacWebSocketTests(SimpleTestCase):
         cache.clear()
 
     async def _connecter(self, entetes=(), chemin=URL_WS):
-        from channels.testing import WebsocketCommunicator
-
-        from config.asgi import application
-
         communicateur = WebsocketCommunicator(application, chemin, headers=list(entetes))
         connecte, _ = await communicateur.connect()
         if connecte:

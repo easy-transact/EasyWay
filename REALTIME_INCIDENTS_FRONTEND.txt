@@ -1,0 +1,193 @@
+EASYWAY API — REALTIME INCIDENTS (WEBSOCKET) — FRONTEND INTEGRATION REFERENCE
+Covers: the /ws/incidents/ WebSocket that pushes new / changed / removed
+incidents to drivers in the same H3 cells, plus the server-side deployment
+notes (section 8). Written against the code as of 05/10/2026
+(community/consumers.py, community/temps_reel.py) -- the code wins if this
+drifts.
+
+The REST API stays the source of truth. The socket only makes incidents show
+up faster: the server keeps nothing for you while you are disconnected and
+never replays missed messages.
+
+------------------------------------------------------------
+READ THIS FIRST — the shape of the whole flow
+
+  1. Open  wss://easyway-api.easy-transact.net/ws/incidents/
+     (with the X-EW-* signature headers, see 2)
+  2. Send  {"type": "auth", "token": "<access token>"}     within 5 s
+  3. Wait  {"type": "ready", "server_time": "..."}
+  4. Fetch incidents through the REST API as today
+     (GET incidents/nearby/?cells=... or POST incidents/along-route/)
+  5. Send  {"type": "subscribe", "cells": ["88...fff", ...]}   (<= 50 cells)
+  6. Apply incident.created / incident.updated / incident.removed as they
+     arrive; send {"type": "ping"} every 25 s.
+  7. On every (re)connection: repeat 2 -> 5. Step 4 is what catches up
+     everything you missed while disconnected.
+
+Open the socket only while the app is in the foreground; close it in the
+background.
+
+------------------------------------------------------------
+1. CELLS
+
+Exactly the same H3 cells as GET incidents/nearby/?cells= : resolution 8,
+hex string form ("88754e6499fffff"), 50 at most per connection.
+  - Home map: the cells around the visible area / your position.
+  - Navigation: the cells along the route.
+Each `subscribe` REPLACES the previous subscription (send the full list, not
+a delta). Re-send it when you move into new cells -- the server only
+processes the difference, so re-sending often is cheap.
+
+An incident is published only to its own cell's subscribers. A phone
+subscribed to Akwa receives nothing about Bonaberi.
+
+------------------------------------------------------------
+2. CONNECTING AND SIGNATURE
+
+URL: wss://easyway-api.easy-transact.net/ws/incidents/   (TLS only)
+
+The opening request carries the same four signature headers as every other
+API call (see API_REFERENCE_FRONTEND.txt), computed as for
+  GET /ws/incidents/   with an EMPTY body
+i.e. canonical = "GET\n/ws/incidents/\n<ts>\n<nonce>\n" + sha256("") hex.
+New nonce on every connection attempt. Same log/enforce modes as the HTTP
+API: in enforce mode an unsigned or badly signed opening is refused
+(HTTP 403 during the handshake, the socket never opens).
+
+The access token is NOT in the URL (URLs end up in server and proxy logs):
+it goes in the first message, see 3.
+
+------------------------------------------------------------
+3. MESSAGES — PHONE -> SERVER (JSON text frames)
+
+  {"type": "auth", "token": "<access token>"}
+      First message, mandatory, within 5 s of opening. Answered by `ready`.
+      You may send it again later on an open connection with a refreshed
+      token (resets the expiry, see 5) -- no need to reconnect for that.
+
+  {"type": "subscribe", "cells": ["88754e6499fffff", ...]}
+      Replaces the current subscription. Only after `ready`.
+
+  {"type": "ping"}
+      Keep-alive, every 25 s. Answered by `pong`. Allowed before auth too.
+
+------------------------------------------------------------
+4. MESSAGES — SERVER -> PHONE
+
+  {"type": "ready", "server_time": "2026-10-05T16:12:03.123456+00:00"}
+      Auth accepted.
+
+  {"type": "incident.created", "incident": { ...Incident... }}
+      New report. `incident` is EXACTLY the Incident object of the REST API
+      (id, type, subtype, lat, lon, heading, confirmations,
+      validations_count, reporter_id, expires_at...) -- same decoder.
+
+  {"type": "incident.updated", "incident": { ...Incident... }}
+      Vote, status (pending -> active), expiry changed. Replace your copy
+      by id; if you don't have it (e.g. it just entered your cells), add it.
+      A report merged into an existing one (duplicate_of_existing on the
+      POST) arrives as incident.updated on the EXISTING incident, never as
+      incident.created.
+
+  {"type": "incident.removed", "id": "<uuid>", "reason": "..."}
+      Remove it now. reason:
+        disputed   "Plus rien" votes pushed its expiry into the past
+        withdrawn  removed by its author
+        moderated  removed by a moderator
+
+  {"type": "pong"}
+
+  {"type": "error", "code": "...", "detail": "..."}
+      code: invalid_message (not a JSON object), unknown_type,
+            invalid_cells (not a list of resolution-8 H3 cells -- the
+            previous subscription is kept), too_many_cells (followed by
+            close 4008).
+
+EXPIRY HAS NO MESSAGE. Every incident carries `expires_at`: remove it
+yourself at that time (and again whenever an incident.updated changes it).
+
+Invisible mode: reporter_id / reporter_name are null exactly as in the REST
+API.
+
+------------------------------------------------------------
+5. CLOSE CODES
+
+  4001  token invalid or expired -- also sent when the access token
+        expires during the connection. Refresh the token, reconnect.
+  4003  account banned or disabled. Do not reconnect.
+  4008  more than 50 cells in a subscribe. Fix the list, reconnect.
+  4401  no valid `auth` within 5 s, or a message other than auth/ping
+        before `ready`. Reconnect and send auth first.
+  any other / network drop: reconnect with backoff (6).
+
+------------------------------------------------------------
+6. MOBILE NETWORK: DROPS, RECONNECTION, FALLBACK
+
+  Keep-alive: `ping` every 25 s. Without it operators and Cloudflare (100 s
+  idle limit) silently cut the connection.
+  Reconnect: wait 1 s, 2 s, 4 s, ... capped at 30 s; reset after a `ready`.
+  Catch-up: after each `ready`, reload through the REST API (nearby or
+  along-route), then subscribe.
+  Fallback polling:
+    - socket NOT connected: keep polling every 40 s as today;
+    - socket connected: poll every 3 min as a safety net.
+
+------------------------------------------------------------
+7. ACCEPTANCE CHECKS
+
+  - Phone A reports; phone B in the same cell sees it in < 3 s.
+  - A "Plus rien" vote that drops a report removes it on B in < 3 s.
+  - Cut the network 2 min, restore: the socket comes back alone and reports
+    created during the cut are displayed (via the catch-up reload).
+  - A phone subscribed to Akwa receives nothing from a report in Bonaberi.
+
+------------------------------------------------------------
+8. SERVER / DEPLOYMENT NOTES (backend & ops, not needed by the app)
+
+Processes:
+  - `ws` service (docker-compose*.yml): same image as `web`, served by
+    daphne (ASGI) on port 8001, bound to 127.0.0.1 in prod. HTTP stays on
+    gunicorn (`web`, port 8000), untouched.
+  - Relay: Redis DB /4 (CHANNELS_REDIS_URL). `web` and `celery_worker`
+    publish into it after each DB commit; `ws` delivers to sockets.
+  - Deploy:  docker compose -f docker-compose.prod.yml up -d --build web ws celery_worker celery_beat
+    (--build is required, a plain `up -d` keeps the old image.)
+
+Proxy on srv1004358 (internet -> ea-nginx -> Apache -> containers):
+  /ws/ must bypass ea-nginx's proxy_cache and be upgraded to a WebSocket.
+  Simplest: route /ws/ from ea-nginx straight to the `ws` container,
+  skipping Apache:
+
+    location /ws/ {
+        proxy_pass http://127.0.0.1:8001;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 120s;     # > the 25 s client ping
+        proxy_send_timeout 120s;
+        proxy_buffering off;
+        proxy_cache off;
+    }
+
+  Put it in an include that cPanel does NOT regenerate (a per-domain
+  include under /etc/nginx/conf.d/users/<user>/<domain>/, check the exact
+  path on this cPanel version), then `nginx -t && systemctl reload nginx`.
+
+  Alternative through Apache: enable mod_proxy_wstunnel and add, BEFORE the
+  existing "ProxyPass /" line in the domain's proxy.conf:
+    ProxyPass        /ws/ ws://127.0.0.1:8001/ws/
+    ProxyPassReverse /ws/ ws://127.0.0.1:8001/ws/
+  (ea-nginx in front still needs the Upgrade/Connection headers and
+  proxy_cache off for /ws/.)
+
+  Cloudflare: WebSockets enabled (default on current plans).
+
+Quick check from the server once deployed:
+  curl -si -H "Connection: Upgrade" -H "Upgrade: websocket" \
+       -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGVzdHRlc3R0ZXN0dGVzdA==" \
+       https://easyway-api.easy-transact.net/ws/incidents/ | head -1
+  -> "HTTP/1.1 101 Switching Protocols" with HMAC_MODE off/log
+     (403 in enforce mode, since curl doesn't sign).
