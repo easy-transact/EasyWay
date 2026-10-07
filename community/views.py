@@ -11,7 +11,7 @@ from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema, extend_schema_view
 from rest_framework import status
 from rest_framework.generics import get_object_or_404
-from rest_framework.permissions import AllowAny, IsAdminUser
+from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -598,7 +598,10 @@ class IncidentCreationView(APIView):
     ),
 )
 class IncidentDetailView(APIView):
-    permission_classes = [AllowAny]
+    def get_permissions(self):
+        # Lecture publique ; DELETE exige une connexion AVANT toute recherche :
+        # sinon un visiteur recevait 404 au lieu de 401 (audit securite du 07/10).
+        return [AllowAny()] if self.request.method == 'GET' else [IsAuthenticated()]
 
     def get(self, request, id):
         incident = get_object_or_404(

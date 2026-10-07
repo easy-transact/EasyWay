@@ -476,18 +476,19 @@ class ListeAttenteTests(TestCase):
     def test_inscription_publique_normalise_le_telephone(self):
         reponse = self._inscrire(profile='AGENCE_VOYAGE', city='Douala', email='Awa@Example.COM')
         self.assertEqual(reponse.status_code, 201)
-        corps = reponse.json()
-        self.assertEqual(corps['phone'], '+237677001122')
-        self.assertEqual(corps['profile'], 'AGENCE_VOYAGE')
-        self.assertEqual(corps['email'], 'Awa@example.com')
-        self.assertEqual(InscriptionListeAttente.objects.count(), 1)
+        inscription = InscriptionListeAttente.objects.get()
+        self.assertEqual(inscription.telephone, '+237677001122')
+        self.assertEqual(inscription.profil, 'AGENCE_VOYAGE')
+        self.assertEqual(inscription.email, 'Awa@example.com')
 
-    def test_numero_deja_inscrit_retourne_200_sans_doublon(self):
-        self._inscrire()
-        reponse = self._inscrire(phone='+237677001122', full_name='Autre Nom')
-        self.assertEqual(reponse.status_code, 200)
-        self.assertEqual(reponse.json()['full_name'], 'Awa Ngono')
-        self.assertEqual(InscriptionListeAttente.objects.count(), 1)
+    def test_numero_deja_inscrit_reponse_identique_sans_donnees_ni_doublon(self):
+        premiere = self._inscrire(email='awa@example.com', city='Douala')
+        deuxieme = self._inscrire(phone='+237677001122', full_name='Autre Nom')
+        # Rien ne doit permettre de savoir si le numero etait deja inscrit,
+        # ni a qui il appartient.
+        self.assertEqual((premiere.status_code, premiere.json()), (deuxieme.status_code, deuxieme.json()))
+        self.assertNotIn('Awa', deuxieme.content.decode())
+        self.assertEqual(InscriptionListeAttente.objects.get().nom_complet, 'Awa Ngono')
 
     def test_telephone_invalide_rejete(self):
         reponse = self._inscrire(phone='123')
@@ -495,7 +496,8 @@ class ListeAttenteTests(TestCase):
         self.assertIn('phone', reponse.json())
 
     def test_profil_par_defaut_automobiliste(self):
-        self.assertEqual(self._inscrire().json()['profile'], 'AUTOMOBILISTE')
+        self._inscrire()
+        self.assertEqual(InscriptionListeAttente.objects.get().profil, 'AUTOMOBILISTE')
 
     def test_liste_staff_filtre_et_suivi(self):
         self._inscrire()
@@ -521,3 +523,18 @@ class ListeAttenteTests(TestCase):
         self.assertTrue(reponse.json()['contacted'])
         reponse = self.client.get(reverse('accounts:staff-liste-attente') + '?contacted=false', **auth)
         self.assertEqual([r['full_name'] for r in reponse.json()['results']], ['Awa Ngono'])
+
+
+class VerificationExistenceLimiteTests(TestCase):
+    """Audit securite du 07/10 : check-existence ne doit pas permettre de
+    tester des numeros en masse."""
+
+    def test_limite_de_debit(self):
+        cache.clear()
+        url = reverse('accounts:verifier-existence')
+        codes = [
+            self.client.post(url, {'phone': f'+237677{i:06d}'}, content_type='application/json').status_code
+            for i in range(21)
+        ]
+        self.assertEqual(codes[:20], [200] * 20)
+        self.assertEqual(codes[20], 429)

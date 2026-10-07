@@ -88,9 +88,13 @@ def _decoder_uid(uidb64):
     responses={200: ExisteSerializer},
 )
 class VerifierExistenceView(APIView):
-    """Premier temps de la connexion en deux temps (section 4.1)."""
+    """Premier temps de la connexion en deux temps (section 4.1). Repond par
+    nature "ce compte existe ou non" : limite de debit pour empecher de tester
+    des numeros en masse (audit securite du 07/10)."""
 
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'verification-existence'
 
     def post(self, request):
         serializer = VerifierExistenceSerializer(data=request.data)
@@ -595,11 +599,13 @@ class UtilisateurUnbanView(APIView):
     summary="S'inscrire sur la liste d'attente",
     description=(
         "Public, sans compte. Le telephone est normalise (E.164) et sert de cle "
-        "d'unicite : 201 a la premiere inscription, 200 avec l'inscription existante "
-        "(inchangee) si ce numero est deja inscrit."
+        "d'unicite. Reponse neutre, identique que le numero soit nouveau ou deja "
+        "inscrit (201, sans aucune donnee) : renvoyer l'inscription existante "
+        "permettait a n'importe qui de retrouver nom, email et ville a partir "
+        "d'un numero (audit securite du 07/10). Un numero deja inscrit n'est pas modifie."
     ),
     request=ListeAttenteSerializer,
-    responses={201: ListeAttenteSerializer, 200: ListeAttenteSerializer},
+    responses={201: MessageSerializer},
 )
 class ListeAttenteView(APIView):
     permission_classes = [AllowAny]
@@ -610,14 +616,9 @@ class ListeAttenteView(APIView):
         serializer = ListeAttenteSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        existante = InscriptionListeAttente.objects.filter(
-            telephone=serializer.validated_data['telephone']
-        ).first()
-        if existante:
-            return Response(ListeAttenteSerializer(existante).data, status=status.HTTP_200_OK)
-
-        inscription = serializer.save()
-        return Response(ListeAttenteSerializer(inscription).data, status=status.HTTP_201_CREATED)
+        if not InscriptionListeAttente.objects.filter(telephone=serializer.validated_data['telephone']).exists():
+            serializer.save()
+        return Response({'detail': 'Registration received.'}, status=status.HTTP_201_CREATED)
 
 
 @extend_schema(

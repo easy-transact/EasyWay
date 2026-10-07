@@ -97,6 +97,13 @@ MIDDLEWARE = [
 
 ROOT_URLCONF = 'config.urls'
 
+# Adresse de l'admin Django : changeable en production pour sortir de la cible
+# par defaut des robots qui essaient des mots de passe sur /admin/ (audit
+# securite du 07/10). Doit se terminer par '/'.
+ADMIN_URL = env('DJANGO_ADMIN_URL', default='admin/')
+if not ADMIN_URL.endswith('/') or ADMIN_URL.startswith('/'):
+    raise ImproperlyConfigured("DJANGO_ADMIN_URL doit etre de la forme 'chemin/' (sans / initial).")
+
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
@@ -156,10 +163,21 @@ REST_FRAMEWORK = {
         'connexion': '20/hour',
         'mot-de-passe': '5/hour',
         'liste-attente': '10/hour',
+        # Repond existe / n'existe pas : bloque l'enumeration de comptes en masse.
+        'verification-existence': '20/hour',
     },
 }
 
+# /api/schema/, /api/docs/, /api/redoc/ : publics en dev, reserves au staff en
+# production (audit securite du 07/10 : la doc publique est une carte complete
+# de l'API, endpoints staff compris). Un membre de l'equipe s'authentifie d'abord
+# sur l'admin Django (session), puis ouvre /api/docs/.
+API_DOCS_PUBLIC = env.bool('API_DOCS_PUBLIC', default=DEBUG)
+
 SPECTACULAR_SETTINGS = {
+    'SERVE_PERMISSIONS': [
+        'rest_framework.permissions.AllowAny' if API_DOCS_PUBLIC else 'rest_framework.permissions.IsAdminUser',
+    ],
     'TITLE': 'Easy Way API',
     'DESCRIPTION': 'Community navigation and road incident reporting application',
     'VERSION': '1.0.0',

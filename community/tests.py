@@ -1173,3 +1173,30 @@ class SignalementSmsIndisponibleTests(TestCase):
         )
         self.assertEqual(reponse.status_code, 501)
         self.assertEqual(reponse.json()['code'], 'sms_not_available')
+
+
+class SuppressionIncidentAuthentificationTests(TestCase):
+    """Audit securite du 07/10 : un visiteur non connecte recoit 401 avant
+    toute recherche (avant : 404 sur un id inconnu)."""
+
+    def test_suppression_sans_connexion_refusee_401(self):
+        incident = creer_incident(creer_utilisateur())
+        for id_incident in (incident.id, '00000000-0000-0000-0000-000000000000'):
+            reponse = self.client.delete(reverse('community:incident-detail', kwargs={'id': id_incident}))
+            self.assertEqual(reponse.status_code, 401)
+        incident.refresh_from_db()
+        self.assertEqual(incident.statut, StatutIncident.ACTIF)
+
+    def test_lecture_reste_publique(self):
+        incident = creer_incident(creer_utilisateur())
+        self.assertEqual(self.client.get(reverse('community:incident-detail', kwargs={'id': incident.id})).status_code, 200)
+
+    def test_un_autre_utilisateur_ne_peut_pas_supprimer(self):
+        incident = creer_incident(creer_utilisateur())
+        autre = creer_utilisateur(email='autre@easyway.local')
+        reponse = self.client.delete(
+            reverse('community:incident-detail', kwargs={'id': incident.id}), **connecter(self.client, autre.telephone),
+        )
+        self.assertEqual(reponse.status_code, 404)
+        incident.refresh_from_db()
+        self.assertEqual(incident.statut, StatutIncident.ACTIF)
