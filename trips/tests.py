@@ -1,7 +1,7 @@
 import json
 from datetime import datetime, timezone as dt_timezone
 from decimal import Decimal
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, Mock, call, patch
 
 import redis
 import requests
@@ -119,7 +119,7 @@ class ClientFactice(ClientRoutage):
         self.dernier_cap_origine = None
         self.dernier_alternatives = None
 
-    def calculer_itineraires(self, depart, arrivee, options, cap_origine=None, alternatives=True):
+    def calculer_itineraires(self, depart, arrivee, options, cap_origine=None, alternatives=True, etapes=None):
         self.appels += 1
         self.dernieres_options = options
         self.dernier_cap_origine = cap_origine
@@ -1216,8 +1216,12 @@ class ConsommateurPositionsTests(TestCase):
 
         bucket = ConsommateurPositions._bucket_5min(ConsommateurPositions._parser_horodatage('2026-01-01T10:00:00+00:00'))
         pipe = connexion.pipeline.return_value.__enter__.return_value
-        pipe.hincrbyfloat.assert_called_once_with(f'trafic:accumulateur:42:{bucket}', 'somme_vitesse', 30.0)
-        pipe.hincrby.assert_called_once_with(f'trafic:accumulateur:42:{bucket}', 'nombre', 1)
+        cle = f'trafic:accumulateur:42:{bucket}'
+        # Tous trajets confondus + par trajet (mediane par conducteur, cf. _accumuler).
+        self.assertEqual(pipe.hincrbyfloat.call_args_list, [
+            call(cle, 'somme_vitesse', 30.0), call(cle, 't:t1:somme', 30.0),
+        ])
+        self.assertEqual(pipe.hincrby.call_args_list, [call(cle, 'nombre', 1), call(cle, 't:t1:nombre', 1)])
         connexion.xack.assert_called_once_with(FLUX_POSITIONS, 'consommateurs-trafic', '1-1', '1-2')
 
     def test_correspondance_vide_acquitte_sans_accumuler(self):
