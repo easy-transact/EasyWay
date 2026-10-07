@@ -1150,3 +1150,26 @@ class IncidentModerationApiTests(TestCase):
         self.assertEqual(reponse.status_code, 403)
         self.incident.refresh_from_db()
         self.assertEqual(self.incident.statut, StatutIncident.ACTIF)
+
+
+class SignalementSmsIndisponibleTests(TestCase):
+    """Section 7 du contrat d'API : chemins prets, 501 tant que la passerelle
+    SMS n'est pas en place -- l'application masque alors l'envoi par SMS."""
+
+    def test_identifiants_sms_501(self):
+        jetons = connecter(self.client, creer_utilisateur().telephone)
+        reponse = self.client.post(reverse('community:sms-identifiants'), **jetons)
+        self.assertEqual(reponse.status_code, 501)
+        self.assertEqual(reponse.json()['code'], 'sms_not_available')
+
+    def test_identifiants_sms_exige_une_connexion(self):
+        self.assertEqual(self.client.post(reverse('community:sms-identifiants')).status_code, 401)
+
+    @override_settings(HMAC_MODE='enforce', HMAC_CLES={'v1': 'secret'})
+    def test_reception_sms_501_sans_jeton_ni_signature(self):
+        reponse = self.client.post(
+            reverse('community:sms-entrant'), {'from': '+237690000000', 'text': 'EW1 ...'},
+            content_type='application/json',
+        )
+        self.assertEqual(reponse.status_code, 501)
+        self.assertEqual(reponse.json()['code'], 'sms_not_available')

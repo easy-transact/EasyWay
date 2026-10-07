@@ -757,3 +757,85 @@ class IncidentSupprimerView(APIView):
         invalider_cache_cellule(cellule)
         temps_reel.publier_retrait(incident_id, cellule, temps_reel.RAISON_MODERE)
         return Response(IncidentModerationSerializer(incident).data)
+
+
+# --- Signalements par SMS (contrat d'API mobile, section 7) ---------------
+# Chemins figes des maintenant pour que l'application puisse s'y brancher ;
+# les deux repondent 501 `sms_not_available` tant que la passerelle SMS n'est
+# pas choisie. L'application masque "Envoyer par SMS" sur ce 501.
+
+SMS_INDISPONIBLE = {
+    'detail': 'SMS reporting is not available yet, we are working on it.',
+    'code': 'sms_not_available',
+}
+
+
+@extend_schema(
+    tags=['SMS'],
+    summary='Identifiants de signalement par SMS (pas encore disponible)',
+    description=(
+        "Repond 501 `sms_not_available` tant que la passerelle SMS n'est pas en place. "
+        "Reponse prevue : {sms_id, secret, number} -- sms_id 6 caracteres base 32 "
+        "Crockford stable par compte, secret 32 octets base 64 remplace a chaque appel, "
+        "number = numero de reception (+237...)."
+    ),
+    request=None,
+    responses={501: MessageSerializer},
+)
+class SmsIdentifiantsView(APIView):
+    """POST /api/users/me/sms-credentials/
+
+    TODO(SMS) :
+      - champs sms_id (unique, 6 car. Crockford sans I/L/O/U) et secret SMS
+        sur Utilisateur (ou modele dedie) + migration ;
+      - chaque appel genere un nouveau secret (secrets.token_bytes(32)) et
+        invalide le precedent ; sms_id stable ;
+      - `number` lu depuis les settings (SMS_NUMERO_RECEPTION), pas en dur ;
+      - renvoyer {sms_id, secret (base 64), number}.
+    """
+
+    def post(self, request):
+        return Response(SMS_INDISPONIBLE, status=status.HTTP_501_NOT_IMPLEMENTED)
+
+
+@extend_schema(
+    tags=['SMS'],
+    summary='Reception des SMS de signalement (passerelle, pas encore disponible)',
+    description=(
+        "Appele par la passerelle SMS, jamais par l'application. Repond 501 "
+        "`sms_not_available` tant que la passerelle n'est pas choisie. Format du "
+        "message : `EW1 <sms_id> <code> <lat> <lon> <cap|-> <ts base36> <nonce> <signature>`."
+    ),
+    request=None,
+    responses={501: MessageSerializer},
+)
+class SmsEntrantView(APIView):
+    """POST /api/sms/inbound/
+
+    TODO(SMS) -- une fois la passerelle choisie :
+      - authentification propre a la passerelle (jeton dans l'URL, signature
+        de la passerelle ou liste d'IP) -- jamais un jeton utilisateur ; la
+        signature HMAC de l'appli ne s'applique pas (/api/sms/ exempte) ;
+      - adaptateur : extraire expediteur + texte du format de la passerelle ;
+      - normaliser le texte (strip, espaces multiples -> une, majuscules) ;
+      - controles dans l'ordre, arret au premier echec :
+          1. prefixe EW1, 2. syntaxe des 9 champs, 3. sms_id connu et compte
+          actif, 4. signature = base32_crockford(HMAC-SHA256(secret,
+          champs 1-8)[0:5]) comparee avec hmac.compare_digest,
+          5. horodatage entre -10 min et +2 min, 6. 10 SMS acceptes / compte /
+          heure, 7. rejeu : cle sms:{sms_id}:{ts}:{nonce} (meme cle que
+          l'Idempotency-Key HTTP de l'appli) ;
+      - creation via ServiceIncident().signaler (memes controles type/subtype),
+        duree de vie a partir de l'horodatage du message, source="SMS"
+        (nouveau champ Incident.source + migration) ;
+      - code categorie/sous-choix : table figee de la section 7 (1x..8x) ;
+      - message refuse : aucune reponse SMS, journaliser l'etape en echec,
+        sms_id et numero expediteur ;
+      - decision ouverte : SMS de confirmation pour les messages acceptes.
+    """
+
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        return Response(SMS_INDISPONIBLE, status=status.HTTP_501_NOT_IMPLEMENTED)

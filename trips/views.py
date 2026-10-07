@@ -33,9 +33,12 @@ from .serializers import (
     ZoneVitesseCreationSerializer,
     ZoneVitesseModificationSerializer,
     ZoneVitesseSerializer,
+    ZonesVitesseSurTrajetSerializer,
+    ZoneVitesseSurTrajetSerializer,
 )
 from .services.producteur_evenements import FLUX_POSITIONS, ProducteurRedisStreams
 from .services.service_itineraire import ServiceItineraire
+from .services.zones_vitesse import zones_sur_trajet
 
 DUREE_PERIODE = {
     'week': timedelta(days=7),
@@ -312,6 +315,31 @@ class LimiteVitesseView(APIView):
             'zone_name': None,
             'source': 'default',
         }).data)
+
+
+@extend_schema(
+    tags=['Speed Zones'],
+    summary="Zones de vitesse le long d'un trajet",
+    description=(
+        "Remplace le sondage de /api/speed-limit/ pendant la conduite : un appel par "
+        "itineraire (au depart et a chaque recalcul) avec geometry = routes/calculate -> "
+        "geometry. Renvoie chaque zone active traversee, avec start_m/end_m en metres "
+        "depuis le debut du trajet, triees par start_m. Des zones peuvent se chevaucher : "
+        "la plus restrictive gagne, meme regle que /api/speed-limit/. Hors de toute zone, "
+        "la limite reste celle du road_class des manoeuvres. buffer_m (defaut "
+        f"{BUFFER_M_ZONE_VITESSE}, max 100) : distance maximale zone/trajet."
+    ),
+    request=ZonesVitesseSurTrajetSerializer,
+    responses={200: ZoneVitesseSurTrajetSerializer(many=True), 400: MessageSerializer},
+)
+class ZonesVitesseSurTrajetView(APIView):
+    def post(self, request):
+        serializer = ZonesVitesseSurTrajetSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        resultats = zones_sur_trajet(
+            serializer.validated_data['geometry'], serializer.validated_data['buffer_m'],
+        )
+        return Response(ZoneVitesseSurTrajetSerializer(resultats, many=True).data)
 
 
 @extend_schema_view(

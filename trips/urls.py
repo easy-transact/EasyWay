@@ -11,6 +11,11 @@ urlpatterns = [
     path('trips/<uuid:id>/rate/', views.NoterTrajetView.as_view(), name='trajet-note'),
     path('telemetry/positions/', views.TelemetriePositionsView.as_view(), name='telemetrie-positions'),
     path('speed-limit/', views.LimiteVitesseView.as_view(), name='limite-vitesse'),
+    path(
+        'speed-zones/along-route/',
+        views.ZonesVitesseSurTrajetView.as_view(),
+        name='zones-vitesse-sur-trajet',
+    ),
 
     # Back-office (reserve au staff)
     path('staff/speed-zones/', views.ZoneVitesseListCreateView.as_view(), name='staff-zones-vitesse'),

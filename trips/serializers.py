@@ -402,6 +402,36 @@ class LimiteVitesseSerializer(serializers.Serializer):
     source = serializers.ChoiceField(choices=['zone', 'default'])
 
 
+class ZonesVitesseSurTrajetSerializer(serializers.Serializer):
+    """POST /api/speed-zones/along-route/ : meme geometrie que
+    routes/calculate -> geometry (polyline6), decodee une seule fois ici en
+    (lon, lat) -- meme validation que IncidentsSurTrajetSerializer."""
+
+    geometry = serializers.CharField()
+    # Defaut = BUFFER_M_ZONE_VITESSE (trips/views.py), le couloir de /speed-limit/.
+    buffer_m = serializers.IntegerField(required=False, default=30, min_value=1, max_value=100)
+
+    def validate_geometry(self, valeur):
+        try:
+            points = decoder_polyline6(valeur)
+        except Exception:
+            raise serializers.ValidationError('Invalid encoded polyline.')
+        if len(points) < 2:
+            raise serializers.ValidationError('geometry must decode to at least 2 points.')
+        return points
+
+
+class ZoneVitesseSurTrajetSerializer(serializers.Serializer):
+    """Une ZoneVitesse traversee par le trajet, situee en metres depuis le
+    debut du trajet (cf. trips/services/zones_vitesse.py)."""
+
+    id = serializers.UUIDField(source='zone.id')
+    name = serializers.CharField(source='zone.nom', allow_blank=True)
+    speed_limit_kmh = serializers.IntegerField(source='zone.vitesse_max_kmh')
+    start_m = serializers.IntegerField()
+    end_m = serializers.IntegerField()
+
+
 class TrajetModerationSerializer(serializers.ModelSerializer):
     """GET /api/staff/trips/... : forme allegee pour la table de moderation
     (pas de routes/manoeuvres imbriquees, contrairement a TrajetSerializer,

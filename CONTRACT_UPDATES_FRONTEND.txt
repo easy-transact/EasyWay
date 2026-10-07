@@ -1,0 +1,82 @@
+EASYWAY API — MISES A JOUR DU CONTRAT D'API (reponse backend)
+Reponse au "Contrat d'API" de l'application (statut 25/08/2026, sections 5 bis,
+6 et 7). Ecrit le 07/10/2026 contre le code du serveur. La reference reste
+GET /api/schema/?format=json (ou /api/docs/).
+
+------------------------------------------------------------
+1. DEJA DISPONIBLE — le contrat le liste a tort comme "a brancher"
+
+  GET /api/config/                        (public, sans jeton)
+    { "cities": [...], "vehicle_types": {"VOITURE": "Voiture", ...},
+      "incident_types": {"DANGER": "Danger", ...},
+      "minimum_app_version": "x.y.z" }
+    -> plus besoin de coder ces listes en dur.
+
+  POST   /api/devices/                    enregistrer / mettre a jour un appareil
+    { "push_token", "platform", "app_version", "os_version", "language"? }
+  DELETE /api/devices/{id}/               desenregistrer (a la deconnexion)
+    L'enregistrement fonctionne ; l'ENVOI des notifications n'existe toujours
+    pas (voir 4) -- garder l'ecran Notifications grise.
+
+  POST /api/routes/calculate/  — etapes intermediaires
+    "waypoints": [ {"lat": ..., "lon": ...}, ... ]   dans l'ordre de passage.
+    Chaque manoeuvre porte "stop_index" : l'index (0-based) de l'etape
+    atteinte quand elle termine un troncon intermediaire, sinon null.
+    (Le constat du 11/09 "waypoints ignore" n'est plus vrai.)
+
+  GET /api/incidents/nearby/  — deux modes en plus des cellules H3
+    lat + lon (+ radius_km, defaut 10, max 20)
+    min_lat + min_lon + max_lat + max_lon   (boite englobante, cote <= 50 km)
+    -> leve la limite des "trois anneaux" en vue large : utiliser la bbox de
+       l'ecran. Le mode cells reste le plus rapide (cache par cellule) pour
+       l'appel repete en conduite.
+
+  Signalements en temps reel (WebSocket)
+    wss://easyway-api.easy-transact.net/ws/incidents/
+    Protocole complet : REALTIME_INCIDENTS_FRONTEND.txt.
+
+------------------------------------------------------------
+2. NOUVEAU — zones de vitesse le long du trajet (section 6)
+
+  POST /api/speed-zones/along-route/      (authentifie)
+    { "geometry": "<polyline6 de routes/calculate>", "buffer_m": 30 }
+    buffer_m optionnel, defaut 30, max 100.
+
+  Reponse, triee par start_m :
+    [ { "id": "...", "name": "Akwa", "speed_limit_kmh": 50,
+        "start_m": 1109, "end_m": 3328 }, ... ]
+    start_m / end_m : metres depuis le debut du trajet, le long du trajet.
+
+  Usage :
+    - un appel au depart et a chaque recalcul d'itineraire ;
+    - remplace le sondage de /api/speed-limit/ tous les 250 m (plus de
+      retard en sortie de zone) ;
+    - des zones peuvent se chevaucher : la plus restrictive couvrant la
+      distance parcourue gagne (meme regle que /api/speed-limit/) ;
+    - hors de toute zone : limite deduite du road_class, comme aujourd'hui.
+  /api/speed-limit/ reste disponible (hors trajet, ou en secours).
+
+------------------------------------------------------------
+3. SIGNALEMENTS PAR SMS (section 7) — chemins prets, pas encore actifs
+
+  POST /api/users/me/sms-credentials/     (authentifie)
+  POST /api/sms/inbound/                  (appele par la passerelle SMS)
+
+  Les deux repondent pour l'instant :
+    501  { "detail": "SMS reporting is not available yet, we are working on it.",
+           "code": "sms_not_available" }
+
+  La passerelle SMS n'est pas encore choisie. Cote application : appeler
+  sms-credentials apres la connexion comme prevu ; sur 501, ne pas proposer
+  "Envoyer par SMS". Le jour ou le serveur renvoie 200
+  { sms_id, secret, number }, l'option apparait sans nouvelle version.
+  Le format du message et la signature restent ceux de la section 7.
+
+------------------------------------------------------------
+4. TOUJOURS NON DISPONIBLE
+
+  - Envoi des notifications push (pas de projet Firebase, pas de politique
+    d'envoi respectant les reglages de notification).
+  - Cartes hors ligne (paquets de tuiles, GET /api/offline/packs/).
+  - Etat des routes (note par troncon, score du trajet).
+  - Comprehension des signalements vocaux.

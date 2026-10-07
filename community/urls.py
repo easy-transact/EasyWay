@@ -13,6 +13,9 @@ urlpatterns = [
     path('incidents/<uuid:id>/', views.IncidentDetailView.as_view(), name='incident-detail'),
     path('incidents/<uuid:id>/vote/', views.VoterIncidentView.as_view(), name='incident-vote'),
     path('users/me/reports/', views.MesSignalementsView.as_view(), name='mes-signalements'),
+    # Signalements par SMS : 501 tant que la passerelle n'est pas en place.
+    path('users/me/sms-credentials/', views.SmsIdentifiantsView.as_view(), name='sms-identifiants'),
+    path('sms/inbound/', views.SmsEntrantView.as_view(), name='sms-entrant'),
 
     # Back-office (moderation, reserve au staff)
     path('staff/incidents/', views.IncidentModerationListView.as_view(), name='staff-incidents'),

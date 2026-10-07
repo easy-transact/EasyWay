@@ -1513,3 +1513,67 @@ class FlusherEchantillonsVitesseTests(TestCase):
 
         self.assertEqual(nb, 0)
         connexion.srem.assert_called_once_with('trafic:buckets:actifs', 'trafic:accumulateur:pasunentier')
+
+
+class ZonesVitesseSurTrajetTests(TestCase):
+    """POST /api/speed-zones/along-route/ : trajet est-ouest ~4,4 km le long de
+    lat 4.05 (0.01 degre de longitude ~ 1 109 m a cette latitude)."""
+
+    TRAJET = [(9.70, 4.05), (9.72, 4.05), (9.74, 4.05)]
+
+    def setUp(self):
+        self.utilisateur = creer_utilisateur()
+        self.jetons = connecter(self.client, self.utilisateur.telephone)
+
+    def _zone(self, coords, vitesse, actif=True, nom=''):
+        from django.contrib.gis.geos import LineString, Point
+
+        from .models import ZoneVitesse
+
+        return ZoneVitesse.objects.create(
+            nom=nom, vitesse_max_kmh=vitesse, actif=actif,
+            point_depart=Point(*coords[0], srid=4326), point_arrivee=Point(*coords[-1], srid=4326),
+            geometrie=LineString(coords, srid=4326),
+        )
+
+    def _appeler(self, geometrie=None, **corps):
+        return self.client.post(
+            reverse('trips:zones-vitesse-sur-trajet'),
+            {'geometry': geometrie or encoder_polyline6(self.TRAJET), **corps},
+            content_type='application/json', **self.jetons,
+        )
+
+    def test_zone_sur_le_trajet_situee_en_metres_depuis_le_depart(self):
+        zone = self._zone([(9.71, 4.05), (9.73, 4.05)], 50, nom='Akwa')
+        reponse = self._appeler()
+        self.assertEqual(reponse.status_code, 200)
+        [resultat] = reponse.json()
+        self.assertEqual(resultat['id'], str(zone.id))
+        self.assertEqual((resultat['name'], resultat['speed_limit_kmh']), ('Akwa', 50))
+        self.assertAlmostEqual(resultat['start_m'], 1109, delta=15)
+        self.assertAlmostEqual(resultat['end_m'], 3328, delta=15)
+
+    def test_zone_qui_deborde_du_trajet_bornee_au_trajet(self):
+        self._zone([(9.69, 4.05), (9.75, 4.05)], 70)
+        [resultat] = self._appeler().json()
+        self.assertEqual(resultat['start_m'], 0)
+        self.assertAlmostEqual(resultat['end_m'], 4437, delta=15)
+
+    def test_zone_parallele_hors_couloir_et_zone_inactive_exclues(self):
+        self._zone([(9.71, 4.0505), (9.73, 4.0505)], 40)  # ~55 m au nord, buffer 30
+        self._zone([(9.71, 4.05), (9.73, 4.05)], 50, actif=False)
+        self.assertEqual(self._appeler().json(), [])
+
+    def test_buffer_elargi_inclut_la_zone_parallele(self):
+        self._zone([(9.71, 4.0505), (9.73, 4.0505)], 40)
+        self.assertEqual(len(self._appeler(buffer_m=80).json()), 1)
+
+    def test_chevauchements_renvoyes_tries_par_debut(self):
+        self._zone([(9.72, 4.05), (9.73, 4.05)], 30)
+        self._zone([(9.71, 4.05), (9.73, 4.05)], 50)
+        resultats = self._appeler().json()
+        self.assertEqual([r['speed_limit_kmh'] for r in resultats], [50, 30])
+
+    def test_geometrie_invalide_rejetee(self):
+        self.assertEqual(self._appeler(geometrie='pas une polyligne!!!').status_code, 400)
+        self.assertEqual(self._appeler(geometrie=encoder_polyline6([(9.70, 4.05)])).status_code, 400)

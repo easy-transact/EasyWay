@@ -236,6 +236,8 @@ HMAC_CHEMINS_EXEMPTES = [
     '/api/schema/',
     '/api/redoc/',
     '/api/dev/',
+    # Passerelle SMS : ne peut pas signer, s'authentifiera a sa maniere (TODO(SMS)).
+    '/api/sms/',
 ]
 # Sans config LOGGING, Python n'affiche que WARNING et plus : les succes de
 # signature (INFO, cf. signature_hmac.py) n'apparaitraient pas dans
