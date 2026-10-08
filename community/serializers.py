@@ -91,9 +91,16 @@ class IncidentModerationSerializer(IncidentSerializer):
     author_name = serializers.CharField(source='auteur.nom_complet', read_only=True)
     member_since = serializers.DateTimeField(source='auteur.date_joined', read_only=True)
     reason = serializers.CharField(source='motif_retrait', read_only=True, allow_null=True)
+    # "Probablement faux" (cf. ads_admin.services.filtre_incidents_suspects) et
+    # nombre de signalements du meme auteur retires sur 7 jours : annotes par
+    # IncidentModerationListView, absents (None) ailleurs.
+    suspect = serializers.BooleanField(read_only=True, default=None)
+    author_removed_7d = serializers.IntegerField(source='auteur_retraits_7j', read_only=True, default=None)
 
     class Meta(IncidentSerializer.Meta):
-        fields = IncidentSerializer.Meta.fields + ['author_phone', 'author_name', 'member_since', 'reason']
+        fields = IncidentSerializer.Meta.fields + [
+            'author_phone', 'author_name', 'member_since', 'reason', 'suspect', 'author_removed_7d',
+        ]
         read_only_fields = fields
 
     @extend_schema_field(serializers.CharField())

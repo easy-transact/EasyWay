@@ -1,7 +1,29 @@
+from django.db.models import Count
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
-from .models import AdresseEnregistree, Etablissement, LibelleAdresse, Lieu, RechercheRecente, TypeEtablissement
+from .models import (
+    AdresseEnregistree,
+    Etablissement,
+    LibelleAdresse,
+    Lieu,
+    RechercheRecente,
+    StatutLieu,
+    TypeEtablissement,
+)
+
+
+def stats_auteurs_lieux(ids_auteurs):
+    """{id_auteur: {statut: nombre de lieux proposes}} en une seule requete."""
+    stats = {}
+    lignes = (
+        Lieu.objects.filter(propose_par_id__in=set(ids_auteurs))
+        .values('propose_par_id', 'statut')
+        .annotate(n=Count('pk'))
+    )
+    for ligne in lignes:
+        stats.setdefault(ligne['propose_par_id'], {})[ligne['statut']] = ligne['n']
+    return stats
 
 # Champs declares avec `source=` : la reponse API parle anglais, les modeles/
 # colonnes DB restent en francais (aucune migration, cf. discussion).
@@ -232,14 +254,37 @@ class LieuModerationSerializer(serializers.ModelSerializer):
     lon = serializers.SerializerMethodField()
     status = serializers.CharField(source='statut', read_only=True)
     proposed_by = serializers.SerializerMethodField()
+    proposer = serializers.SerializerMethodField()
+    created_at = serializers.DateTimeField(source='cree_le', read_only=True, allow_null=True)
+    reason = serializers.CharField(source='motif_rejet', read_only=True, allow_null=True)
 
     class Meta:
         model = Lieu
         fields = [
             'id', 'name', 'category', 'address', 'neighborhood', 'city',
-            'lat', 'lon', 'source', 'status', 'proposed_by',
+            'lat', 'lon', 'source', 'status', 'proposed_by', 'proposer', 'created_at', 'reason',
         ]
         read_only_fields = fields
+
+    @extend_schema_field(serializers.DictField(allow_null=True))
+    def get_proposer(self, lieu):
+        """Auteur + son historique (lieux approuves/rejetes), pour juger une
+        proposition d'un coup d'oeil. stats_auteurs est calcule une fois par
+        page par la vue (cf. LieuModerationListView), sinon une requete ici."""
+        if not lieu.propose_par_id:
+            return None
+        stats = self.context.get('stats_auteurs')
+        if stats is None:
+            stats = stats_auteurs_lieux([lieu.propose_par_id])
+        auteur = lieu.propose_par
+        return {
+            'id': str(auteur.id),
+            'name': auteur.nom_complet,
+            'phone': auteur.telephone,
+            'member_since': auteur.date_joined,
+            'approved': stats.get(auteur.id, {}).get(StatutLieu.APPROUVE, 0),
+            'rejected': stats.get(auteur.id, {}).get(StatutLieu.REJETE, 0),
+        }
 
     @extend_schema_field(serializers.FloatField())
     def get_lat(self, lieu):
@@ -256,6 +301,17 @@ class LieuModerationSerializer(serializers.ModelSerializer):
 
 class LieuRejetSerializer(serializers.Serializer):
     reason = serializers.CharField(max_length=255)
+
+
+class LieuActionGroupeeSerializer(serializers.Serializer):
+    ids = serializers.ListField(child=serializers.UUIDField(), min_length=1, max_length=100)
+    action = serializers.ChoiceField(choices=['approve', 'reject', 'delete'])
+    reason = serializers.CharField(max_length=255, required=False, allow_blank=True)
+
+    def validate(self, donnees):
+        if donnees['action'] == 'reject' and not donnees.get('reason', '').strip():
+            raise serializers.ValidationError({'reason': 'Un motif est requis pour rejeter.'})
+        return donnees
 
 
 class EtablissementSerializer(serializers.ModelSerializer):

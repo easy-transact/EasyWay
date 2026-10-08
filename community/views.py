@@ -6,6 +6,8 @@ from django.contrib.gis.geos import LineString, Point, Polygon
 from django.contrib.gis.measure import D
 from django.core.cache import cache
 from django.db import transaction
+from django.db.models import BooleanField, Count, ExpressionWrapper, OuterRef, Subquery
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, OpenApiResponse, extend_schema, extend_schema_view
@@ -17,6 +19,14 @@ from rest_framework.views import APIView
 
 from accounts.pagination import StaffPagination
 from accounts.serializers import MessageSerializer
+from ads_admin.models import NiveauNotification, TypeNotification
+from ads_admin.services import (
+    FENETRE_ABUS,
+    SEUIL_RETRAITS_ABUS,
+    filtre_incidents_suspects,
+    journaliser,
+    notifier,
+)
 from places.utils import normaliser
 
 from .cache_incidents import (
@@ -68,6 +78,30 @@ RAYON_KM_MAX = 20
 # qu'en km² pour rester coherent avec RAYON_KM_MAX (diametre ~2x40km) sans
 # etre mesure sur donnees reelles non plus.
 BBOX_COTE_MAX_KM = 50
+
+
+def _libelle_incident(incident):
+    lieu = incident.nom_voie or incident.ville
+    return f'{incident.get_type_display()} · {lieu}' if lieu else incident.get_type_display()
+
+
+def _signaler_abus_eventuel(auteur):
+    """Notifie l'equipe quand un meme auteur accumule les signalements retires
+    (au plus une notification par auteur et par jour)."""
+    retraits = Incident.objects.filter(
+        auteur=auteur, statut=StatutIncident.RETIRE, cree_le__gte=timezone.now() - FENETRE_ABUS
+    ).count()
+    if retraits < SEUIL_RETRAITS_ABUS:
+        return
+    notifier(
+        TypeNotification.ABUS,
+        titre='Comportement suspect',
+        texte=f'{auteur.nom_complet or auteur.telephone} : {retraits} signalements retirés en 7 jours',
+        lien=f'/users?search={auteur.telephone or ""}',
+        niveau=NiveauNotification.DANGER,
+        cle=f'abus-{auteur.id}-{timezone.localdate().isoformat()}',
+        une_seule_fois=True,
+    )
 
 
 def _distance_m(lat1, lon1, lat2, lon2):
@@ -691,13 +725,14 @@ class MesSignalementsView(APIView):
     ),
     parameters=[
         OpenApiParameter('status', OpenApiTypes.STR, description='Defaut ACTIF+EN_ATTENTE.'),
+        OpenApiParameter('suspect', OpenApiTypes.BOOL, description='Seulement les signalements probablement faux.'),
         OpenApiParameter('page', OpenApiTypes.INT),
         OpenApiParameter('page_size', OpenApiTypes.INT),
     ],
     responses={200: IncidentModerationSerializer(many=True)},
 )
 class IncidentModerationListView(APIView):
-    """GET /api/staff/incidents/?status=&page= : file de moderation des incidents."""
+    """GET /api/staff/incidents/?status=&suspect=&page= : file de moderation des incidents."""
 
     permission_classes = [IsAdminUser]
     pagination_class = StaffPagination
@@ -708,6 +743,23 @@ class IncidentModerationListView(APIView):
             incidents = Incident.objects.filter(statut=statut)
         else:
             incidents = Incident.objects.filter(statut__in=[StatutIncident.ACTIF, StatutIncident.EN_ATTENTE])
+        retraits_auteur = (
+            Incident.objects.filter(
+                auteur_id=OuterRef('auteur_id'),
+                statut=StatutIncident.RETIRE,
+                cree_le__gte=timezone.now() - FENETRE_ABUS,
+            )
+            .order_by()
+            .values('auteur_id')
+            .annotate(n=Count('pk'))
+            .values('n')
+        )
+        incidents = incidents.select_related('auteur').annotate(
+            suspect=ExpressionWrapper(filtre_incidents_suspects(), output_field=BooleanField()),
+            auteur_retraits_7j=Coalesce(Subquery(retraits_auteur), 0),
+        )
+        if request.query_params.get('suspect') in ('1', 'true'):
+            incidents = incidents.filter(filtre_incidents_suspects())
         incidents = incidents.order_by('-cree_le')
 
         paginateur = self.pagination_class()
@@ -736,6 +788,11 @@ class IncidentRetraitStaffView(APIView):
         incident.retirer(motif=serializer.validated_data['reason'])
         invalider_cache_cellule(incident.cellule_h3_res8)
         temps_reel.publier_retrait(incident.id, incident.cellule_h3_res8, temps_reel.RAISON_MODERE)
+        journaliser(
+            request.user, 'incidents.remove', incident, libelle=_libelle_incident(incident),
+            apres={'motif': serializer.validated_data['reason']},
+        )
+        _signaler_abus_eventuel(incident.auteur)
         return Response(IncidentModerationSerializer(incident).data)
 
 
@@ -756,6 +813,7 @@ class IncidentSupprimerView(APIView):
     def delete(self, request, id):
         incident = get_object_or_404(Incident, id=id)
         cellule, incident_id = incident.cellule_h3_res8, incident.id
+        journaliser(request.user, 'incidents.delete', incident, libelle=_libelle_incident(incident))
         incident.delete()
         invalider_cache_cellule(cellule)
         temps_reel.publier_retrait(incident_id, cellule, temps_reel.RAISON_MODERE)

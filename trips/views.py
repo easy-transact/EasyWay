@@ -15,6 +15,7 @@ from rest_framework.views import APIView
 
 from accounts.models import Parametres
 from accounts.pagination import StaffPagination
+from ads_admin.services import journaliser
 from accounts.serializers import MessageSerializer
 
 from .exceptions import TransitionInvalide
@@ -342,6 +343,10 @@ class ZonesVitesseSurTrajetView(APIView):
         return Response(ZoneVitesseSurTrajetSerializer(resultats, many=True).data)
 
 
+def _libelle_zone(zone):
+    return f'{zone.nom} · {zone.vitesse_max_kmh} km/h' if zone.nom else str(zone)
+
+
 @extend_schema_view(
     get=extend_schema(
         tags=['Staff Speed Zones'],
@@ -414,6 +419,7 @@ class ZoneVitesseListCreateView(APIView):
             vitesse_max_kmh=donnees['vitesse_max_kmh'],
             cree_par=request.user,
         )
+        journaliser(request.user, 'speedzones.create', zone, libelle=_libelle_zone(zone))
         return Response(ZoneVitesseSerializer(zone).data, status=status.HTTP_201_CREATED)
 
 
@@ -448,10 +454,15 @@ class ZoneVitesseDetailView(APIView):
         serializer = ZoneVitesseModificationSerializer(zone, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
+        journaliser(
+            request.user, 'speedzones.update', zone, libelle=_libelle_zone(zone),
+            apres={'champs': sorted(request.data.keys())},
+        )
         return Response(ZoneVitesseSerializer(zone).data)
 
     def delete(self, request, id):
         zone = get_object_or_404(ZoneVitesse, id=id)
+        journaliser(request.user, 'speedzones.delete', zone, libelle=_libelle_zone(zone))
         zone.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 

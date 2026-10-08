@@ -100,3 +100,59 @@ class EntreeAudit(models.Model):
 
     def __str__(self):
         return f"{self.action} - {self.type_cible}:{self.identifiant_cible}"
+
+
+class TypeNotification(models.TextChoices):
+    LIEU = 'LIEU', 'Lieu propose'
+    INCIDENT = 'INCIDENT', 'Incident conteste'
+    ABUS = 'ABUS', 'Comportement suspect'
+    ATTENTE = 'ATTENTE', "Liste d'attente"
+    IMPORT = 'IMPORT', 'Import'
+    PUB = 'PUB', 'Publicite'
+
+
+class NiveauNotification(models.TextChoices):
+    INFO = 'INFO', 'Info'
+    SUCCES = 'SUCCES', 'Succes'
+    ATTENTION = 'ATTENTION', 'Attention'
+    DANGER = 'DANGER', 'Danger'
+
+
+class NotificationStaff(models.Model):
+    """Notification du back-office, partagee par toute l'equipe staff (pas une
+    ligne par destinataire) : lue_par trace qui l'a deja vue. Les evenements
+    frequents (lieux proposes, inscriptions) sont regroupes sur une meme ligne
+    via cle_regroupement plutot que d'inonder la cloche, cf. services.notifier()."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    type = models.CharField(max_length=20, choices=TypeNotification.choices)
+    niveau = models.CharField(max_length=20, choices=NiveauNotification.choices, default=NiveauNotification.INFO)
+    titre = models.CharField(max_length=255)
+    texte = models.CharField(max_length=500, blank=True)
+    # Chemin du back-office (ex. "/places?statut=EN_ATTENTE"), pas une URL absolue.
+    lien = models.CharField(max_length=255, blank=True)
+    cle_regroupement = models.CharField(max_length=100, null=True, blank=True, db_index=True)
+    compteur = models.PositiveIntegerField(default=1)
+    cree_le = models.DateTimeField(auto_now_add=True)
+    mis_a_jour_le = models.DateTimeField(default=timezone.now)
+    lue_par = models.ManyToManyField(settings.AUTH_USER_MODEL, blank=True, related_name='notifications_staff_lues')
+
+    class Meta:
+        db_table = 'notification_staff'
+        indexes = [models.Index(fields=['-mis_a_jour_le'])]
+
+    def __str__(self):
+        return self.titre
+
+
+class PreferencesNotificationStaff(models.Model):
+    utilisateur = models.OneToOneField(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, primary_key=True,
+        related_name='preferences_notifications_staff',
+    )
+    types_desactives = ArrayField(models.CharField(max_length=20), blank=True, default=list)
+    navigateur = models.BooleanField(default=False)
+    son = models.BooleanField(default=False)
+
+    class Meta:
+        db_table = 'preferences_notification_staff'

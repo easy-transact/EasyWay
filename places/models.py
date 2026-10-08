@@ -79,6 +79,10 @@ class Lieu(models.Model):
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
         related_name='lieux_proposes',
     )
+    # Null pour les lieux crees avant l'ajout du champ : la file de
+    # moderation les classe en dernier.
+    cree_le = models.DateTimeField(auto_now_add=True, null=True)
+    motif_rejet = models.CharField(max_length=255, null=True, blank=True)
 
     class Meta:
         db_table = 'lieu'
@@ -104,7 +108,8 @@ class Lieu(models.Model):
 
     def rejeter(self, motif: str):
         self.statut = StatutLieu.REJETE
-        self.save(update_fields=['statut'])
+        self.motif_rejet = motif
+        self.save(update_fields=['statut', 'motif_rejet'])
 
     def fusionner_avec(self, lieu: 'Lieu'):
         self.statut = StatutLieu.FUSIONNE

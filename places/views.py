@@ -4,6 +4,7 @@ from django.contrib.gis.db.models.functions import Distance
 from django.contrib.gis.geos import Point
 from django.contrib.gis.measure import D
 from django.contrib.postgres.search import TrigramSimilarity
+from django.db.models import F, Q
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import (
     OpenApiParameter,
@@ -21,18 +22,21 @@ from rest_framework.views import APIView
 
 from accounts.pagination import StaffPagination
 from accounts.serializers import MessageSerializer
+from ads_admin.services import journaliser
 
 from .models import AdresseEnregistree, Etablissement, Lieu, RechercheRecente, StatutLieu, Ville
 from .serializers import (
     AdresseEnregistreeSerializer,
     EtablissementEcritureSerializer,
     EtablissementSerializer,
+    LieuActionGroupeeSerializer,
     LieuDetailSerializer,
     LieuModerationSerializer,
     LieuPropositionSerializer,
     LieuRechercheSerializer,
     LieuRejetSerializer,
     RechercheRecenteSerializer,
+    stats_auteurs_lieux,
 )
 from .services.client_nominatim import ClientNominatim
 from .services.client_photon import ClientPhoton
@@ -382,24 +386,75 @@ class RechercheRecenteView(APIView):
     ),
     parameters=[
         OpenApiParameter('status', OpenApiTypes.STR, description='Defaut EN_ATTENTE.'),
+        OpenApiParameter('search', OpenApiTypes.STR, description='Nom, ville ou quartier.'),
         OpenApiParameter('page', OpenApiTypes.INT),
         OpenApiParameter('page_size', OpenApiTypes.INT),
     ],
     responses={200: LieuModerationSerializer(many=True)},
 )
 class LieuModerationListView(APIView):
-    """GET /api/staff/places/?status=&page= : file de moderation des lieux."""
+    """GET /api/staff/places/?status=&search=&page= : file de moderation des
+    lieux, les plus recents d'abord."""
 
     permission_classes = [IsAdminUser]
     pagination_class = StaffPagination
 
     def get(self, request):
         statut = request.query_params.get('status', StatutLieu.EN_ATTENTE)
-        lieux = Lieu.objects.filter(statut=statut).order_by('nom')
+        lieux = (
+            Lieu.objects.filter(statut=statut)
+            .select_related('propose_par')
+            .order_by(F('cree_le').desc(nulls_last=True), 'nom')
+        )
+        recherche = request.query_params.get('search', '').strip()
+        if recherche:
+            lieux = lieux.filter(
+                Q(nom_normalise__contains=normaliser(recherche))
+                | Q(ville__icontains=recherche)
+                | Q(quartier__icontains=recherche)
+            )
 
         paginateur = self.pagination_class()
         page = paginateur.paginate_queryset(lieux, request)
-        return paginateur.get_paginated_response(LieuModerationSerializer(page, many=True).data)
+        contexte = {'stats_auteurs': stats_auteurs_lieux(l.propose_par_id for l in page if l.propose_par_id)}
+        return paginateur.get_paginated_response(LieuModerationSerializer(page, many=True, context=contexte).data)
+
+
+# Rayon de recherche des doublons affiches dans la fiche de moderation --
+# meme ordre de grandeur que la detection a la proposition (ProposerLieuView).
+RAYON_DOUBLONS_M = 150
+
+
+@extend_schema(
+    tags=['Staff Places'],
+    summary="Actions groupees sur des lieux",
+    description=(
+        "Reserve au staff (is_staff). Approuve, rejette (motif requis) ou supprime "
+        "jusqu'a 100 lieux en une requete. Chaque lieu traite est journalise."
+    ),
+    request=LieuActionGroupeeSerializer,
+)
+class LieuActionGroupeeView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def post(self, request):
+        serializer = LieuActionGroupeeSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        action, motif = serializer.validated_data['action'], serializer.validated_data.get('reason', '')
+
+        traites = 0
+        for lieu in Lieu.objects.filter(id__in=serializer.validated_data['ids']):
+            if action == 'approve':
+                lieu.approuver()
+                journaliser(request.user, 'places.approve', lieu)
+            elif action == 'reject':
+                lieu.rejeter(motif=motif)
+                journaliser(request.user, 'places.reject', lieu, apres={'motif': motif})
+            else:
+                journaliser(request.user, 'places.delete', lieu)
+                lieu.delete()
+            traites += 1
+        return Response({'processed': traites})
 
 
 @extend_schema(
@@ -414,6 +469,7 @@ class LieuApprouverView(APIView):
     def post(self, request, id):
         lieu = get_object_or_404(Lieu, id=id)
         lieu.approuver()
+        journaliser(request.user, 'places.approve', lieu)
         return Response(LieuModerationSerializer(lieu).data)
 
 
@@ -433,6 +489,7 @@ class LieuRejeterView(APIView):
 
         lieu = get_object_or_404(Lieu, id=id)
         lieu.rejeter(motif=serializer.validated_data['reason'])
+        journaliser(request.user, 'places.reject', lieu, apres={'motif': serializer.validated_data['reason']})
         return Response(LieuModerationSerializer(lieu).data)
 
 
@@ -448,10 +505,43 @@ class LieuRejeterView(APIView):
     responses={204: None},
 )
 class LieuSupprimerView(APIView):
+    """GET : fiche de moderation (avec doublons proches) ; DELETE : suppression."""
+
     permission_classes = [IsAdminUser]
+
+    @extend_schema(
+        tags=['Staff Places'],
+        summary='Fiche de moderation d\'un lieu',
+        description=(
+            f'Reserve au staff (is_staff). `nearby` : lieux approuves ou en attente a moins '
+            f'de {RAYON_DOUBLONS_M} m, pour reperer un doublon avant d\'approuver.'
+        ),
+        responses={200: LieuModerationSerializer},
+    )
+    def get(self, request, id):
+        lieu = get_object_or_404(Lieu.objects.select_related('propose_par'), id=id)
+        proches = (
+            Lieu.objects.filter(
+                statut__in=[StatutLieu.APPROUVE, StatutLieu.EN_ATTENTE],
+                position__dwithin=(lieu.position, D(m=RAYON_DOUBLONS_M)),
+            )
+            .exclude(id=lieu.id)
+            .annotate(distance=Distance('position', lieu.position))
+            .order_by('distance')[:3]
+        )
+        donnees = LieuModerationSerializer(lieu).data
+        donnees['nearby'] = [
+            {
+                'id': str(p.id), 'name': p.nom, 'status': p.statut, 'distance_m': round(p.distance.m),
+                'lat': p.position.y, 'lon': p.position.x,
+            }
+            for p in proches
+        ]
+        return Response(donnees)
 
     def delete(self, request, id):
         lieu = get_object_or_404(Lieu, id=id)
+        journaliser(request.user, 'places.delete', lieu)
         lieu.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -497,6 +587,7 @@ class EtablissementListCreateView(APIView):
         serializer = EtablissementEcritureSerializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
         etablissement = serializer.save()
+        journaliser(request.user, 'establishments.create', etablissement)
         return Response(EtablissementSerializer(etablissement).data, status=status.HTTP_201_CREATED)
 
 
@@ -532,9 +623,11 @@ class EtablissementDetailView(APIView):
         )
         serializer.is_valid(raise_exception=True)
         serializer.save()
+        journaliser(request.user, 'establishments.update', etablissement, apres={'champs': sorted(request.data.keys())})
         return Response(EtablissementSerializer(etablissement).data)
 
     def delete(self, request, id):
         etablissement = get_object_or_404(Etablissement, id=id)
+        journaliser(request.user, 'establishments.delete', etablissement)
         etablissement.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)

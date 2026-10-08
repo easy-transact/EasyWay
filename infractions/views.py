@@ -10,6 +10,8 @@ from rest_framework.views import APIView
 
 from accounts.pagination import StaffPagination
 from accounts.serializers import MessageSerializer
+from ads_admin.models import NiveauNotification, TypeNotification
+from ads_admin.services import journaliser, notifier
 from places.utils import normaliser
 
 from .importation import FichierIllisible, importer, lire_fichier
@@ -188,4 +190,27 @@ class ImportInfractionsView(APIView):
             except FichierIllisible as exc:
                 return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
-        return Response(importer(lignes, dry_run=donnees['dry_run']))
+        resultat = importer(lignes, dry_run=donnees['dry_run'])
+        if not donnees['dry_run']:
+            _suivre_import(request.user, resultat, getattr(donnees.get('file'), 'name', None))
+        return Response(resultat)
+
+
+def _suivre_import(acteur, resultat, nom_fichier):
+    """Journal d'audit + notification de fin d'import (pas pour un dry_run)."""
+    importees = resultat.get('created', 0) + resultat.get('updated', 0)
+    erreurs = len(resultat.get('errors', []))
+    libelle = f"{nom_fichier or 'import JSON'} ({importees} lignes)"
+    journaliser(acteur, 'infractions.import', type_cible='infraction', libelle=libelle, apres={
+        'created': resultat.get('created', 0), 'updated': resultat.get('updated', 0), 'errors': erreurs,
+    })
+    texte = f'{importees} lignes importées'
+    if erreurs:
+        texte += f', {erreurs} ignorée{"s" if erreurs > 1 else ""}'
+    notifier(
+        TypeNotification.IMPORT,
+        titre="Import d'infractions terminé",
+        texte=texte,
+        lien='/infractions',
+        niveau=NiveauNotification.ATTENTION if erreurs else NiveauNotification.SUCCES,
+    )

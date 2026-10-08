@@ -23,6 +23,7 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 
+from ads_admin.services import journaliser
 from community.models import Incident, TypeIncident
 from trips.models import StatutTrajet, Trajet
 
@@ -576,6 +577,11 @@ class UtilisateurBanView(APIView):
             return Response({'detail': 'Cannot ban a staff account.'}, status=400)
 
         utilisateur.bannir(jusqu_a=serializer.validated_data['until'])
+        jusqu_a = serializer.validated_data['until']
+        journaliser(
+            request.user, 'users.ban', utilisateur, libelle=utilisateur.nom_complet or utilisateur.telephone,
+            apres={'jusqu_a': jusqu_a.isoformat() if jusqu_a else None},
+        )
         return Response(UtilisateurModerationSerializer(utilisateur).data)
 
 
@@ -591,6 +597,7 @@ class UtilisateurUnbanView(APIView):
     def post(self, request, id):
         utilisateur = get_object_or_404(Utilisateur, id=id)
         utilisateur.debannir()
+        journaliser(request.user, 'users.unban', utilisateur, libelle=utilisateur.nom_complet or utilisateur.telephone)
         return Response(UtilisateurModerationSerializer(utilisateur).data)
 
 
@@ -684,4 +691,8 @@ class ListeAttenteSuiviView(APIView):
         inscription = get_object_or_404(InscriptionListeAttente, id=id)
         inscription.contacte = serializer.validated_data['contacte']
         inscription.save(update_fields=['contacte'])
+        journaliser(
+            request.user, 'waitlist.contacted' if inscription.contacte else 'waitlist.uncontacted',
+            inscription, libelle=inscription.nom_complet,
+        )
         return Response(ListeAttenteModerationSerializer(inscription).data)
