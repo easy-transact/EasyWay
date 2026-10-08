@@ -1,6 +1,6 @@
 from django.contrib.auth.tokens import default_token_generator
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db.models import Q, Sum
+from django.db.models import Count, F, Max, Q, Sum
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 from django.utils.encoding import force_str
@@ -23,8 +23,10 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from ads_admin.services import journaliser
-from community.models import Incident, TypeIncident
+from ads_admin.models import EntreeAudit
+from ads_admin.services import FENETRE_ABUS, SEUIL_RETRAITS_ABUS, journaliser
+from community.models import Incident, StatutIncident, TypeIncident, Vote
+from places.models import Lieu, StatutLieu
 from trips.models import StatutTrajet, Trajet
 
 from .config_data import VERSION_MINIMALE_APP, VILLES_DISPONIBLES
@@ -40,6 +42,7 @@ from .serializers import (
     ConnexionSerializer,
     DemandeReinitialisationSerializer,
     ExisteSerializer,
+    FormuleUtilisateurSerializer,
     InscriptionSerializer,
     JetonsSerializer,
     ListeAttenteModerationSerializer,
@@ -47,6 +50,7 @@ from .serializers import (
     ListeAttenteSuiviSerializer,
     MessageSerializer,
     ParametresSerializer,
+    RemiseAZeroPointsSerializer,
     UtilisateurMiseAJourSerializer,
     UtilisateurModerationSerializer,
     UtilisateurSerializer,
@@ -522,19 +526,42 @@ class ConfigView(APIView):
     parameters=[
         OpenApiParameter('search', OpenApiTypes.STR),
         OpenApiParameter('banned', OpenApiTypes.BOOL),
+        OpenApiParameter('status', OpenApiTypes.STR, description='active/banned/suspect/staff.'),
+        OpenApiParameter('plan', OpenApiTypes.STR, description='GRATUITE/PREMIUM.'),
+        OpenApiParameter('city', OpenApiTypes.STR),
+        OpenApiParameter('ordering', OpenApiTypes.STR, description='recent (defaut)/oldest/reputation/points/reports.'),
         OpenApiParameter('page', OpenApiTypes.INT),
         OpenApiParameter('page_size', OpenApiTypes.INT),
     ],
     responses={200: UtilisateurModerationSerializer(many=True)},
 )
 class UtilisateurModerationListView(APIView):
-    """GET /api/staff/users/?search=&banned=&page= : liste des comptes."""
+    """GET /api/staff/users/?search=&status=&plan=&city=&ordering=&page= : liste des comptes."""
 
     permission_classes = [IsAdminUser]
     pagination_class = StaffPagination
 
+    TRIS = {
+        'recent': '-date_joined',
+        'oldest': 'date_joined',
+        'reputation': '-score_reputation',
+        'points': '-points',
+        'reports': '-nb_signalements',
+    }
+
     def get(self, request):
-        utilisateurs = Utilisateur.objects.all()
+        utilisateurs = Utilisateur.objects.annotate(
+            nb_signalements=Count('incidents_signales', distinct=True),
+            nb_retraits_7j=Count(
+                'incidents_signales',
+                filter=Q(
+                    incidents_signales__statut=StatutIncident.RETIRE,
+                    incidents_signales__cree_le__gte=timezone.now() - FENETRE_ABUS,
+                ),
+                distinct=True,
+            ),
+            vu_le=Max('appareils__vu_le'),
+        )
 
         recherche = request.query_params.get('search', '').strip()
         if recherche:
@@ -548,7 +575,23 @@ class UtilisateurModerationListView(APIView):
         if banni is not None:
             utilisateurs = utilisateurs.filter(est_banni=banni.lower() == 'true')
 
-        utilisateurs = utilisateurs.order_by('-date_joined')
+        etat = request.query_params.get('status')
+        if etat == 'active':
+            utilisateurs = utilisateurs.filter(est_banni=False, is_staff=False)
+        elif etat == 'banned':
+            utilisateurs = utilisateurs.filter(est_banni=True)
+        elif etat == 'suspect':
+            utilisateurs = utilisateurs.filter(nb_retraits_7j__gte=SEUIL_RETRAITS_ABUS)
+        elif etat == 'staff':
+            utilisateurs = utilisateurs.filter(is_staff=True)
+
+        if request.query_params.get('plan'):
+            utilisateurs = utilisateurs.filter(formule=request.query_params['plan'])
+        if request.query_params.get('city', '').strip():
+            utilisateurs = utilisateurs.filter(ville__icontains=request.query_params['city'].strip())
+
+        tri = self.TRIS.get(request.query_params.get('ordering', ''), '-date_joined')
+        utilisateurs = utilisateurs.order_by(tri, '-date_joined')
 
         paginateur = self.pagination_class()
         page = paginateur.paginate_queryset(utilisateurs, request)
@@ -579,8 +622,8 @@ class UtilisateurBanView(APIView):
         utilisateur.bannir(jusqu_a=serializer.validated_data['until'])
         jusqu_a = serializer.validated_data['until']
         journaliser(
-            request.user, 'users.ban', utilisateur, libelle=utilisateur.nom_complet or utilisateur.telephone,
-            apres={'jusqu_a': jusqu_a.isoformat() if jusqu_a else None},
+            request.user, 'users.ban', utilisateur, libelle=_libelle_utilisateur(utilisateur),
+            apres={'jusqu_a': jusqu_a.isoformat() if jusqu_a else None, 'motif': serializer.validated_data['reason']},
         )
         return Response(UtilisateurModerationSerializer(utilisateur).data)
 
@@ -597,7 +640,146 @@ class UtilisateurUnbanView(APIView):
     def post(self, request, id):
         utilisateur = get_object_or_404(Utilisateur, id=id)
         utilisateur.debannir()
-        journaliser(request.user, 'users.unban', utilisateur, libelle=utilisateur.nom_complet or utilisateur.telephone)
+        journaliser(request.user, 'users.unban', utilisateur, libelle=_libelle_utilisateur(utilisateur))
+        return Response(UtilisateurModerationSerializer(utilisateur).data)
+
+
+def _libelle_utilisateur(utilisateur):
+    return utilisateur.nom_complet or utilisateur.telephone or str(utilisateur.id)
+
+
+# Nombre d'elements recents affiches dans chaque section de la fiche.
+NB_RECENTS_FICHE = 5
+
+
+@extend_schema_view(
+    get=extend_schema(
+        tags=['Staff Users'],
+        summary="Fiche d'un utilisateur (moderation)",
+        description=(
+            'Reserve au staff (is_staff). Profil + statistiques (trajets, signalements, '
+            'lieux proposes, votes), elements recents, appareils et historique de moderation '
+            "(entrees du journal d'audit visant ce compte)."
+        ),
+        responses={200: UtilisateurModerationSerializer},
+    ),
+    patch=extend_schema(
+        tags=['Staff Users'],
+        summary="Changer la formule d'un utilisateur",
+        request=FormuleUtilisateurSerializer,
+        responses={200: UtilisateurModerationSerializer},
+    ),
+)
+class UtilisateurFicheView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def get(self, request, id):
+        utilisateur = get_object_or_404(Utilisateur, id=id)
+        maintenant = timezone.now()
+
+        incidents = Incident.objects.filter(auteur=utilisateur)
+        par_statut_incident = dict(incidents.values('statut').annotate(n=Count('pk')).values_list('statut', 'n'))
+        trajets = Trajet.objects.filter(utilisateur=utilisateur)
+        par_statut_trajet = dict(trajets.values('statut').annotate(n=Count('pk')).values_list('statut', 'n'))
+        lieux = dict(
+            Lieu.objects.filter(propose_par=utilisateur).values('statut').annotate(n=Count('pk')).values_list('statut', 'n')
+        )
+        distance_m = trajets.filter(statut=StatutTrajet.TERMINE).aggregate(
+            total=Coalesce(Sum('distance_reelle'), Sum('distance_prevue'), 0)
+        )['total']
+
+        donnees = UtilisateurModerationSerializer(utilisateur).data
+        donnees['stats'] = {
+            'trips_total': trajets.count(),
+            'trips_completed': par_statut_trajet.get(StatutTrajet.TERMINE, 0),
+            'distance_km': round((distance_m or 0) / 1000, 1),
+            'reports_total': sum(par_statut_incident.values()),
+            'reports_active': par_statut_incident.get(StatutIncident.ACTIF, 0) + par_statut_incident.get(StatutIncident.EN_ATTENTE, 0),
+            'reports_removed': par_statut_incident.get(StatutIncident.RETIRE, 0),
+            'reports_removed_7d': incidents.filter(
+                statut=StatutIncident.RETIRE, cree_le__gte=maintenant - FENETRE_ABUS
+            ).count(),
+            'places_approved': lieux.get(StatutLieu.APPROUVE, 0),
+            'places_rejected': lieux.get(StatutLieu.REJETE, 0),
+            'places_pending': lieux.get(StatutLieu.EN_ATTENTE, 0),
+            'votes': Vote.objects.filter(votant=utilisateur).count(),
+        }
+        donnees['recent_reports'] = [
+            {
+                'id': str(i.id), 'type': i.type, 'type_label': i.get_type_display(), 'street_name': i.nom_voie,
+                'city': i.ville, 'status': i.statut, 'confirmations': i.confirmations, 'disputes': i.infirmations,
+                'reason': i.motif_retrait, 'created_at': i.cree_le,
+            }
+            for i in incidents.order_by('-cree_le')[:NB_RECENTS_FICHE]
+        ]
+        donnees['recent_trips'] = [
+            {
+                'id': str(t.id), 'origin': t.libelle_origine, 'destination': t.libelle_destination,
+                'status': t.statut, 'distance_m': t.distance_reelle or t.distance_prevue,
+                'started_at': t.demarre_le, 'rating': t.note,
+            }
+            for t in trajets.order_by(F('demarre_le').desc(nulls_last=True))[:NB_RECENTS_FICHE]
+        ]
+        donnees['devices'] = [
+            {
+                'id': str(a.id), 'platform': a.plateforme, 'app_version': a.version_application,
+                'os_version': a.version_systeme, 'last_seen': a.vu_le, 'active': a.est_actif,
+            }
+            for a in utilisateur.appareils.order_by('-vu_le')
+        ]
+        donnees['history'] = [
+            {
+                'action': e.action, 'at': e.survenue_le, 'actor': e.acteur.nom_complet if e.acteur_id else None,
+                'details': e.valeur_nouvelle,
+            }
+            for e in EntreeAudit.objects.filter(type_cible='utilisateur', identifiant_cible=utilisateur.id)
+            .select_related('acteur')
+            .order_by('-survenue_le')[:20]
+        ]
+        return Response(donnees)
+
+    def patch(self, request, id):
+        serializer = FormuleUtilisateurSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        utilisateur = get_object_or_404(Utilisateur, id=id)
+
+        avant = {'formule': utilisateur.formule}
+        utilisateur.formule = serializer.validated_data['plan']
+        utilisateur.formule_expire_le = serializer.validated_data['plan_expires_at']
+        utilisateur.save(update_fields=['formule', 'formule_expire_le'])
+        expire = utilisateur.formule_expire_le
+        journaliser(
+            request.user, 'users.plan', utilisateur, libelle=_libelle_utilisateur(utilisateur), avant=avant,
+            apres={'formule': utilisateur.formule, 'expire_le': expire.isoformat() if expire else None},
+        )
+        return Response(UtilisateurModerationSerializer(utilisateur).data)
+
+
+@extend_schema(
+    tags=['Staff Users'],
+    summary="Remettre a zero les points d'un utilisateur",
+    description=(
+        'Reserve au staff (is_staff). A utiliser apres conversion des points en bons '
+        "carburant : le solde precedent est garde dans le journal d'audit."
+    ),
+    request=RemiseAZeroPointsSerializer,
+    responses={200: UtilisateurModerationSerializer},
+)
+class UtilisateurRemiseAZeroPointsView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def post(self, request, id):
+        serializer = RemiseAZeroPointsSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        utilisateur = get_object_or_404(Utilisateur, id=id)
+
+        precedent = float(utilisateur.points)
+        utilisateur.points = 0
+        utilisateur.save(update_fields=['points'])
+        journaliser(
+            request.user, 'users.points_reset', utilisateur, libelle=_libelle_utilisateur(utilisateur),
+            avant={'points': precedent}, apres={'points': 0, 'motif': serializer.validated_data['reason']},
+        )
         return Response(UtilisateurModerationSerializer(utilisateur).data)
 
 

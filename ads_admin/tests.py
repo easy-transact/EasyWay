@@ -275,3 +275,59 @@ class CampagnesTests(StaffTestCase):
         )
         self.assertEqual(reponse.status_code, 204)
         self.assertFalse(CampagnePublicitaire.objects.exists())
+
+
+class UtilisateursStaffTests(StaffTestCase):
+    def test_filtres_et_compteurs(self):
+        for _ in range(3):
+            creer_incident(self.membre, statut=StatutIncident.RETIRE)
+        autre = creer_utilisateur('autre@easyway.local', ville='Yaounde')
+        autre.bannir()
+        url = reverse('accounts:staff-utilisateurs')
+
+        suspects = self.client.get(url, {'status': 'suspect'}, **self.jetons).json()['results']
+        self.assertEqual([u['id'] for u in suspects], [str(self.membre.id)])
+        self.assertEqual((suspects[0]['reports_count'], suspects[0]['removed_7d']), (3, 3))
+
+        bannis = self.client.get(url, {'status': 'banned'}, **self.jetons).json()['results']
+        self.assertEqual([u['id'] for u in bannis], [str(autre.id)])
+        self.assertEqual(len(self.client.get(url, {'status': 'staff'}, **self.jetons).json()['results']), 1)
+        self.assertEqual(len(self.client.get(url, {'city': 'yaou'}, **self.jetons).json()['results']), 1)
+        tri = self.client.get(url, {'ordering': 'reports'}, **self.jetons).json()['results']
+        self.assertEqual(tri[0]['id'], str(self.membre.id))
+
+    def test_fiche_et_historique(self):
+        creer_incident(self.membre)
+        creer_lieu_propose('Garage', self.membre, statut=StatutLieu.REJETE)
+        self.client.post(
+            reverse('accounts:staff-utilisateur-bannir', kwargs={'id': self.membre.id}),
+            {'reason': 'Faux signalements'}, content_type='application/json', **self.jetons,
+        )
+        donnees = self.client.get(
+            reverse('accounts:staff-utilisateur-fiche', kwargs={'id': self.membre.id}), **self.jetons
+        ).json()
+        self.assertEqual(donnees['stats']['reports_total'], 1)
+        self.assertEqual(donnees['stats']['places_rejected'], 1)
+        self.assertEqual(len(donnees['recent_reports']), 1)
+        self.assertEqual(donnees['history'][0]['action'], 'users.ban')
+        self.assertEqual(donnees['history'][0]['details']['motif'], 'Faux signalements')
+
+    def test_changer_formule_et_remettre_points_a_zero(self):
+        self.membre.points = 12.5
+        self.membre.save(update_fields=['points'])
+        url = reverse('accounts:staff-utilisateur-fiche', kwargs={'id': self.membre.id})
+        reponse = self.client.patch(url, {'plan': 'PREMIUM'}, content_type='application/json', **self.jetons)
+        self.assertEqual(reponse.json()['plan'], 'PREMIUM')
+
+        reponse = self.client.post(
+            reverse('accounts:staff-utilisateur-points', kwargs={'id': self.membre.id}),
+            {'reason': 'Bon carburant remis'}, content_type='application/json', **self.jetons,
+        )
+        self.assertEqual(reponse.json()['points'], 0)
+        entree = EntreeAudit.objects.get(action='users.points_reset')
+        self.assertEqual(entree.valeur_precedente, {'points': 12.5})
+
+    def test_non_staff_refuse(self):
+        jetons = connecter(self.client, self.membre.telephone)
+        url = reverse('accounts:staff-utilisateur-fiche', kwargs={'id': self.membre.id})
+        self.assertEqual(self.client.get(url, **jetons).status_code, 403)

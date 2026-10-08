@@ -346,12 +346,19 @@ class UtilisateurModerationSerializer(serializers.ModelSerializer):
     points = serializers.FloatField(read_only=True)
     is_banned = serializers.BooleanField(source='est_banni', read_only=True)
     banned_until = serializers.DateTimeField(source='banni_jusqu_a', read_only=True)
+    plan_expires_at = serializers.DateTimeField(source='formule_expire_le', read_only=True)
+    # Annotes par UtilisateurModerationListView (None ailleurs) : nombre de
+    # signalements, signalements retires sur 7 jours, dernier appareil vu.
+    reports_count = serializers.IntegerField(source='nb_signalements', read_only=True, default=None)
+    removed_7d = serializers.IntegerField(source='nb_retraits_7j', read_only=True, default=None)
+    last_seen = serializers.DateTimeField(source='vu_le', read_only=True, default=None)
 
     class Meta:
         model = Utilisateur
         fields = [
-            'id', 'phone', 'full_name', 'email', 'city', 'plan', 'reputation_score',
+            'id', 'phone', 'full_name', 'email', 'city', 'plan', 'plan_expires_at', 'reputation_score',
             'reputation_stars', 'points', 'is_banned', 'banned_until', 'is_staff', 'date_joined',
+            'reports_count', 'removed_7d', 'last_seen',
         ]
         read_only_fields = fields
 
@@ -359,6 +366,18 @@ class UtilisateurModerationSerializer(serializers.ModelSerializer):
 class BanUtilisateurSerializer(serializers.Serializer):
     # Absent/null = ban permanent (jusqu'a un debannir() explicite).
     until = serializers.DateTimeField(required=False, allow_null=True, default=None)
+    # Garde dans le journal d'audit (historique de moderation du compte).
+    reason = serializers.CharField(max_length=255, required=False, allow_blank=True, default='')
+
+
+class FormuleUtilisateurSerializer(serializers.Serializer):
+    plan = serializers.ChoiceField(choices=Formule.choices)
+    # Null = sans echeance (ou formule gratuite).
+    plan_expires_at = serializers.DateTimeField(required=False, allow_null=True, default=None)
+
+
+class RemiseAZeroPointsSerializer(serializers.Serializer):
+    reason = serializers.CharField(max_length=255, required=False, allow_blank=True, default='')
 
 
 class ListeAttenteSerializer(serializers.ModelSerializer):
