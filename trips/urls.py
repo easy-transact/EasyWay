@@ -25,4 +25,5 @@ urlpatterns = [
         name='staff-zone-vitesse-detail',
     ),
     path('staff/trips/', views.TrajetModerationListView.as_view(), name='staff-trajets'),
+    path('staff/trips/<uuid:id>/', views.TrajetModerationDetailView.as_view(), name='staff-trajet-detail'),
 ]

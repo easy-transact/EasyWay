@@ -127,3 +127,15 @@ def _flusher_un_bucket(connexion, cle, identifiant_arete, bucket_epoch) -> bool:
     connexion.delete(cle)
     connexion.srem(ENSEMBLE_BUCKETS_ACTIFS, cle)
     return True
+
+
+@shared_task
+def geocoder_libelles_trajet(trajet_id):
+    """Remplace "Votre position" par le nom reel du lieu (cf. trips/geocodage.py)."""
+    from .geocodage import geocoder_trajet
+    from .models import Trajet
+
+    trajet = Trajet.objects.filter(pk=trajet_id).first()
+    if trajet is None:
+        return []
+    return geocoder_trajet(trajet)

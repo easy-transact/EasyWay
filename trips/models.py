@@ -78,6 +78,20 @@ class Trajet(models.Model):
     demarre_le = models.DateTimeField(null=True, blank=True)
     termine_le = models.DateTimeField(null=True, blank=True)
 
+    # Resume de la telemetrie recue pour ce trajet (POST /api/telemetry/
+    # positions/), mis a jour a chaque lot -- des agregats seulement, jamais
+    # les positions elles-memes (confidentialite, cf. TelemetriePositionsSerializer).
+    telemetrie_lots = models.PositiveIntegerField(default=0)
+    telemetrie_positions = models.PositiveIntegerField(default=0)
+    telemetrie_nb_vitesses = models.PositiveIntegerField(default=0)
+    telemetrie_somme_vitesses = models.FloatField(default=0, help_text='km/h, pour la moyenne')
+    telemetrie_vitesse_max = models.FloatField(null=True, blank=True, help_text='km/h')
+    telemetrie_distance_m = models.PositiveIntegerField(
+        default=0, help_text='somme des ecarts entre positions consecutives d\'un meme lot'
+    )
+    telemetrie_premiere_le = models.DateTimeField(null=True, blank=True)
+    telemetrie_derniere_le = models.DateTimeField(null=True, blank=True)
+
     # Machine a etats (diagramme d'etats du document UML) : source de verite
     # unique pour les transitions autorisees, appliquee par changer_statut()
     # -- ni le PATCH ni les methodes demarrer/terminer/annuler ne l'esquivent.

@@ -4,7 +4,7 @@ from django.contrib.gis.db.models.functions import Distance
 from django.contrib.gis.geos import Point
 from django.contrib.gis.measure import D
 from django.contrib.postgres.search import TrigramSimilarity
-from django.db.models import F, Q
+from django.db.models import Count, F, Q
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import (
     OpenApiParameter,
@@ -24,12 +24,13 @@ from accounts.pagination import StaffPagination
 from accounts.serializers import MessageSerializer
 from ads_admin.services import journaliser
 
-from .models import AdresseEnregistree, Etablissement, Lieu, RechercheRecente, StatutLieu, Ville
+from .models import AdresseEnregistree, Etablissement, Lieu, RechercheRecente, SourceLieu, StatutLieu, Ville
 from .serializers import (
     AdresseEnregistreeSerializer,
     EtablissementEcritureSerializer,
     EtablissementSerializer,
     LieuActionGroupeeSerializer,
+    LieuCreationStaffSerializer,
     LieuDetailSerializer,
     LieuModerationSerializer,
     LieuPropositionSerializer,
@@ -401,11 +402,12 @@ class LieuModerationListView(APIView):
 
     def get(self, request):
         statut = request.query_params.get('status', StatutLieu.EN_ATTENTE)
-        lieux = (
-            Lieu.objects.filter(statut=statut)
-            .select_related('propose_par')
-            .order_by(F('cree_le').desc(nulls_last=True), 'nom')
-        )
+        lieux = Lieu.objects.select_related('propose_par').order_by(F('cree_le').desc(nulls_last=True), 'nom')
+        # ALL : toutes les files (ex. page d'un utilisateur, avec proposed_by).
+        if statut != 'ALL':
+            lieux = lieux.filter(statut=statut)
+        if request.query_params.get('proposed_by'):
+            lieux = lieux.filter(propose_par_id=request.query_params['proposed_by'])
         recherche = request.query_params.get('search', '').strip()
         if recherche:
             lieux = lieux.filter(
@@ -418,6 +420,69 @@ class LieuModerationListView(APIView):
         page = paginateur.paginate_queryset(lieux, request)
         contexte = {'stats_auteurs': stats_auteurs_lieux(l.propose_par_id for l in page if l.propose_par_id)}
         return paginateur.get_paginated_response(LieuModerationSerializer(page, many=True, context=contexte).data)
+
+    @extend_schema(
+        tags=['Staff Places'],
+        summary='Ajouter un lieu (back-office)',
+        description=(
+            "Reserve au staff (is_staff). Lieu approuve d'office (source BACK_OFFICE). "
+            'Ville/quartier vides = deduits de la position via Nominatim.'
+        ),
+        request=LieuCreationStaffSerializer,
+        responses={201: LieuModerationSerializer},
+    )
+    def post(self, request):
+        serializer = LieuCreationStaffSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        donnees = serializer.validated_data
+
+        ville, quartier = donnees['city'].strip(), donnees['neighborhood'].strip()
+        if not ville or not quartier:
+            deduit = ClientNominatim().inverser_ville_quartier(donnees['lat'], donnees['lon']) or {}
+            ville = ville or deduit.get('ville') or ''
+            quartier = quartier or deduit.get('quartier') or ''
+        if not ville:
+            return Response(
+                {'city': ['Ville introuvable pour cette position, merci de la saisir.']},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        lieu = Lieu.objects.create(
+            nom=donnees['name'].strip(),
+            nom_normalise=normaliser(donnees['name']),
+            categorie=donnees['category'].strip(),
+            adresse=donnees['address'].strip(),
+            quartier=quartier or None,
+            ville=ville,
+            position=Point(donnees['lon'], donnees['lat'], srid=4326),
+            source=SourceLieu.BACK_OFFICE,
+            statut=StatutLieu.APPROUVE,
+        )
+        journaliser(request.user, 'places.create', lieu)
+        return Response(LieuModerationSerializer(lieu).data, status=status.HTTP_201_CREATED)
+
+
+@extend_schema(
+    tags=['Staff Places'],
+    summary='Categories de lieux existantes',
+    description=(
+        'Reserve au staff (is_staff). Categories deja utilisees (lieux approuves ou en '
+        'attente), les plus frequentes d\'abord -- pour proposer une liste au moment '
+        "d'ajouter un lieu, sans empecher d'en saisir une nouvelle."
+    ),
+)
+class CategoriesLieuxView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def get(self, request):
+        categories = (
+            Lieu.objects.filter(statut__in=[StatutLieu.APPROUVE, StatutLieu.EN_ATTENTE])
+            .exclude(categorie='')
+            .values('categorie')
+            .annotate(total=Count('pk'))
+            .order_by('-total', 'categorie')[:200]
+        )
+        return Response([{'name': c['categorie'], 'count': c['total']} for c in categories])
 
 
 # Rayon de recherche des doublons affiches dans la fiche de moderation --

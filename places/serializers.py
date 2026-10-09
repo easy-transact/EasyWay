@@ -303,6 +303,19 @@ class LieuRejetSerializer(serializers.Serializer):
     reason = serializers.CharField(max_length=255)
 
 
+class LieuCreationStaffSerializer(serializers.Serializer):
+    """POST /api/staff/places/ : lieu ajoute directement par le staff, approuve
+    d'office. Ville/quartier vides = deduits de la position (Nominatim)."""
+
+    name = serializers.CharField(max_length=255)
+    category = serializers.CharField(max_length=100)
+    address = serializers.CharField(max_length=500, required=False, allow_blank=True, default='')
+    neighborhood = serializers.CharField(max_length=255, required=False, allow_blank=True, default='')
+    city = serializers.CharField(max_length=255, required=False, allow_blank=True, default='')
+    lat = serializers.FloatField(min_value=-90, max_value=90)
+    lon = serializers.FloatField(min_value=-180, max_value=180)
+
+
 class LieuActionGroupeeSerializer(serializers.Serializer):
     ids = serializers.ListField(child=serializers.UUIDField(), min_length=1, max_length=100)
     action = serializers.ChoiceField(choices=['approve', 'reject', 'delete'])

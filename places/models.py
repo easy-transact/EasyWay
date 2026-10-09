@@ -22,6 +22,7 @@ class SourceLieu(models.TextChoices):
 
     OPENSTREETMAP = 'OPENSTREETMAP', 'OpenStreetMap'
     UTILISATEUR = 'UTILISATEUR', 'Soumission utilisateur'
+    BACK_OFFICE = 'BACK_OFFICE', 'Ajout back-office'
 
 
 class StatutLieu(models.TextChoices):

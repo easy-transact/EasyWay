@@ -330,13 +330,27 @@ class ZoneVitesseCreationSerializer(serializers.Serializer):
 
 
 class ZoneVitesseModificationSerializer(serializers.Serializer):
-    """PATCH /api/staff/speed-zones/<id>/ : nom/vitesse/actif seulement --
-    modifier les points impliquerait de recalculer le trace, hors perimetre
-    de cette passe (recreer la zone plutot que la deplacer)."""
+    """PATCH /api/staff/speed-zones/<id>/ : nom/vitesse/actif, et optionnellement
+    les deux points (origin_*/destination_*, tous les quatre ensemble) -- la vue
+    recalcule alors le trace routier (cf. ZoneVitesseDetailView.patch)."""
 
     name = serializers.CharField(max_length=255, required=False, allow_blank=True, source='nom')
     speed_limit_kmh = serializers.IntegerField(min_value=1, required=False, source='vitesse_max_kmh')
     active = serializers.BooleanField(required=False, source='actif')
+    origin_lat = serializers.FloatField(required=False, min_value=-90, max_value=90)
+    origin_lon = serializers.FloatField(required=False, min_value=-180, max_value=180)
+    destination_lat = serializers.FloatField(required=False, min_value=-90, max_value=90)
+    destination_lon = serializers.FloatField(required=False, min_value=-180, max_value=180)
+
+    CHAMPS_POINTS = ('origin_lat', 'origin_lon', 'destination_lat', 'destination_lon')
+
+    def validate(self, donnees):
+        fournis = [c for c in self.CHAMPS_POINTS if c in donnees]
+        if fournis and len(fournis) != len(self.CHAMPS_POINTS):
+            raise serializers.ValidationError('Fournir les quatre coordonnees ensemble pour deplacer la zone.')
+        if fournis:
+            donnees['points'] = {c: donnees.pop(c) for c in self.CHAMPS_POINTS}
+        return donnees
 
     def update(self, instance, validated_data):
         for champ, valeur in validated_data.items():
@@ -439,21 +453,50 @@ class TrajetModerationSerializer(serializers.ModelSerializer):
     TrajetSerializer, qui ne sert que les trajets de l'appelant lui-meme) et
     le nombre de signalements reellement sur le trajet."""
 
+    traveler_id = serializers.UUIDField(source='utilisateur_id', read_only=True)
     traveler_name = serializers.CharField(source='utilisateur.nom_complet', read_only=True)
+    traveler_phone = serializers.CharField(source='utilisateur.telephone', read_only=True)
     origin_label = serializers.CharField(source='libelle_origine', read_only=True)
     destination_label = serializers.CharField(source='libelle_destination', read_only=True)
     status = serializers.CharField(source='statut', read_only=True)
     started_at = serializers.DateTimeField(source='demarre_le', read_only=True)
     ended_at = serializers.DateTimeField(source='termine_le', read_only=True)
+    planned_distance_m = serializers.IntegerField(source='distance_prevue', read_only=True)
+    planned_duration_s = serializers.IntegerField(source='duree_prevue', read_only=True)
+    actual_distance_m = serializers.IntegerField(source='distance_reelle', read_only=True)
+    actual_duration_s = serializers.IntegerField(source='duree_reelle', read_only=True)
+    rating = serializers.IntegerField(source='note', read_only=True)
+    telemetry = serializers.SerializerMethodField()
     incidents_on_route = serializers.SerializerMethodField()
 
     class Meta:
         model = Trajet
         fields = [
-            'id', 'traveler_name', 'origin_label', 'destination_label',
-            'status', 'started_at', 'ended_at', 'incidents_on_route',
+            'id', 'traveler_id', 'traveler_name', 'traveler_phone', 'origin_label', 'destination_label',
+            'status', 'started_at', 'ended_at', 'planned_distance_m', 'planned_duration_s',
+            'actual_distance_m', 'actual_duration_s', 'rating', 'telemetry', 'incidents_on_route',
         ]
         read_only_fields = fields
+
+    @extend_schema_field(serializers.DictField())
+    def get_telemetry(self, trajet):
+        """Resume de ce que l'appli a envoye pendant le trajet (cf. Trajet.telemetrie_*)."""
+        duree_s = None
+        if trajet.telemetrie_premiere_le and trajet.telemetrie_derniere_le:
+            duree_s = round((trajet.telemetrie_derniere_le - trajet.telemetrie_premiere_le).total_seconds())
+        return {
+            'batches': trajet.telemetrie_lots,
+            'positions': trajet.telemetrie_positions,
+            'avg_speed_kmh': (
+                round(trajet.telemetrie_somme_vitesses / trajet.telemetrie_nb_vitesses, 1)
+                if trajet.telemetrie_nb_vitesses else None
+            ),
+            'max_speed_kmh': round(trajet.telemetrie_vitesse_max, 1) if trajet.telemetrie_vitesse_max is not None else None,
+            'distance_m': trajet.telemetrie_distance_m,
+            'first_at': trajet.telemetrie_premiere_le,
+            'last_at': trajet.telemetrie_derniere_le,
+            'duration_s': duree_s,
+        }
 
     @extend_schema_field(serializers.IntegerField(allow_null=True))
     def get_incidents_on_route(self, trajet):

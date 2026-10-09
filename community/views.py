@@ -739,10 +739,15 @@ class IncidentModerationListView(APIView):
 
     def get(self, request):
         statut = request.query_params.get('status')
-        if statut:
+        if statut == 'ALL':
+            incidents = Incident.objects.all()
+        elif statut:
             incidents = Incident.objects.filter(statut=statut)
         else:
             incidents = Incident.objects.filter(statut__in=[StatutIncident.ACTIF, StatutIncident.EN_ATTENTE])
+        if request.query_params.get('author'):
+            # Page d'un utilisateur : ses signalements (avec status=ALL).
+            incidents = incidents.filter(auteur_id=request.query_params['author'])
         retraits_auteur = (
             Incident.objects.filter(
                 auteur_id=OuterRef('auteur_id'),

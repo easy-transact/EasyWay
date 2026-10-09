@@ -131,7 +131,16 @@ DUREE_VIE_BASE_PAR_TYPE = {
 }
 DUREE_VIE_PAR_SOUS_TYPE = {
     SousTypeIncident.CARAMBOLAGE: 360,
+    # Un nid-de-poule ne se rebouche pas dans la journee : 30 jours, raccourcis
+    # par les votes "n'existe plus" (cf. REDUCTION_PAR_INFIRMATION_LONGUE).
+    SousTypeIncident.NID_DE_POULE: 30 * 24 * 60,
 }
+# Signalements de longue duree (>= 1 jour, ex. nid-de-poule) : chaque vote
+# "n'existe plus" retire 1/5 de la duree de base au lieu des 10 min
+# habituelles -- sinon il faudrait des milliers de votes pour le faire
+# disparaitre. 5 votes suffisent a le retirer.
+SEUIL_DUREE_LONGUE_MIN = 24 * 60
+REDUCTION_PAR_INFIRMATION_LONGUE = 5
 # Remplace DUREE_VIE_BASE_PAR_TYPE quand le signalement est hors agglomeration
 # (Incident.en_agglomeration=False). Inconnu (None, Nominatim indisponible)
 # = valeur en ville : la plupart des signalements sont urbains, et les votes
@@ -309,7 +318,9 @@ class Incident(models.Model):
     def infirmer(self, vote: 'Vote'):
         self.infirmations += 1
         self.score_confiance -= vote.poids
-        self.expire_le = self.expire_le - timezone.timedelta(minutes=10)
+        base = self.duree_de_base()
+        reduction_min = base / REDUCTION_PAR_INFIRMATION_LONGUE if base >= SEUIL_DUREE_LONGUE_MIN else 10
+        self.expire_le = self.expire_le - timezone.timedelta(minutes=reduction_min)
         self.save(update_fields=['infirmations', 'score_confiance', 'expire_le'])
 
     def prolonger(self, duree: timezone.timedelta):

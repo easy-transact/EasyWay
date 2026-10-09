@@ -2,6 +2,9 @@ from datetime import timedelta
 
 from django.contrib.gis.geos import LineString, Point
 from django.contrib.gis.measure import D
+from django.db import transaction
+from django.db.models import F, Q, Value
+from django.db.models.functions import Greatest, Least
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from drf_spectacular.types import OpenApiTypes
@@ -19,6 +22,8 @@ from ads_admin.services import journaliser
 from accounts.serializers import MessageSerializer
 
 from .exceptions import TransitionInvalide
+from .geocodage import lancer_geocodage_trajet, libelle_generique
+from .services.geo import distance_haversine_m
 from .models import StatutTrajet, Trajet, ZoneVitesse
 from .polyline import decoder_polyline6
 from .serializers import (
@@ -155,6 +160,10 @@ class TrajetListeCreationView(APIView):
         serializer = TrajetCreationSerializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
         trajet = serializer.save()
+        if libelle_generique(trajet.libelle_origine) or libelle_generique(trajet.libelle_destination):
+            # "Votre position" -> nom reel du lieu, en arriere-plan : la reponse
+            # n'attend pas Nominatim.
+            transaction.on_commit(lambda: lancer_geocodage_trajet(trajet.id))
         return Response(TrajetSerializer(trajet).data, status=status.HTTP_201_CREATED)
 
 
@@ -249,7 +258,31 @@ class TelemetriePositionsView(APIView):
             })  # jamais d'identifiant utilisateur publie -- trajet_id suffit au
             # regroupement cote consommateur (cf. cahier des charges, confidentialite)
 
+        _cumuler_telemetrie(trajet, serializer.validated_data['positions'])
         return Response(status=status.HTTP_202_ACCEPTED)
+
+
+def _cumuler_telemetrie(trajet, positions):
+    """Met a jour le resume de telemetrie du trajet (agregats seulement) en une
+    requete atomique -- deux lots concurrents ne s'ecrasent pas."""
+    positions = sorted(positions, key=lambda p: p['horodatage'])
+    vitesses = [p['vitesse_kmh'] for p in positions if p.get('vitesse_kmh') is not None]
+    distance = sum(
+        distance_haversine_m((a['lat'], a['lon']), (b['lat'], b['lon'])) for a, b in zip(positions, positions[1:])
+    )
+    maj = {
+        'telemetrie_lots': F('telemetrie_lots') + 1,
+        'telemetrie_positions': F('telemetrie_positions') + len(positions),
+        'telemetrie_nb_vitesses': F('telemetrie_nb_vitesses') + len(vitesses),
+        'telemetrie_somme_vitesses': F('telemetrie_somme_vitesses') + sum(vitesses),
+        'telemetrie_distance_m': F('telemetrie_distance_m') + round(distance),
+        # NULL ignore par GREATEST/LEAST cote PostgreSQL : premier lot inclus.
+        'telemetrie_premiere_le': Least('telemetrie_premiere_le', Value(positions[0]['horodatage'])),
+        'telemetrie_derniere_le': Greatest('telemetrie_derniere_le', Value(positions[-1]['horodatage'])),
+    }
+    if vitesses:
+        maj['telemetrie_vitesse_max'] = Greatest('telemetrie_vitesse_max', Value(float(max(vitesses))))
+    Trajet.objects.filter(pk=trajet.pk).update(**maj)
 
 
 # Couloir etroit (30m) autour de ZoneVitesse.geometrie : cette geometrie est
@@ -347,6 +380,24 @@ def _libelle_zone(zone):
     return f'{zone.nom} · {zone.vitesse_max_kmh} km/h' if zone.nom else str(zone)
 
 
+def _tracer_zone(utilisateur, depart, arrivee):
+    """Trace routier reel entre deux points (lat, lon) : LineString, None si
+    Valhalla renvoie moins de 2 points, False si aucun itineraire."""
+    # ServiceItineraire lit utilisateur.parametres -- absent pour un compte
+    # cree via createsuperuser (jamais instancie hors de l'inscription
+    # normale, cf. accounts/serializers.py:InscriptionSerializer). Le staff
+    # n'a par ailleurs pas a se soucier de configurer ses Parametres avant
+    # de pouvoir creer une zone.
+    Parametres.objects.get_or_create(utilisateur=utilisateur)
+    candidats = ServiceItineraire().calculer(
+        depart=depart, arrivee=arrivee, utilisateur=utilisateur, alternatives=False,
+    )
+    if not candidats:
+        return False
+    points = decoder_polyline6(candidats[0]['geometrie'])
+    return LineString(points, srid=4326) if len(points) >= 2 else None
+
+
 @extend_schema_view(
     get=extend_schema(
         tags=['Staff Speed Zones'],
@@ -389,27 +440,15 @@ class ZoneVitesseListCreateView(APIView):
         serializer.is_valid(raise_exception=True)
         donnees = serializer.validated_data
 
-        # ServiceItineraire lit utilisateur.parametres -- absent pour un compte
-        # cree via createsuperuser (jamais instancie hors de l'inscription
-        # normale, cf. accounts/serializers.py:InscriptionSerializer). Le staff
-        # n'a par ailleurs pas a se soucier de configurer ses Parametres avant
-        # de pouvoir creer une zone.
-        Parametres.objects.get_or_create(utilisateur=request.user)
-
-        candidats = ServiceItineraire().calculer(
-            depart=(donnees['origin_lat'], donnees['origin_lon']),
-            arrivee=(donnees['destination_lat'], donnees['destination_lon']),
-            utilisateur=request.user,
-            alternatives=False,
+        geometrie_ligne = _tracer_zone(
+            request.user, (donnees['origin_lat'], donnees['origin_lon']),
+            (donnees['destination_lat'], donnees['destination_lon']),
         )
-        if not candidats:
+        if geometrie_ligne is False:
             return Response(
                 {'detail': 'No route could be computed between these two points.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-
-        points = decoder_polyline6(candidats[0]['geometrie'])
-        geometrie_ligne = LineString(points, srid=4326) if len(points) >= 2 else None
 
         zone = ZoneVitesse.objects.create(
             nom=donnees.get('nom', ''),
@@ -453,6 +492,21 @@ class ZoneVitesseDetailView(APIView):
         zone = get_object_or_404(ZoneVitesse, id=id)
         serializer = ZoneVitesseModificationSerializer(zone, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
+        points = serializer.validated_data.pop('points', None)
+        if points:
+            # Points deplaces (glisser-deposer) : on recalcule le trace reel.
+            geometrie_ligne = _tracer_zone(
+                request.user, (points['origin_lat'], points['origin_lon']),
+                (points['destination_lat'], points['destination_lon']),
+            )
+            if geometrie_ligne is False:
+                return Response(
+                    {'detail': 'No route could be computed between these two points.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            zone.point_depart = Point(points['origin_lon'], points['origin_lat'], srid=4326)
+            zone.point_arrivee = Point(points['destination_lon'], points['destination_lat'], srid=4326)
+            zone.geometrie = geometrie_ligne
         serializer.save()
         journaliser(
             request.user, 'speedzones.update', zone, libelle=_libelle_zone(zone),
@@ -479,7 +533,13 @@ class ZoneVitesseDetailView(APIView):
         'pas le compteur incidents_evites auto-declare par le client.'
     ),
     parameters=[
-        OpenApiParameter('date', OpenApiTypes.DATE, description='Defaut aujourd\'hui (heure locale).'),
+        OpenApiParameter('date', OpenApiTypes.DATE, description='Un seul jour (defaut aujourd\'hui, heure locale).'),
+        OpenApiParameter('date_from', OpenApiTypes.DATE, description='Debut de periode (inclus), prioritaire sur date.'),
+        OpenApiParameter('date_to', OpenApiTypes.DATE, description='Fin de periode (incluse).'),
+        OpenApiParameter('status', OpenApiTypes.STR, description='PLANIFIE/ACTIF/TERMINE/ANNULE.'),
+        OpenApiParameter('search', OpenApiTypes.STR, description='Voyageur (nom/telephone) ou libelles.'),
+        OpenApiParameter('user', OpenApiTypes.UUID, description='Trajets d\'un utilisateur, toutes dates.'),
+        OpenApiParameter('with_geometry', OpenApiTypes.BOOL, description='Ajoute un trace simplifie (carte).'),
         OpenApiParameter('page', OpenApiTypes.INT),
         OpenApiParameter('page_size', OpenApiTypes.INT),
     ],
@@ -490,9 +550,99 @@ class TrajetModerationListView(APIView):
     pagination_class = StaffPagination
 
     def get(self, request):
-        date_cible = parse_date(request.query_params.get('date') or '') or timezone.localdate()
-        trajets = Trajet.objects.filter(demarre_le__date=date_cible).order_by('-demarre_le')
+        params = request.query_params
+        trajets = Trajet.objects.select_related('utilisateur').order_by(F('demarre_le').desc(nulls_last=True))
+
+        if params.get('user'):
+            # Page d'un utilisateur : tout son historique, y compris les trajets
+            # jamais demarres (demarre_le null), sauf periode explicite.
+            trajets = trajets.filter(utilisateur_id=params['user'])
+        debut = parse_date(params.get('date_from') or '')
+        fin = parse_date(params.get('date_to') or '')
+        if debut or fin:
+            if debut:
+                trajets = trajets.filter(demarre_le__date__gte=debut)
+            if fin:
+                trajets = trajets.filter(demarre_le__date__lte=fin)
+        elif not params.get('user'):
+            date_cible = parse_date(params.get('date') or '') or timezone.localdate()
+            trajets = trajets.filter(demarre_le__date=date_cible)
+
+        if params.get('status'):
+            trajets = trajets.filter(statut=params['status'])
+        recherche = params.get('search', '').strip()
+        if recherche:
+            trajets = trajets.filter(
+                Q(utilisateur__nom_complet__icontains=recherche)
+                | Q(utilisateur__telephone__icontains=recherche)
+                | Q(libelle_origine__icontains=recherche)
+                | Q(libelle_destination__icontains=recherche)
+            )
 
         paginateur = self.pagination_class()
         page = paginateur.paginate_queryset(trajets, request)
-        return paginateur.get_paginated_response(TrajetModerationSerializer(page, many=True).data)
+        donnees = TrajetModerationSerializer(page, many=True).data
+        if params.get('with_geometry') in ('1', 'true'):
+            for ligne, trajet in zip(donnees, page):
+                ligne['geometry'] = _trace_leaflet(trajet.geometrie, max_points=200)
+        return paginateur.get_paginated_response(donnees)
+
+
+def _trace_leaflet(ligne, max_points=None):
+    """LineString -> [[lat, lon], ...] (ordre Leaflet), sous-echantillonne a
+    max_points en gardant toujours le premier et le dernier point."""
+    if not ligne:
+        return []
+    coords = [[lat, lon] for lon, lat in ligne.coords]
+    if max_points and len(coords) > max_points:
+        pas = len(coords) / (max_points - 1)
+        coords = [coords[int(i * pas)] for i in range(max_points - 1)] + [coords[-1]]
+    return coords
+
+
+@extend_schema(
+    tags=['Staff Trips'],
+    summary="Detail d'un trajet (moderation)",
+    description=(
+        'Reserve au staff (is_staff). Trajet complet : voyageur, positions de depart/'
+        "arrivee, trace, etapes, itineraires proposes (dont celui choisi), telemetrie "
+        'recue et signalements actifs sur le trajet.'
+    ),
+    responses={200: TrajetModerationSerializer},
+)
+class TrajetModerationDetailView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def get(self, request, id):
+        trajet = get_object_or_404(Trajet.objects.select_related('utilisateur'), id=id)
+        donnees = TrajetModerationSerializer(trajet).data
+        utilisateur = trajet.utilisateur
+        donnees.update({
+            'traveler': {
+                'id': str(utilisateur.id),
+                'name': utilisateur.nom_complet,
+                'phone': utilisateur.telephone,
+                'vehicle_type': utilisateur.type_vehicule,
+                'plan': utilisateur.formule,
+            },
+            'origin': {'lat': trajet.position_origine.y, 'lon': trajet.position_origine.x},
+            'destination': {'lat': trajet.position_destination.y, 'lon': trajet.position_destination.x},
+            'geometry': _trace_leaflet(trajet.geometrie),
+            'waypoints': [{'lat': e.position.y, 'lon': e.position.x} for e in trajet.etapes.all()],
+            'routes': [
+                {
+                    'label': i.libelle,
+                    'distance_m': i.distance,
+                    'duration_s': i.duree,
+                    'duration_with_traffic_s': i.duree_avec_trafic,
+                    'traffic_level': i.niveau_trafic,
+                    'recommended': i.est_recommande,
+                    'chosen': i.identifiant == trajet.itineraire_choisi,
+                }
+                for i in trajet.itineraires.all()
+            ],
+            'declared_incidents_avoided': trajet.incidents_evites,
+            'comment': trajet.commentaire,
+            'duration_gap_pct': trajet.ecart_duree_pourcent(),
+        })
+        return Response(donnees)

@@ -727,6 +727,40 @@ class UtilisateurFicheView(APIView):
             }
             for a in utilisateur.appareils.order_by('-vu_le')
         ]
+        donnees['account'] = {
+            'vehicle_type': utilisateur.type_vehicule,
+            'email_verified': utilisateur.email_verifie,
+            'google_linked': bool(utilisateur.identifiant_google),
+            'invisible_mode': utilisateur.mode_invisible,
+            'terms_accepted_at': utilisateur.cgu_acceptee_le,
+            'deletion_requested_at': utilisateur.suppression_demandee_le,
+            'is_active': utilisateur.is_active,
+            'last_login': utilisateur.last_login,
+        }
+        donnees['saved_addresses'] = [
+            {
+                'label': a.get_libelle_display(), 'name': a.nom_personnalise, 'address': a.adresse,
+                'lat': a.position.y, 'lon': a.position.x,
+            }
+            for a in utilisateur.adresses_enregistrees.all()
+        ]
+        parametres = Parametres.objects.filter(utilisateur=utilisateur).first()
+        donnees['settings'] = (
+            {
+                'avoid_tolls': parametres.eviter_peages,
+                'avoid_unpaved': parametres.eviter_non_bitumees,
+                'voice_guidance': parametres.guidage_vocal_actif,
+                'voice_language': parametres.langue_vocale,
+                'units': parametres.unites,
+                'speed_alert': parametres.alerte_vitesse_active,
+                'speed_tolerance_kmh': parametres.tolerance_vitesse_kmh,
+                'notifications': parametres.notifications_globales,
+                'police_alerts': parametres.notif_alertes_police,
+                'loading_radius_km': parametres.rayon_chargement_km,
+            }
+            if parametres
+            else None
+        )
         donnees['history'] = [
             {
                 'action': e.action, 'at': e.survenue_le, 'actor': e.acteur.nom_complet if e.acteur_id else None,

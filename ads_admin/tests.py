@@ -331,3 +331,141 @@ class UtilisateursStaffTests(StaffTestCase):
         jetons = connecter(self.client, self.membre.telephone)
         url = reverse('accounts:staff-utilisateur-fiche', kwargs={'id': self.membre.id})
         self.assertEqual(self.client.get(url, **jetons).status_code, 403)
+
+
+class NidDePouleTests(StaffTestCase):
+    def test_dure_trente_jours_et_raccourci_par_les_votes(self):
+        from community.models import SousTypeIncident, TypeIncident as Type, Vote
+
+        incident = creer_incident(self.membre, sous_type=SousTypeIncident.NID_DE_POULE)
+        incident.type = Type.DANGER
+        self.assertEqual(incident.duree_de_base(), 30 * 24 * 60)
+        avant = incident.expire_le
+        votant = creer_utilisateur('votant@easyway.local')
+        incident.infirmer(Vote(incident=incident, votant=votant, sens='INFIRMATION', poids=1))
+        self.assertEqual(avant - incident.expire_le, timedelta(days=6))
+
+
+class AjoutLieuStaffTests(StaffTestCase):
+    def test_creation_approuvee_avec_categorie(self):
+        reponse = self.client.post(
+            reverse('places:staff-lieux'),
+            {'name': 'Station Tradex Akwa', 'category': 'Station-service', 'city': 'Douala',
+             'neighborhood': 'Akwa', 'lat': 4.05, 'lon': 9.70},
+            content_type='application/json', **self.jetons,
+        )
+        self.assertEqual(reponse.status_code, 201)
+        lieu = Lieu.objects.get(nom='Station Tradex Akwa')
+        self.assertEqual((lieu.statut, lieu.source, lieu.categorie), (StatutLieu.APPROUVE, 'BACK_OFFICE', 'Station-service'))
+        self.assertTrue(EntreeAudit.objects.filter(action='places.create').exists())
+
+        categories = self.client.get(reverse('places:staff-lieux-categories'), **self.jetons).json()
+        self.assertIn({'name': 'Station-service', 'count': 1}, categories)
+
+    def test_ville_deduite_de_la_position(self):
+        from unittest.mock import patch
+
+        with patch('places.views.ClientNominatim') as Client:
+            Client.return_value.inverser_ville_quartier.return_value = {'ville': 'Douala', 'quartier': 'Bonapriso'}
+            reponse = self.client.post(
+                reverse('places:staff-lieux'), {'name': 'Garage X', 'category': 'Garage', 'lat': 4.03, 'lon': 9.69},
+                content_type='application/json', **self.jetons,
+            )
+        self.assertEqual(reponse.status_code, 201)
+        self.assertEqual((reponse.json()['city'], reponse.json()['neighborhood']), ('Douala', 'Bonapriso'))
+
+
+class TrajetsStaffTests(StaffTestCase):
+    def setUp(self):
+        super().setUp()
+        from trips.tests import _trajet_actif_pour
+
+        self.creer = _trajet_actif_pour
+
+    def test_periode_utilisateur_et_detail(self):
+        hier = timezone.now() - timedelta(days=1)
+        ancien = self.creer(self.membre, demarre_le=timezone.now() - timedelta(days=10))
+        self.creer(self.membre, demarre_le=hier)
+        self.creer(self.membre)
+        url = reverse('trips:staff-trajets')
+
+        self.assertEqual(self.client.get(url, **self.jetons).json()['count'], 1)
+        periode = {'date_from': (timezone.localdate() - timedelta(days=2)).isoformat(),
+                   'date_to': timezone.localdate().isoformat()}
+        self.assertEqual(self.client.get(url, periode, **self.jetons).json()['count'], 2)
+        self.assertEqual(self.client.get(url, {'user': str(self.membre.id)}, **self.jetons).json()['count'], 3)
+
+        detail = self.client.get(reverse('trips:staff-trajet-detail', kwargs={'id': ancien.id}), **self.jetons).json()
+        self.assertEqual(detail['traveler']['id'], str(self.membre.id))
+        self.assertEqual(detail['origin'], {'lat': 4.0483, 'lon': 9.7043})
+        self.assertEqual(detail['telemetry']['positions'], 0)
+
+    def test_resume_telemetrie(self):
+        from unittest.mock import patch
+
+        trajet = self.creer(self.membre)
+        jetons = connecter(self.client, self.membre.telephone)
+        lot = {'trip': str(trajet.id), 'positions': [
+            {'lat': 4.0483, 'lon': 9.7043, 'speed_kmh': 30, 'timestamp': '2026-01-01T10:00:00Z'},
+            {'lat': 4.0493, 'lon': 9.7043, 'speed_kmh': 50, 'timestamp': '2026-01-01T10:00:10Z'},
+        ]}
+        with patch('trips.views.ProducteurRedisStreams'):
+            for _ in range(2):
+                self.client.post(reverse('trips:telemetrie-positions'), lot, content_type='application/json', **jetons)
+
+        telemetrie = self.client.get(
+            reverse('trips:staff-trajet-detail', kwargs={'id': trajet.id}), **self.jetons
+        ).json()['telemetry']
+        self.assertEqual((telemetrie['batches'], telemetrie['positions']), (2, 4))
+        self.assertEqual((telemetrie['avg_speed_kmh'], telemetrie['max_speed_kmh']), (40.0, 50.0))
+        self.assertEqual(telemetrie['distance_m'], 222)
+        self.assertEqual(telemetrie['duration_s'], 10)
+
+    def test_votre_position_remplace_par_le_nom_du_lieu(self):
+        from unittest.mock import Mock
+
+        from trips.geocodage import geocoder_trajet
+
+        trajet = self.creer(self.membre, libelle_origine='Votre position')
+        client = Mock()
+        client.inverser.return_value = {'label': 'Carrefour Ndokoti', 'sublabel': 'Akwa, Douala'}
+        self.assertEqual(geocoder_trajet(trajet, client), ['libelle_origine'])
+        trajet.refresh_from_db()
+        self.assertEqual(trajet.libelle_origine, 'Carrefour Ndokoti, Akwa, Douala')
+        self.assertEqual(trajet.libelle_destination, 'Hopital General')
+
+
+class ZoneVitesseDeplaceeTests(StaffTestCase):
+    def test_deplacer_les_points_recalcule_le_trace(self):
+        from unittest.mock import patch
+
+        from trips.models import ZoneVitesse
+
+        zone = ZoneVitesse.objects.create(
+            nom='Ecole', point_depart=Point(9.70, 4.05, srid=4326), point_arrivee=Point(9.71, 4.05, srid=4326),
+            vitesse_max_kmh=30,
+        )
+        with patch('trips.views._tracer_zone') as tracer:
+            from django.contrib.gis.geos import LineString
+
+            tracer.return_value = LineString([(9.70, 4.06), (9.72, 4.06)], srid=4326)
+            reponse = self.client.patch(
+                reverse('trips:staff-zone-vitesse-detail', kwargs={'id': zone.id}),
+                {'origin_lat': 4.06, 'origin_lon': 9.70, 'destination_lat': 4.06, 'destination_lon': 9.72},
+                content_type='application/json', **self.jetons,
+            )
+        self.assertEqual(reponse.status_code, 200)
+        self.assertEqual(reponse.json()['origin_lat'], 4.06)
+        self.assertEqual(len(reponse.json()['geometry']), 2)
+
+    def test_points_incomplets_refuses(self):
+        from trips.models import ZoneVitesse
+
+        zone = ZoneVitesse.objects.create(
+            point_depart=Point(9.70, 4.05, srid=4326), point_arrivee=Point(9.71, 4.05, srid=4326), vitesse_max_kmh=30,
+        )
+        reponse = self.client.patch(
+            reverse('trips:staff-zone-vitesse-detail', kwargs={'id': zone.id}), {'origin_lat': 4.06},
+            content_type='application/json', **self.jetons,
+        )
+        self.assertEqual(reponse.status_code, 400)
