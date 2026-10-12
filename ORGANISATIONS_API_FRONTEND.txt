@@ -1,0 +1,151 @@
+EASYWAY API — ESPACE AGENCES (ORGANISATIONS) — FRONTEND INTEGRATION REFERENCE
+Covers phases 1 and 2 of the "Espace Agences" analysis: organisations
+(travel agencies + fleet managers), members and roles, invitations, drivers,
+vehicles, dashboard, activity log. Two consumers:
+  - the AGENCY PORTAL (separate web app)       -> /api/org/...
+  - the EasyWay BACK-OFFICE (staff only)       -> /api/staff/organisations/...
+Written against the code as of 07/10/2026 (app `organisations`). The schema
+(/api/docs/, tags "Organisation*" and "Staff Organisations") is the reference.
+
+Base path: /api/   Content-Type: application/json
+Auth: Authorization: Bearer <access>  (same JWT as the rest of the API)
+No HMAC signature on /api/org/ and /api/staff/ (browser apps).
+Enum VALUES stay in French (VOYAGE, PROPRIETAIRE, ACTIF...), like the rest of the API.
+
+------------------------------------------------------------
+READ THIS FIRST
+
+  1. Staff creates the organisation + its owner from the back-office.
+  2. The owner gets an email: <PORTAIL_AGENCE_URL>/activer?uid=...&token=...
+     (valid 72 h). The portal's /activer page posts uid + token + new password
+     to org/invitations/accept/ and receives login tokens directly.
+  3. Later logins: the usual POST auth/login/ with PHONE + password
+     (the phone is the login id, the email only receives the link).
+  4. On every portal load: GET org/me/ -> organisation + role -> pick menus.
+  5. The organisation is ALWAYS the caller's own: there is no organisation id
+     in any /api/org/ URL. An id belonging to another agency answers 404.
+
+Roles (lowest -> highest): LECTEUR < GESTIONNAIRE < ADMIN < PROPRIETAIRE
+
+  | Action                                   | LECTEUR | GESTIONNAIRE | ADMIN | PROPRIETAIRE |
+  | read dashboard, profile, members, fiches |   yes   |     yes      |  yes  |     yes      |
+  | create/edit/archive drivers & vehicles   |   no    |     yes      |  yes  |     yes      |
+  | edit agency profile, invite/edit members |   no    |     no       |  yes  |     yes      |
+  | read activity log                        |   no    |     no       |  yes  |     yes      |
+  | transfer ownership                       |   no    |     no       |  no   |     yes      |
+  The owner can never be edited/removed by anyone; ownership moves only by
+  transfer (make-owner).
+
+403 bodies on /api/org/ (show `detail`; branch on the situation):
+  - not a member / member deactivated   -> "You are not a member of an active organisation."
+  - organisation SUSPENDUE              -> "This organisation is suspended. Contact EasyWay."
+  - organisation EN_ATTENTE             -> "This organisation is not active yet."
+  - role too low                        -> "This action requires the <ROLE> role or higher."
+
+Lists marked (paginated) answer { count, next, previous, results: [...] },
+?page=&page_size= (default 20, max 100).
+
+------------------------------------------------------------
+1. AGENCY PORTAL — /api/org/
+
+POST org/invitations/accept/          (public, no token)
+  { "uid": "...", "token": "...", "new_password": "..." }
+  200 { user, tokens: {access, refresh}, organisation }   -> store tokens, go to dashboard
+  400 "Invalid or expired link."  (used, expired after 72 h, or wrong) -> ask an admin to resend
+  400 { "new_password": [...] }   (Django password rules: 8+ chars, not too common...)
+
+GET org/me/
+  { "organisation": {...}, "member_id": "uuid", "role": "ADMIN" }
+
+Organisation object:
+  { id, type: VOYAGE|FLOTTE, legal_name, trade_name, rccm, niu, city, address,
+    phone, email, status: EN_ATTENTE|ACTIVE|SUSPENDUE, plan: GRATUITE|PRO, created_at }
+
+GET   org/profile/        -> Organisation
+PATCH org/profile/        (ADMIN) trade_name, rccm, niu, city, address, phone, email
+                          (type, legal_name, plan are staff-only; sent values are ignored)
+
+GET org/dashboard/?days=30          (days: 0-180, default 30)
+  { "members": 4,
+    "drivers":  { "ACTIF": 12, "INACTIF": 1 },
+    "vehicles": { "ACTIF": 9, "MAINTENANCE": 1, "INACTIF": 0 },
+    "deadlines": [ { "kind": "INSURANCE"|"INSPECTION"|"LICENSE",
+                     "target_type": "vehicle"|"driver", "target_id": "uuid",
+                     "label": "LT123AB" | driver name,
+                     "expires_on": "2026-10-05", "expired": true }, ... ] }
+  deadlines = already expired OR within `days`, soonest first.
+
+GET org/journal/        (ADMIN, paginated)
+  results: { id, actor, action, target_type, target_id, details, created_at }
+  action examples: membre.invite, membre.invitation_acceptee, chauffeur.cree,
+  vehicule.modifie, organisation.suspendue ...
+
+--- Members
+GET  org/members/                  -> [Member]   (not paginated)
+  Member: { id, full_name, phone, email, role, active, invited_at,
+            accepted_at (null = invitation pending), invited_by }
+POST org/members/                  (ADMIN)
+  { "full_name", "phone", "email", "role": ADMIN|GESTIONNAIRE|LECTEUR }
+  201 Member. Phone or email already known to EasyWay -> that account is
+  attached directly (accepted_at set, no email link, they log in as usual).
+  400 when: phone and email belong to two different accounts; the person
+  already belongs to an organisation; role PROPRIETAIRE.
+  Rate limit: 30 invitations / hour.
+PATCH  org/members/{id}/           (ADMIN) { "role"?, "active"? }   owner -> 400
+DELETE org/members/{id}/           (ADMIN) 204; the person's EasyWay account stays. owner -> 400
+POST   org/members/{id}/resend-invitation/   (ADMIN) 200 | 400 if already activated
+POST   org/members/{id}/make-owner/          (PROPRIETAIRE) target becomes owner,
+                                             caller becomes ADMIN. Target must be
+                                             active and activated.
+
+--- Drivers (fiches; no link to the mobile app yet)
+GET  org/drivers/?search=&status=   (paginated; default hides ARCHIVE)
+POST org/drivers/                   (GESTIONNAIRE)
+GET | PATCH org/drivers/{id}/       (PATCH: GESTIONNAIRE)
+DELETE org/drivers/{id}/            (GESTIONNAIRE) archives + unassigns vehicles -> 204
+  Driver: { id, full_name*, phone, license_number, license_category,
+            license_expires_on (YYYY-MM-DD), status: ACTIF|INACTIF,
+            vehicles: ["LT123AB", ...] (read-only), created_at }
+  phone is normalised to +237... ; invalid -> 400.
+
+--- Vehicles
+GET  org/vehicles/?search=&status=  (paginated; default hides ARCHIVE)
+POST org/vehicles/                  (GESTIONNAIRE)
+GET | PATCH org/vehicles/{id}/      (PATCH: GESTIONNAIRE)
+DELETE org/vehicles/{id}/           (GESTIONNAIRE) archives -> 204
+  Vehicle: { id, plate*, type*: VOITURE|MOTO|TAXI|CAMION|BUS|UTILITAIRE,
+             make, model, seats, insurance_expires_on, inspection_expires_on,
+             status: ACTIF|MAINTENANCE|INACTIF, driver_id, driver_name (read-only),
+             created_at }
+  plate is normalised ("lt 123-ab" -> "LT123AB") and unique within the agency.
+  driver_id must be a non-archived driver of the SAME agency, else 400.
+  Assign / unassign = PATCH { "driver_id": "<uuid>" | null }.
+
+------------------------------------------------------------
+2. EASYWAY BACK-OFFICE — /api/staff/organisations/  (is_staff)
+
+GET  staff/organisations/?search=&type=&status=&page=   (paginated)
+POST staff/organisations/
+  { "type": "VOYAGE", "legal_name": "Buca Voyages SARL", "trade_name"?, "rccm"?,
+    "niu"?, "city": "Douala", "address"?, "phone"?, "email"?, "plan"?,
+    "waitlist_id"?: "<waitlist entry uuid>",
+    "owner": { "full_name", "phone", "email" } }
+  201 organisation detail (below). New owner -> status EN_ATTENTE + email link;
+  owner already has an EasyWay account -> attached, status ACTIVE at once.
+  waitlist_id: the entry is linked and marked contacted (converting it twice -> 400).
+  Prefill this form from GET staff/waitlist/ entries with profile AGENCE_VOYAGE / FLOTTE.
+GET   staff/organisations/{id}/   -> Organisation + members: [Member] + drivers_count + vehicles_count
+PATCH staff/organisations/{id}/   profile fields + type + legal_name + plan
+POST  staff/organisations/{id}/suspend/      -> SUSPENDUE (members get 403 on /api/org/)
+POST  staff/organisations/{id}/reactivate/   -> ACTIVE (EN_ATTENTE if the owner never activated)
+POST  staff/organisations/{id}/members/{member_id}/resend-invitation/
+GET   staff/organisations/{id}/journal/      (paginated)
+
+------------------------------------------------------------
+3. DEPLOYMENT NOTES
+
+  - New env vars: PORTAIL_AGENCE_URL (portal base URL, used in invitation
+    emails); add the portal origin to CORS_ALLOWED_ORIGINS.
+  - Invitations are emails: production needs a real EMAIL_BACKEND (prod
+    currently uses the dummy backend -> no email is sent).
+  - Migration: organisations 0001 (runs with `migrate` at web start-up).

@@ -60,8 +60,8 @@ class IncidentsConsumerTests(TransactionTestCase):
             self.assertIn('server_time', pret)
         return communicateur
 
-    async def _attendre_fermeture(self, communicateur):
-        sortie = await communicateur.receive_output(timeout=2)
+    async def _attendre_fermeture(self, communicateur, timeout=2):
+        sortie = await communicateur.receive_output(timeout=timeout)
         self.assertEqual(sortie['type'], 'websocket.close')
         return sortie['code']
 
@@ -91,12 +91,14 @@ class IncidentsConsumerTests(TransactionTestCase):
 
         def jeton_presque_expire():
             jeton = AccessToken.for_user(self.utilisateur)
-            jeton.set_exp(lifetime=timezone.timedelta(seconds=0.3))
+            # exp d'un JWT = secondes entieres : 2 s minimum, sinon le jeton peut
+            # deja etre expire a sa lecture (fermeture avant meme `ready`).
+            jeton.set_exp(lifetime=timezone.timedelta(seconds=2))
             return str(jeton)
 
         await communicateur.send_json_to({'type': 'auth', 'token': await sync_to_async(jeton_presque_expire)()})
         self.assertEqual((await communicateur.receive_json_from())['type'], 'ready')
-        self.assertEqual(await self._attendre_fermeture(communicateur), 4001)
+        self.assertEqual(await self._attendre_fermeture(communicateur, timeout=5), 4001)
 
     async def test_compte_banni_fermeture_4003(self):
         await sync_to_async(self.utilisateur.bannir)()

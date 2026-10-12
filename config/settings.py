@@ -74,6 +74,7 @@ INSTALLED_APPS = [
     'community',
     'ads_admin',
     'infractions',
+    'organisations',
 ]
 
 MIDDLEWARE = [
@@ -165,6 +166,8 @@ REST_FRAMEWORK = {
         'liste-attente': '10/hour',
         # Repond existe / n'existe pas : bloque l'enumeration de comptes en masse.
         'verification-existence': '20/hour',
+        # Invitations de membres d'agence : chaque appel envoie un email.
+        'invitation': '30/hour',
     },
 }
 
@@ -188,6 +191,12 @@ SPECTACULAR_SETTINGS = {
         'PlaceStatusEnum': 'places.models.StatutLieu',
         'TripStatusEnum': 'trips.models.StatutTrajet',
         'IncidentStatusEnum': 'community.models.StatutIncident',
+        # Noms deja publies (clients existants) : garder PlanEnum, VehicleTypeEnum.
+        'VehicleTypeEnum': 'accounts.models.TypeVehicule',
+        'PlanEnum': 'accounts.models.Formule',
+        'OrganisationTypeEnum': 'organisations.models.TypeOrganisation',
+        'OrganisationPlanEnum': 'organisations.models.FormuleOrganisation',
+        'OrganisationRoleEnum': 'organisations.models.RoleOrganisation',
     },
 }
 
@@ -212,12 +221,12 @@ SIMPLE_JWT = {
 # attendue lors de la verification du jeton d'identite transmis par l'app mobile.
 GOOGLE_OAUTH_CLIENT_ID = env('GOOGLE_OAUTH_CLIENT_ID', default='')
 
-# test-ui/ (Vite, port 5173) et back-office/ (Vite, port 5174 -- 5173 deja
-# pris) : les deux clients web amenes a appeler l'API en cross-origin pour
-# l'instant. Vide (donc aucune origine autorisee) des que DEBUG=False.
+# test-ui/ (Vite, port 5173), back-office/ (Vite, port 5174 -- 5173 deja
+# pris) et portail agence (port 5175) : les clients web amenes a appeler
+# l'API en cross-origin pour l'instant. Vide (donc aucune origine autorisee) des que DEBUG=False.
 CORS_ALLOWED_ORIGINS = env.list(
     'CORS_ALLOWED_ORIGINS',
-    default=['http://localhost:5173', 'http://localhost:5174'] if DEBUG else [],
+    default=['http://localhost:5173', 'http://localhost:5174', 'http://localhost:5175'] if DEBUG else [],
 )
 
 # Idempotency-Key (POST /api/incidents/, cf. community/views.py) n'est pas
@@ -256,6 +265,8 @@ HMAC_CHEMINS_EXEMPTES = [
     '/api/dev/',
     # Passerelle SMS : ne peut pas signer, s'authentifiera a sa maniere (TODO(SMS)).
     '/api/sms/',
+    # Portail agence : application web, ne peut pas garder de secret (comme /api/staff/).
+    '/api/org/',
 ]
 # Sans config LOGGING, Python n'affiche que WARNING et plus : les succes de
 # signature (INFO, cf. signature_hmac.py) n'apparaitraient pas dans
@@ -443,3 +454,6 @@ DEFAULT_FROM_EMAIL = env('DEFAULT_FROM_EMAIL', default='Easy Way <no-reply@easyw
 # Base utilisee pour construire les liens envoyes par email (verification,
 # reinitialisation) ; a pointer vers le deep link / la page de l'app mobile.
 FRONTEND_URL = env('FRONTEND_URL', default='http://localhost:8000')
+# Portail agence (application separee) : base des liens d'invitation
+# (organisations/emails.py). Son origine doit aussi figurer dans CORS_ALLOWED_ORIGINS.
+PORTAIL_AGENCE_URL = env('PORTAIL_AGENCE_URL', default='http://localhost:5175')

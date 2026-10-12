@@ -93,7 +93,7 @@ def patcher_attributs_trace(test_case, aretes=None, effet_de_bord=None):
     -- meme forme que le vrai client. Passer une liste de {'way_id','forward'}
     pour simuler un trajet reel ; effet_de_bord pour simuler une panne
     (ex. ErreurTraceAttributes/DisjoncteurOuvert)."""
-    patcheur = patch('community.views.attributs_trace')
+    patcheur = patch('community.services.attributs_trace')
     fonction_simulee = patcheur.start()
     if effet_de_bord is not None:
         fonction_simulee.side_effect = effet_de_bord
