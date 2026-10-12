@@ -38,13 +38,17 @@ class OrganisationSerializer(serializers.ModelSerializer):
     phone = serializers.CharField(source='telephone', required=False, allow_blank=True)
     status = serializers.CharField(source='statut', read_only=True)
     plan = serializers.ChoiceField(source='formule', choices=FormuleOrganisation.choices, required=False)
+    # Marge au-dessus de la limite avant de compter un exces (cf. flotte.py).
+    speed_tolerance_kmh = serializers.IntegerField(
+        source='tolerance_vitesse_kmh', required=False, min_value=0, max_value=30
+    )
     created_at = serializers.DateTimeField(source='cree_le', read_only=True)
 
     class Meta:
         model = Organisation
         fields = [
             'id', 'type', 'legal_name', 'trade_name', 'rccm', 'niu', 'city', 'address', 'phone', 'email',
-            'status', 'plan', 'created_at',
+            'status', 'plan', 'speed_tolerance_kmh', 'created_at',
         ]
         read_only_fields = ['id', 'status', 'created_at']
 
@@ -147,15 +151,23 @@ class ChauffeurSerializer(serializers.ModelSerializer):
         choices=[StatutFiche.ACTIF, StatutFiche.INACTIF],  # ARCHIVE = DELETE
     )
     vehicles = serializers.SerializerMethodField()
+    app_account = serializers.SerializerMethodField()
     created_at = serializers.DateTimeField(source='cree_le', read_only=True)
 
     class Meta:
         model = Chauffeur
         fields = [
             'id', 'full_name', 'phone', 'license_number', 'license_category', 'license_expires_on',
-            'status', 'vehicles', 'created_at',
+            'status', 'vehicles', 'app_account', 'created_at',
         ]
         read_only_fields = ['id', 'created_at']
+
+    def get_app_account(self, chauffeur) -> dict | None:
+        """Compte EasyWay relie par le telephone (cf. flotte.lier_compte_a_la_fiche) :
+        sans compte, le chauffeur ne peut pas declarer ses trajets avec un vehicule."""
+        if not chauffeur.utilisateur_id:
+            return None
+        return {'linked': True, 'name': chauffeur.utilisateur.nom_complet}
 
     def get_vehicles(self, chauffeur) -> list[str]:
         return [v.immatriculation for v in chauffeur.vehicules.all() if v.statut != StatutVehicule.ARCHIVE]

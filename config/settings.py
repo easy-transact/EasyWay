@@ -237,6 +237,8 @@ from corsheaders.defaults import default_headers  # noqa: E402
 
 CORS_ALLOW_HEADERS = list(default_headers) + [
     'idempotency-key', 'x-ew-key-id', 'x-ew-timestamp', 'x-ew-nonce', 'x-ew-signature',
+    # Staff EasyWay consultant une agence depuis le back-office (organisations/permissions.py).
+    'x-ew-organisation',
 ]
 
 # Signature HMAC des requetes de l'app mobile (cf. config/signature_hmac.py).
@@ -454,6 +456,6 @@ DEFAULT_FROM_EMAIL = env('DEFAULT_FROM_EMAIL', default='Easy Way <no-reply@easyw
 # Base utilisee pour construire les liens envoyes par email (verification,
 # reinitialisation) ; a pointer vers le deep link / la page de l'app mobile.
 FRONTEND_URL = env('FRONTEND_URL', default='http://localhost:8000')
-# Portail agence (application separee) : base des liens d'invitation
+# Portail agence = le back-office (espace agence integre, page /activer) : base des liens d'invitation
 # (organisations/emails.py). Son origine doit aussi figurer dans CORS_ALLOWED_ORIGINS.
-PORTAIL_AGENCE_URL = env('PORTAIL_AGENCE_URL', default='http://localhost:5175')
+PORTAIL_AGENCE_URL = env('PORTAIL_AGENCE_URL', default='http://localhost:5174')

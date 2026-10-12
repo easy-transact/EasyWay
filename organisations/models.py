@@ -12,6 +12,7 @@ Phase 2 : Chauffeur, Vehicule.
 import uuid
 
 from django.conf import settings
+from django.contrib.gis.db import models as gis_models
 from django.db import models
 
 from accounts.models import InscriptionListeAttente, TypeVehicule
@@ -57,6 +58,9 @@ class Organisation(models.Model):
     formule = models.CharField(
         max_length=20, choices=FormuleOrganisation.choices, default=FormuleOrganisation.GRATUITE
     )
+    # Marge au-dessus de la limite avant de compter un exces de vitesse
+    # (precision GPS, compteurs) -- reglable par l'agence.
+    tolerance_vitesse_kmh = models.PositiveSmallIntegerField(default=5)
 
     cree_par = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
@@ -212,3 +216,69 @@ class JournalOrganisation(models.Model):
     class Meta:
         db_table = 'journal_organisation'
         indexes = [models.Index(fields=['organisation', '-cree_le'])]
+
+
+# --- Phase 3 : suivi des vehicules (trajets, position en direct, exces) -----
+
+
+class ExcesVitesse(models.Model):
+    """Un episode de depassement pendant un trajet fait avec un vehicule de
+    l'agence : des positions consecutives au-dessus de limite + tolerance sont
+    regroupees en un seul episode (cf. flotte.traiter_telemetrie)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organisation = models.ForeignKey(Organisation, on_delete=models.CASCADE, related_name='exces_vitesse')
+    trajet = models.ForeignKey('trips.Trajet', on_delete=models.CASCADE, related_name='exces_vitesse')
+    vehicule = models.ForeignKey(Vehicule, on_delete=models.SET_NULL, null=True, related_name='exces_vitesse')
+    chauffeur = models.ForeignKey(Chauffeur, on_delete=models.SET_NULL, null=True, related_name='exces_vitesse')
+
+    limite_kmh = models.PositiveSmallIntegerField()
+    vitesse_max_kmh = models.FloatField()
+    # Zone de vitesse en cause ; null = limite par defaut hors zone.
+    zone = models.ForeignKey('trips.ZoneVitesse', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    nom_zone = models.CharField(max_length=255, blank=True)
+    position = gis_models.PointField(srid=4326, geography=True, help_text='position de la vitesse max')
+    nb_positions = models.PositiveIntegerField(default=1)
+    debut_le = models.DateTimeField()
+    fin_le = models.DateTimeField()
+
+    class Meta:
+        db_table = 'exces_vitesse'
+        indexes = [models.Index(fields=['organisation', '-debut_le']), models.Index(fields=['trajet', '-fin_le'])]
+
+    def __str__(self):
+        return f'{self.vitesse_max_kmh:.0f} km/h > {self.limite_kmh} ({self.trajet_id})'
+
+    @property
+    def depassement_kmh(self):
+        return round(self.vitesse_max_kmh - self.limite_kmh, 1)
+
+
+class TypeNotificationOrganisation(models.TextChoices):
+    EXCES_VITESSE = 'EXCES_VITESSE', 'Exces de vitesse'
+    SIGNALEMENT = 'SIGNALEMENT', 'Signalement d\'un chauffeur'
+    ECHEANCE = 'ECHEANCE', 'Echeance (assurance, visite, permis)'
+
+
+class NotificationOrganisation(models.Model):
+    """Notifications du portail agence, partagees par les membres de
+    l'organisation (lue_par trace qui les a vues) -- meme principe que
+    ads_admin.NotificationStaff cote EasyWay."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    organisation = models.ForeignKey(Organisation, on_delete=models.CASCADE, related_name='notifications')
+    type = models.CharField(max_length=20, choices=TypeNotificationOrganisation.choices)
+    titre = models.CharField(max_length=255)
+    texte = models.CharField(max_length=500, blank=True)
+    lien = models.CharField(max_length=255, blank=True)
+    # Evite de notifier deux fois le meme evenement (ex. un trajet en exces).
+    cle = models.CharField(max_length=100, blank=True, db_index=True)
+    cree_le = models.DateTimeField(auto_now_add=True)
+    lue_par = models.ManyToManyField(settings.AUTH_USER_MODEL, blank=True, related_name='notifications_organisation_lues')
+
+    class Meta:
+        db_table = 'notification_organisation'
+        indexes = [models.Index(fields=['organisation', '-cree_le'])]
+
+    def __str__(self):
+        return self.titre

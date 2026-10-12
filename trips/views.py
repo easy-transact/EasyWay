@@ -259,6 +259,11 @@ class TelemetriePositionsView(APIView):
             # regroupement cote consommateur (cf. cahier des charges, confidentialite)
 
         _cumuler_telemetrie(trajet, serializer.validated_data['positions'])
+        if trajet.vehicule_id:
+            # Trajet avec un vehicule d'agence : position en direct + exces de vitesse.
+            from organisations.flotte import traiter_telemetrie
+
+            traiter_telemetrie(trajet, serializer.validated_data['positions'])
         return Response(status=status.HTTP_202_ACCEPTED)
 
 

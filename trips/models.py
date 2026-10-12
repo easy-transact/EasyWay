@@ -92,6 +92,26 @@ class Trajet(models.Model):
     telemetrie_premiere_le = models.DateTimeField(null=True, blank=True)
     telemetrie_derniere_le = models.DateTimeField(null=True, blank=True)
 
+    # Trajet fait avec un vehicule d'agence (choisi par le chauffeur au depart,
+    # cf. TrajetCreationSerializer) : seuls ces trajets sont visibles par
+    # l'organisation. Vide pour un trajet personnel.
+    organisation = models.ForeignKey(
+        'organisations.Organisation', on_delete=models.SET_NULL, null=True, blank=True, related_name='trajets'
+    )
+    vehicule = models.ForeignKey(
+        'organisations.Vehicule', on_delete=models.SET_NULL, null=True, blank=True, related_name='trajets'
+    )
+    chauffeur = models.ForeignKey(
+        'organisations.Chauffeur', on_delete=models.SET_NULL, null=True, blank=True, related_name='trajets'
+    )
+    # Derniere position connue -- uniquement pour un trajet d'agence (carte en
+    # direct de l'agence), jamais pour un trajet personnel ; effacee avec la
+    # geometrie par purger_geometrie().
+    derniere_position = gis_models.PointField(srid=4326, geography=True, null=True, blank=True)
+    derniere_vitesse_kmh = models.FloatField(null=True, blank=True)
+    dernier_cap = models.PositiveSmallIntegerField(null=True, blank=True)
+    derniere_position_le = models.DateTimeField(null=True, blank=True)
+
     # Machine a etats (diagramme d'etats du document UML) : source de verite
     # unique pour les transitions autorisees, appliquee par changer_statut()
     # -- ni le PATCH ni les methodes demarrer/terminer/annuler ne l'esquivent.
@@ -158,7 +178,8 @@ class Trajet(models.Model):
 
     def purger_geometrie(self):
         self.geometrie = None
-        self.save(update_fields=['geometrie'])
+        self.derniere_position = None
+        self.save(update_fields=['geometrie', 'derniere_position'])
 
 
 class Itineraire(models.Model):

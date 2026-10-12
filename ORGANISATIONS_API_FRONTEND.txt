@@ -149,3 +149,92 @@ GET   staff/organisations/{id}/journal/      (paginated)
   - Invitations are emails: production needs a real EMAIL_BACKEND (prod
     currently uses the dummy backend -> no email is sent).
   - Migration: organisations 0001 (runs with `migrate` at web start-up).
+
+------------------------------------------------------------
+4. PHASE 3 — FLEET TRACKING (vehicles, live position, speeding, driver reports)
+
+Principle: an organisation only ever sees trips its driver DECLARED with one
+of its vehicles. Personal trips stay private (no organisation, no live
+position stored).
+
+Linking a driver to the app: the agency's driver record (org/drivers/) is
+linked automatically to the EasyWay account with the SAME phone number --
+when the record is created/edited, or when that person signs up later.
+Driver objects now carry `app_account`: null (no EasyWay account with this
+phone yet) | { "linked": true, "name": "..." }.
+
+--- MOBILE APP (signed with HMAC like the rest of the mobile API)
+
+GET users/me/vehicles/
+  [ { "id": "uuid", "plate": "LT123AB", "type": "BUS", "make": "Toyota",
+      "model": "Coaster", "organisation": { "id": "uuid", "name": "Buca Voyages" },
+      "driver_id": "uuid", "assigned": true }, ... ]
+  Vehicles in service (status ACTIF) of the agencies where the caller has an
+  ACTIVE driver record. `assigned` vehicles come first: preselect it.
+  EMPTY LIST = the user drives for no agency -> do not show the vehicle picker.
+
+POST trips/   (existing endpoint) -- new optional field:
+  "vehicle_id": "<uuid from users/me/vehicles/>" | null
+  null/absent = personal trip. An id the caller may not drive -> 400
+  { "vehicle_id": ["This vehicle is not available to you ..."] }.
+  UX: before "Start", if users/me/vehicles/ is not empty, ask
+  "Which vehicle are you driving?" (preselected = assigned one) with a
+  "Personal trip" option.
+
+POST telemetry/positions/   (existing) -- nothing changes for the app. For a
+  trip declared with a vehicle the server additionally keeps the last
+  position (live map) and detects speeding. Keep sending speed_kmh and
+  heading: without speed_kmh no speeding can be detected.
+
+POST incidents/   (existing) -- nothing changes. A report made while the
+  author has an ACTIVE trip with a vehicle is attached to that trip and
+  becomes visible to the agency.
+
+--- AGENCY PORTAL /api/org/  (all roles can read)
+
+GET org/live/                  vehicles on the road (ACTIVE trip, position < 15 min)
+  [ { trip_id, vehicle: {id, plate, type}, driver: {id, name, phone},
+      lat, lon, speed_kmh, heading, updated_at, origin_label,
+      destination_label, started_at } ]       -> poll every 10-15 s
+GET org/trips/?vehicle=&driver=&date_from=&date_to=&status=   (paginated)
+  Trip: { id, vehicle, driver, origin_label, destination_label, status,
+          started_at, ended_at, planned_distance_m, planned_duration_s,
+          actual_distance_m, actual_duration_s, rating, telemetry: {
+          batches, positions, avg_speed_kmh, max_speed_kmh, distance_m,
+          first_at, last_at, duration_s }, speeding_count, reports_count }
+GET org/trips/{id}/            Trip + origin, destination, geometry [[lat,lon]...],
+                               last_position, speeding: [Speeding], reports: [Report]
+GET org/speeding/?vehicle=&driver=&date_from=&date_to=        (paginated)
+  Speeding: { id, trip_id, vehicle, driver, limit_kmh, max_speed_kmh, over_kmh,
+              zone_name ("" = default limit), lat, lon, positions,
+              started_at, ended_at, duration_s }
+  Rule: limit = most restrictive active speed zone within 30 m, else 60 km/h;
+  speeding when speed > limit + organisation.speed_tolerance_kmh (default 5,
+  editable in PATCH org/profile/). Consecutive positions < 60 s apart = one episode.
+GET org/reports/?vehicle=&driver=&date_from=&date_to=         (paginated)
+  Report: { id, type, type_label, subtype, street_name, city, status,
+            confirmations, disputes, lat, lon, trip_id, vehicle, driver, created_at }
+GET org/badges/                { unread_notifications, latest_notification,
+                                 vehicles_on_road, speeding_today }  -> poll every 30 s
+GET org/notifications/?unread=1&page=     (paginated, + unread_count)
+  { id, type: EXCES_VITESSE|SIGNALEMENT|ECHEANCE, title, text, link, created_at, read }
+  One speeding notification per trip per 15 min (not one per episode).
+POST org/notifications/{id}/read/   POST org/notifications/read-all/
+GET org/dashboard/  -> now also "fleet": { on_road, trips_today, trips_7d,
+  speeding_7d, reports_7d, top_speeding_drivers: [{driver_id, name, count}],
+  drivers_with_app }
+Organisation object: + speed_tolerance_kmh (0-30).
+
+--- EASYWAY STAFF ACTING ON AN AGENCY
+
+Every /api/org/ endpoint also accepts a staff user (is_staff) with the header
+  X-EW-Organisation: <organisation uuid>
+-> same answers as an ADMIN of that agency (not owner-only actions), even when
+the agency is suspended or pending. Actions are logged under the staff
+member's name. Used by the back-office "Organisations" section.
+
+--- AGENCY PORTAL = THE BACK-OFFICE
+
+The agency space now lives inside the back-office (/agence for members,
+/organisations/{id} for staff). Invitation links point to
+<PORTAIL_AGENCE_URL>/activer -> set PORTAIL_AGENCE_URL to the back-office URL.

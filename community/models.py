@@ -231,6 +231,12 @@ class Incident(models.Model):
     fusionne_dans = models.ForeignKey(
         'self', on_delete=models.SET_NULL, null=True, blank=True, related_name='incidents_fusionnes'
     )
+    # Trajet d'agence en cours chez l'auteur au moment du signalement (cf.
+    # organisations.flotte.rattacher_signalement) : rend le signalement
+    # visible par l'organisation du vehicule. Vide sinon.
+    trajet = models.ForeignKey(
+        'trips.Trajet', on_delete=models.SET_NULL, null=True, blank=True, related_name='signalements'
+    )
 
     cree_le = models.DateTimeField(auto_now_add=True)
 

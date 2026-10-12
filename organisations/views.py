@@ -267,8 +267,10 @@ class MonOrganisationView(VueOrganisation):
     def get(self, request):
         return Response({
             'organisation': OrganisationSerializer(self.organisation).data,
-            'member_id': str(request.membre.id),
+            'member_id': str(request.membre.id) if request.membre.id else None,
+            'staff_access': getattr(request.membre, 'est_staff', False),
             'role': request.membre.role,
+            'user': {'name': request.user.nom_complet, 'phone': request.user.telephone},
         })
 
 
@@ -477,7 +479,7 @@ class ChauffeursView(VueOrganisation):
 
     def get(self, request):
         chauffeurs = _filtrer_fiches(
-            self.organisation.chauffeurs.prefetch_related('vehicules').order_by('nom_complet'),
+            self.organisation.chauffeurs.select_related('utilisateur').prefetch_related('vehicules').order_by('nom_complet'),
             request, ['nom_complet', 'telephone', 'numero_permis'],
         )
         return _paginer(self, request, chauffeurs, ChauffeurSerializer)
@@ -651,7 +653,15 @@ class TableauDeBordView(VueOrganisation):
                 for s in (StatutVehicule.ACTIF, StatutVehicule.MAINTENANCE, StatutVehicule.INACTIF)
             },
             'deadlines': echeances,
+            # Suivi de flotte (phase 3) : en route, trajets, exces, signalements.
+            'fleet': _resume_flotte(self.organisation),
         })
+
+
+def _resume_flotte(organisation):
+    from .vues_flotte import resume_flotte_tableau_de_bord  # import circulaire vues_flotte -> views
+
+    return resume_flotte_tableau_de_bord(organisation)
 
 
 @extend_schema(

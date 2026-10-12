@@ -202,8 +202,22 @@ class TrajetCreationSerializer(serializers.Serializer):
         help_text="Arrets intermediaires du trajet, dans l'ordre de passage.",
     )
     route = ItineraireCandidatSerializer(source='itineraire')
+    # Vehicule d'agence conduit pour ce trajet (cf. GET /api/users/me/vehicles/).
+    # Absent/null = trajet personnel, jamais visible par une organisation.
+    vehicle_id = serializers.UUIDField(required=False, allow_null=True, write_only=True)
+
+    def validate_vehicle_id(self, vehicule_id):
+        if vehicule_id is None:
+            return None
+        from organisations.flotte import VehiculeRefuse, resoudre_vehicule
+
+        try:
+            return resoudre_vehicule(self.context['request'].user, vehicule_id)
+        except VehiculeRefuse as exc:
+            raise serializers.ValidationError(str(exc)) from exc
 
     def create(self, validated_data):
+        vehicule_et_fiche = validated_data.pop('vehicle_id', None)
         itineraire_data = validated_data.pop('itineraire')
         manoeuvres_data = itineraire_data.pop('manoeuvres')
         etapes_data = validated_data.pop('etapes', [])
@@ -228,6 +242,10 @@ class TrajetCreationSerializer(serializers.Serializer):
             geometrie=geometrie_ligne,
         )
         trajet.demarrer()  # PLANIFIE -> ACTIF via la machine a etats (fixe demarre_le)
+        if vehicule_et_fiche:
+            from organisations.flotte import declarer_vehicule
+
+            declarer_vehicule(trajet, *vehicule_et_fiche, acteur=self.context['request'].user)
 
         itineraire = Itineraire.objects.create(
             trajet=trajet,

@@ -1,6 +1,6 @@
 from django.urls import path
 
-from . import views
+from . import views, vues_flotte
 
 app_name = 'organisations'
 
@@ -23,6 +23,28 @@ urlpatterns = [
     path('org/drivers/<uuid:id>/', views.ChauffeurDetailView.as_view(), name='chauffeur-detail'),
     path('org/vehicles/', views.VehiculesView.as_view(), name='vehicules'),
     path('org/vehicles/<uuid:id>/', views.VehiculeDetailView.as_view(), name='vehicule-detail'),
+
+    # Suivi de flotte (phase 3)
+    path('org/live/', vues_flotte.EnDirectView.as_view(), name='en-direct'),
+    path('org/trips/', vues_flotte.TrajetsFlotteView.as_view(), name='trajets'),
+    path('org/trips/<uuid:id>/', vues_flotte.TrajetFlotteDetailView.as_view(), name='trajet-detail'),
+    path('org/reports/', vues_flotte.SignalementsFlotteView.as_view(), name='signalements'),
+    path('org/speeding/', vues_flotte.ExcesVitesseView.as_view(), name='exces-vitesse'),
+    path('org/badges/', vues_flotte.BadgesOrganisationView.as_view(), name='badges'),
+    path('org/notifications/', vues_flotte.NotificationsOrganisationView.as_view(), name='notifications'),
+    path(
+        'org/notifications/read-all/',
+        vues_flotte.NotificationsOrganisationToutLuView.as_view(),
+        name='notifications-tout-lu',
+    ),
+    path(
+        'org/notifications/<uuid:id>/read/',
+        vues_flotte.NotificationOrganisationLueView.as_view(),
+        name='notification-lue',
+    ),
+
+    # Application mobile : vehicules que le chauffeur peut declarer
+    path('users/me/vehicles/', vues_flotte.MesVehiculesView.as_view(), name='mes-vehicules'),
 
     # Back-office EasyWay (staff)
     path('staff/organisations/', views.OrganisationsStaffView.as_view(), name='staff-organisations'),
