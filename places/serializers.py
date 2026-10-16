@@ -385,3 +385,40 @@ class EtablissementEcritureSerializer(serializers.Serializer):
             setattr(instance, champ, valeur)
         instance.save()
         return instance
+
+
+class LieuxSurTrajetSerializer(serializers.Serializer):
+    """POST /api/places/along-route/ : meme geometrie que routes/calculate ->
+    geometry (polyline6), meme validation que ZonesVitesseSurTrajetSerializer."""
+
+    geometry = serializers.CharField()
+    buffer_m = serializers.IntegerField(required=False, default=100, min_value=10, max_value=500)
+    categories = serializers.ListField(child=serializers.CharField(max_length=100), required=False, default=list)
+
+    def validate_geometry(self, valeur):
+        from trips.polyline import decoder_polyline6
+
+        try:
+            points = decoder_polyline6(valeur)
+        except Exception:
+            raise serializers.ValidationError('Invalid encoded polyline.')
+        if len(points) < 2:
+            raise serializers.ValidationError('geometry must decode to at least 2 points.')
+        return points
+
+
+class PointCarteSerializer(serializers.Serializer):
+    """Lieu ou etablissement affiche sur la carte (cf. services/carte.py)."""
+
+    id = serializers.UUIDField()
+    kind = serializers.ChoiceField(choices=['place', 'establishment'])
+    name = serializers.CharField()
+    category = serializers.CharField()
+    category_label = serializers.CharField()
+    address = serializers.CharField(allow_blank=True)
+    neighborhood = serializers.CharField(allow_blank=True)
+    city = serializers.CharField(allow_blank=True)
+    lat = serializers.FloatField()
+    lon = serializers.FloatField()
+    position_m = serializers.IntegerField(required=False, help_text='along-route seulement')
+    distance_m = serializers.IntegerField(required=False, help_text='along-route seulement')

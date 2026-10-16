@@ -15,6 +15,9 @@ urlpatterns = [
         name='enregistres-detail',
     ),
     path('places/recent/', views.RechercheRecenteView.as_view(), name='recents'),
+    path('places/map/', views.LieuxCarteView.as_view(), name='carte'),
+    path('places/map/categories/', views.CategoriesCarteView.as_view(), name='carte-categories'),
+    path('places/along-route/', views.LieuxSurTrajetView.as_view(), name='sur-trajet'),
     path('places/<uuid:id>/', views.LieuDetailView.as_view(), name='lieu-detail'),
 
     # Back-office (moderation, reserve au staff)

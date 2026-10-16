@@ -32,13 +32,16 @@ from .serializers import (
     LieuActionGroupeeSerializer,
     LieuCreationStaffSerializer,
     LieuDetailSerializer,
+    LieuxSurTrajetSerializer,
     LieuModerationSerializer,
     LieuPropositionSerializer,
     LieuRechercheSerializer,
     LieuRejetSerializer,
+    PointCarteSerializer,
     RechercheRecenteSerializer,
     stats_auteurs_lieux,
 )
+from .services import carte
 from .services.client_nominatim import ClientNominatim
 from .services.client_photon import ClientPhoton
 from .utils import normaliser
@@ -696,3 +699,96 @@ class EtablissementDetailView(APIView):
         journaliser(request.user, 'establishments.delete', etablissement)
         etablissement.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# --- Lieux sur la carte de l'application (cf. services/carte.py) --------------
+
+# Meme plafond que le mode bbox de /api/incidents/nearby/ (viewport de carte).
+COTE_MAX_ZONE_KM = 50
+
+
+def _categories(request):
+    brut = request.query_params.get('categories', '')
+    return [c.strip() for c in brut.split(',') if c.strip()]
+
+
+@extend_schema(
+    tags=['Places'],
+    summary='Lieux a afficher sur la carte (zone visible)',
+    description=(
+        "Lieux approuves (proposes par les utilisateurs ou ajoutes par EasyWay) et "
+        "etablissements visibles dans le rectangle min_lat/min_lon/max_lat/max_lon "
+        f"(cote max {COTE_MAX_ZONE_KM} km, comme /api/incidents/nearby/). "
+        f"categories=a,b pour filtrer. Au plus {carte.MAX_RESULTATS} points : "
+        "truncated=true -> zoomer pour en voir davantage. A rappeler quand la carte bouge."
+    ),
+    parameters=[
+        OpenApiParameter('min_lat', OpenApiTypes.FLOAT, required=True),
+        OpenApiParameter('min_lon', OpenApiTypes.FLOAT, required=True),
+        OpenApiParameter('max_lat', OpenApiTypes.FLOAT, required=True),
+        OpenApiParameter('max_lon', OpenApiTypes.FLOAT, required=True),
+        OpenApiParameter('categories', OpenApiTypes.STR, description='Liste separee par des virgules.'),
+    ],
+    responses={200: inline_serializer(name='LieuxCarte', fields={
+        'results': PointCarteSerializer(many=True), 'truncated': drf_serializers.BooleanField(),
+    })},
+)
+class LieuxCarteView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        try:
+            min_lat, min_lon, max_lat, max_lon = (
+                float(request.query_params[c]) for c in ('min_lat', 'min_lon', 'max_lat', 'max_lon')
+            )
+        except (KeyError, ValueError):
+            return Response(
+                {'detail': "'min_lat', 'min_lon', 'max_lat', 'max_lon' are required numbers."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if min_lat >= max_lat or min_lon >= max_lon:
+            return Response({'detail': 'Empty bounding box.'}, status=status.HTTP_400_BAD_REQUEST)
+        hauteur_km = (max_lat - min_lat) * 111
+        largeur_km = (max_lon - min_lon) * 111
+        if max(hauteur_km, largeur_km) > COTE_MAX_ZONE_KM:
+            return Response(
+                {'detail': f'Bounding box too large (max {COTE_MAX_ZONE_KM} km per side). Zoom in.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        points, tronque = carte.lieux_dans_zone(min_lat, min_lon, max_lat, max_lon, _categories(request))
+        return Response({'results': points, 'truncated': tronque})
+
+
+@extend_schema(
+    tags=['Places'],
+    summary="Lieux le long de l'itineraire (navigation)",
+    description=(
+        "Meme usage que /api/speed-zones/along-route/ : un appel au depart et a chaque "
+        "recalcul, geometry = routes/calculate -> geometry. Renvoie lieux et etablissements "
+        "a moins de buffer_m (defaut 100, max 500) du trace, tries par position_m (metres "
+        "depuis le debut du trajet : afficher les prochains, annoncer \"station dans 2 km\"). "
+        "distance_m = ecart au trace. categories : filtre optionnel."
+    ),
+    request=LieuxSurTrajetSerializer,
+    responses={200: PointCarteSerializer(many=True), 400: MessageSerializer},
+)
+class LieuxSurTrajetView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = LieuxSurTrajetSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        donnees = serializer.validated_data
+        return Response(carte.lieux_sur_trajet(donnees['geometry'], donnees['buffer_m'], donnees['categories']))
+
+
+@extend_schema(
+    tags=['Places'],
+    summary='Categories presentes sur la carte',
+    description="Pour les filtres de l'appli : categories des lieux affiches et types d'etablissement, les plus frequentes d'abord.",
+)
+class CategoriesCarteView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        return Response(carte.categories_affichees())

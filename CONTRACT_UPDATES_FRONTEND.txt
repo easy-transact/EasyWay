@@ -80,3 +80,34 @@ GET /api/schema/?format=json (ou /api/docs/).
   - Cartes hors ligne (paquets de tuiles, GET /api/offline/packs/).
   - Etat des routes (note par troncon, score du trajet).
   - Comprehension des signalements vocaux.
+
+------------------------------------------------------------
+5. NOUVEAU — lieux sur la carte et pendant la navigation (16/10/2026)
+
+Lieux renvoyes : lieux APPROUVES proposes par les utilisateurs ou ajoutes par
+EasyWay (back-office), + etablissements (HOPITAL, GARAGE...) marques
+"visible sur la carte". Les lieux importes d'OpenStreetMap restent dans la
+recherche seulement (trop nombreux pour la carte).
+Chaque point :
+  { "id", "kind": "place"|"establishment", "name", "category",
+    "category_label", "address", "neighborhood", "city", "lat", "lon" }
+  kind=place -> fiche : GET /api/places/{id}/
+
+  GET /api/places/map/?min_lat=&min_lon=&max_lat=&max_lon=&categories=a,b
+    Carte d'accueil : rectangle visible (cote <= 50 km, meme regle que
+    incidents/nearby en mode bbox). A rappeler quand la carte bouge
+    (avec un petit delai, ~300 ms). Reponse { "results": [...], "truncated": bool }
+    -- au plus 300 points ; truncated=true -> inviter a zoomer.
+
+  POST /api/places/along-route/
+    { "geometry": "<routes/calculate -> geometry (polyline6)>",
+      "buffer_m": 100 (10..500, optionnel), "categories": ["HOPITAL", ...] (optionnel) }
+    Pendant la navigation : meme usage que speed-zones/along-route (un appel
+    au depart et a chaque recalcul d'itineraire). Chaque point porte en plus
+      "position_m" : metres depuis le debut du trajet (tri croissant)
+      "distance_m" : ecart au trace
+    -> afficher les prochains lieux et annoncer "Station Tradex dans 2 km"
+       (position_m - distance deja parcourue).
+
+  GET /api/places/map/categories/
+    [ { "category", "label", "count", "kind" } ]  -- pour les filtres de la carte.
