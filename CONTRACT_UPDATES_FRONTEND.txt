@@ -111,3 +111,28 @@ Chaque point :
 
   GET /api/places/map/categories/
     [ { "category", "label", "count", "kind" } ]  -- pour les filtres de la carte.
+
+------------------------------------------------------------
+6. NOUVEAU — meilleur itineraire en cours de route (19/10/2026)
+
+Pendant la navigation, le serveur peut proposer une route plus rapide quand
+un bouchon se forme (vitesses mesurees des conducteurs EasyWay + embouteillages
+signales, deja pris en compte par le calcul d'itineraire).
+
+  POST /api/trips/{id}/better-route/      (trajet ACTIF de l'appelant)
+    { "lat", "lon", "heading"?, "remaining_waypoints"?: [{lat, lon}, ...] }
+    -> toutes les 1-2 min pendant la navigation (limite : 120 appels/heure).
+    { "reason": "BETTER_FOUND" | "NO_BETTER" | "NO_ALTERNATIVE" | "OFF_ROUTE" | "NO_ROUTE",
+      "better_route": <meme forme qu'un element de routes/calculate> | null,
+      "current_duration_s", "new_duration_s", "time_saved_s" }
+    BETTER_FOUND : proposer "Itineraire plus rapide : -7 min via ..." (label),
+      le conducteur accepte ou ignore -- jamais de changement automatique.
+      Seuil : au moins 3 min ET 10 % du temps restant gagnes.
+    OFF_ROUTE : le conducteur a quitte sa route -> recalcul classique via
+      routes/calculate (comme aujourd'hui).
+
+  POST /api/trips/{id}/switch-route/      (le conducteur accepte)
+    { "lat", "lon", "route": <better_route tel quel> }   -> 200 Trip
+    Le trace garde la partie deja parcourue + la nouvelle route. Ensuite :
+    guider sur route.maneuvers et redemander speed-zones/along-route et
+    places/along-route avec la nouvelle geometry.
