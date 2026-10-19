@@ -289,6 +289,38 @@ class TrajetMiseAJourSerializer(serializers.ModelSerializer):
         return instance
 
 
+class MeilleurItineraireSerializer(serializers.Serializer):
+    """POST /api/trips/{id}/better-route/ : position actuelle pendant la navigation."""
+
+    lat = serializers.FloatField(min_value=-90, max_value=90)
+    lon = serializers.FloatField(min_value=-180, max_value=180)
+    heading = serializers.IntegerField(
+        required=False, allow_null=True, min_value=0, max_value=359, default=None,
+        help_text='Cap actuel : evite un demi-tour en tete du nouvel itineraire.',
+    )
+    remaining_waypoints = PointEvitementSerializer(
+        many=True, required=False, default=list,
+        help_text='Etapes pas encore atteintes, dans l\'ordre (vide si aucune).',
+    )
+
+
+class MeilleurItineraireReponseSerializer(serializers.Serializer):
+    reason = serializers.ChoiceField(choices=['BETTER_FOUND', 'NO_BETTER', 'NO_ALTERNATIVE', 'OFF_ROUTE', 'NO_ROUTE'])
+    better_route = ItineraireCandidatSerializer(allow_null=True)
+    current_duration_s = serializers.IntegerField(allow_null=True)
+    new_duration_s = serializers.IntegerField(allow_null=True)
+    time_saved_s = serializers.IntegerField(allow_null=True)
+
+
+class ChangerItineraireSerializer(serializers.Serializer):
+    """POST /api/trips/{id}/switch-route/ : le conducteur accepte la proposition
+    (better_route renvoye tel quel) depuis sa position actuelle."""
+
+    lat = serializers.FloatField(min_value=-90, max_value=90)
+    lon = serializers.FloatField(min_value=-180, max_value=180)
+    route = ItineraireCandidatSerializer()
+
+
 class NoterTrajetSerializer(serializers.Serializer):
     rating = serializers.IntegerField(min_value=1, max_value=5, source='note')
     comment = serializers.CharField(required=False, allow_blank=True, default='', source='commentaire')

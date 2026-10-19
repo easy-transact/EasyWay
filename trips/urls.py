@@ -9,6 +9,8 @@ urlpatterns = [
     path('trips/', views.TrajetListeCreationView.as_view(), name='trajets'),
     path('trips/<uuid:id>/', views.TrajetDetailView.as_view(), name='trajet-detail'),
     path('trips/<uuid:id>/rate/', views.NoterTrajetView.as_view(), name='trajet-note'),
+    path('trips/<uuid:id>/better-route/', views.MeilleurItineraireView.as_view(), name='trajet-meilleur-itineraire'),
+    path('trips/<uuid:id>/switch-route/', views.ChangerItineraireView.as_view(), name='trajet-changer-itineraire'),
     path('telemetry/positions/', views.TelemetriePositionsView.as_view(), name='telemetrie-positions'),
     path('speed-limit/', views.LimiteVitesseView.as_view(), name='limite-vitesse'),
     path(

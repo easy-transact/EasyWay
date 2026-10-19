@@ -164,6 +164,8 @@ REST_FRAMEWORK = {
         'connexion': '20/hour',
         'mot-de-passe': '5/hour',
         'liste-attente': '10/hour',
+        # Meilleur itineraire en cours de route : un appel toutes les 1-2 min pendant la navigation.
+        'meilleur-itineraire': '120/hour',
         # Repond existe / n'existe pas : bloque l'enumeration de comptes en masse.
         'verification-existence': '20/hour',
         # Invitations de membres d'agence : chaque appel envoie un email.

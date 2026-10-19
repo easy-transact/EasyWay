@@ -14,6 +14,7 @@ from rest_framework import status
 from rest_framework.generics import get_object_or_404
 from rest_framework.permissions import IsAdminUser
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from accounts.models import Parametres
@@ -24,12 +25,15 @@ from accounts.serializers import MessageSerializer
 from .exceptions import TransitionInvalide
 from .geocodage import lancer_geocodage_trajet, libelle_generique
 from .services.geo import distance_haversine_m
-from .models import StatutTrajet, Trajet, ZoneVitesse
+from .models import Itineraire, Manoeuvre, StatutTrajet, Trajet, ZoneVitesse
 from .polyline import decoder_polyline6
 from .serializers import (
     CalculItineraireSerializer,
+    ChangerItineraireSerializer,
     ItineraireCandidatSerializer,
     LimiteVitesseSerializer,
+    MeilleurItineraireReponseSerializer,
+    MeilleurItineraireSerializer,
     NoterTrajetSerializer,
     TelemetriePositionsSerializer,
     TrajetCreationSerializer,
@@ -43,6 +47,7 @@ from .serializers import (
     ZoneVitesseSurTrajetSerializer,
 )
 from .services.producteur_evenements import FLUX_POSITIONS, ProducteurRedisStreams
+from .services.meilleur_itineraire import chercher_meilleur, troncon_parcouru
 from .services.service_itineraire import ServiceItineraire
 from .services.zones_vitesse import zones_sur_trajet
 
@@ -220,6 +225,94 @@ class NoterTrajetView(APIView):
         serializer = NoterTrajetSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         trajet.noter(**serializer.validated_data)
+        return Response(TrajetSerializer(trajet).data)
+
+
+def _trajet_actif(request, id):
+    trajet = get_object_or_404(Trajet, id=id, utilisateur=request.user)
+    if trajet.statut != StatutTrajet.ACTIF:
+        return trajet, Response({'detail': 'Only an active trip can change route.'}, status=status.HTTP_400_BAD_REQUEST)
+    return trajet, None
+
+
+@extend_schema(
+    tags=['Trips'],
+    summary='Chercher un meilleur itineraire en cours de route',
+    description=(
+        "A appeler toutes les 1-2 min pendant la navigation avec la position actuelle. Le "
+        "serveur recalcule les itineraires depuis cette position avec le trafic temps reel "
+        "(vitesses mesurees des conducteurs EasyWay et embouteillages signales), reconnait "
+        "celui deja suivi et propose le plus rapide s'il fait gagner au moins 3 min ET 10 % "
+        "du temps restant. reason : BETTER_FOUND (better_route rempli, a proposer au "
+        "conducteur), NO_BETTER, NO_ALTERNATIVE, OFF_ROUTE (le conducteur a quitte sa route : "
+        "faire un recalcul classique avec routes/calculate), NO_ROUTE. Pour accepter : "
+        "POST /api/trips/{id}/switch-route/."
+    ),
+    request=MeilleurItineraireSerializer,
+    responses={200: MeilleurItineraireReponseSerializer, 400: MessageSerializer},
+)
+class MeilleurItineraireView(APIView):
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'meilleur-itineraire'
+
+    def post(self, request, id):
+        trajet, erreur = _trajet_actif(request, id)
+        if erreur:
+            return erreur
+        serializer = MeilleurItineraireSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        donnees = serializer.validated_data
+        resultat = chercher_meilleur(
+            trajet, (donnees['lat'], donnees['lon']), request.user, cap=donnees['heading'],
+            etapes_restantes=[(p['lat'], p['lon']) for p in donnees['remaining_waypoints']],
+        )
+        return Response(MeilleurItineraireReponseSerializer(resultat).data)
+
+
+@extend_schema(
+    tags=['Trips'],
+    summary="Accepter l'itineraire propose",
+    description=(
+        "Le conducteur accepte better_route (renvoye tel quel dans `route`) depuis sa "
+        "position actuelle. Le trace du trajet devient : partie deja parcourue + nouvel "
+        "itineraire ; l'itineraire est enregistre et devient celui suivi (prochains appels "
+        "a better-route, zones de vitesse et lieux le long du trajet a redemander avec la "
+        "nouvelle geometry)."
+    ),
+    request=ChangerItineraireSerializer,
+    responses={200: TrajetSerializer, 400: MessageSerializer},
+)
+class ChangerItineraireView(APIView):
+    def post(self, request, id):
+        trajet, erreur = _trajet_actif(request, id)
+        if erreur:
+            return erreur
+        serializer = ChangerItineraireSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        donnees = serializer.validated_data
+        route = dict(donnees['route'])
+        manoeuvres = route.pop('manoeuvres')
+        route.pop('degrade', None)
+        route.pop('est_recommande', None)
+
+        nouveaux_points = decoder_polyline6(route['geometrie'])
+        parcouru = troncon_parcouru(trajet.geometrie.coords if trajet.geometrie else [], (donnees['lat'], donnees['lon']))
+        points = parcouru + [p for p in nouveaux_points if not parcouru or p != parcouru[-1]]
+
+        with transaction.atomic():
+            itineraire, _ = Itineraire.objects.update_or_create(
+                trajet=trajet, identifiant=route['identifiant'],
+                defaults={
+                    'est_recommande': True, 'libelle': route['libelle'], 'distance': route['distance'],
+                    'duree': route['duree'], 'duree_avec_trafic': route['duree_avec_trafic'],
+                    'niveau_trafic': route['niveau_trafic'], 'geometrie': route['geometrie'],
+                },
+            )
+            itineraire.manoeuvres.all().delete()
+            Manoeuvre.objects.bulk_create([Manoeuvre(itineraire=itineraire, ordre=i, **m) for i, m in enumerate(manoeuvres)])
+            trajet.itineraire_choisi = route['identifiant']
+            trajet.geometrie = LineString(points, srid=4326) if len(points) >= 2 else trajet.geometrie
+            trajet.save(update_fields=['itineraire_choisi', 'geometrie'])
         return Response(TrajetSerializer(trajet).data)
 
 
