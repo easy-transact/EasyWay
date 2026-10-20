@@ -92,6 +92,11 @@ class Trajet(models.Model):
     telemetrie_premiere_le = models.DateTimeField(null=True, blank=True)
     telemetrie_derniere_le = models.DateTimeField(null=True, blank=True)
 
+    # Vehicule utilise pour CE trajet (moteur de calcul moto/voiture...), fixe
+    # au depart : vehicule d'agence, sinon celui choisi pour l'itineraire,
+    # sinon celui du profil. Sert aux recalculs en route (better-route).
+    type_vehicule = models.CharField(max_length=20, blank=True)
+
     # Trajet fait avec un vehicule d'agence (choisi par le chauffeur au depart,
     # cf. TrajetCreationSerializer) : seuls ces trajets sont visibles par
     # l'organisation. Vide pour un trajet personnel.
@@ -398,3 +403,30 @@ class CorridorReference(models.Model):
 
     def __str__(self):
         return self.nom
+
+
+class PrevisionItineraire(models.Model):
+    """Chaque calcul d'itineraire (POST /api/routes/calculate/) et ce qui a ete
+    annonce : duree Valhalla, retard ajoute par les signalements, itineraire
+    recommande -- puis le trajet lance, s'il y en a un. Sert a comparer la
+    prevision a la realite (spec ITINERAIRES_VOITURE_MOTO, section 7)."""
+
+    id = models.BigAutoField(primary_key=True)
+    utilisateur = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name='previsions_itineraire'
+    )
+    type_vehicule = models.CharField(max_length=20, blank=True)
+    costing = models.CharField(max_length=20)
+    depart = gis_models.PointField(srid=4326, geography=True)
+    arrivee = gis_models.PointField(srid=4326, geography=True)
+    # [{route_id, duree, duree_avec_trafic, delai_signalements, nb_signalements,
+    #   distance, recommande}] -- pas de geometrie, deja dans le trajet lance.
+    candidats = models.JSONField(default=list)
+    itineraire_recommande = models.CharField(max_length=64, blank=True)
+    trajet = models.ForeignKey(Trajet, on_delete=models.SET_NULL, null=True, blank=True, related_name='previsions')
+    itineraire_choisi = models.CharField(max_length=64, blank=True)
+    cree_le = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'prevision_itineraire'
+        indexes = [models.Index(fields=['utilisateur', '-cree_le'])]

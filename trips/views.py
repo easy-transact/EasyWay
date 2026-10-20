@@ -25,7 +25,7 @@ from accounts.serializers import MessageSerializer
 from .exceptions import TransitionInvalide
 from .geocodage import lancer_geocodage_trajet, libelle_generique
 from .services.geo import distance_haversine_m
-from .models import Itineraire, Manoeuvre, StatutTrajet, Trajet, ZoneVitesse
+from .models import Itineraire, Manoeuvre, PrevisionItineraire, StatutTrajet, Trajet, ZoneVitesse
 from .polyline import decoder_polyline6
 from .serializers import (
     CalculItineraireSerializer,
@@ -91,8 +91,36 @@ class CalculItineraireView(APIView):
             cap_origine=donnees['cap_origine'],
             alternatives=donnees['alternatives'],
             etapes=[(p['lat'], p['lon']) for p in donnees['etapes']],
+            type_vehicule=donnees['vehicle_type'],
         )
+        _enregistrer_prevision(request.user, donnees, candidats)
         return Response(ItineraireCandidatSerializer(candidats, many=True).data)
+
+
+def _enregistrer_prevision(utilisateur, donnees, candidats):
+    """Garde ce qui a ete annonce (cf. PrevisionItineraire), pour comparer
+    plus tard a la duree reelle du trajet lance."""
+    if not candidats:
+        return
+    from .services.service_itineraire import COSTING_DEFAUT, COSTING_PAR_VEHICULE
+
+    type_vehicule = candidats[0].get('type_vehicule') or ''
+    PrevisionItineraire.objects.create(
+        utilisateur=utilisateur,
+        type_vehicule=type_vehicule,
+        costing=COSTING_PAR_VEHICULE.get(type_vehicule, COSTING_DEFAUT),
+        depart=Point(donnees['origine_lon'], donnees['origine_lat'], srid=4326),
+        arrivee=Point(donnees['destination_lon'], donnees['destination_lat'], srid=4326),
+        candidats=[
+            {
+                'route_id': c['identifiant'], 'distance': c['distance'], 'duree': c['duree'],
+                'duree_avec_trafic': c['duree_avec_trafic'], 'delai_signalements': c.get('delai_signalements', 0),
+                'nb_signalements': len(c.get('signalements_appliques', [])), 'recommande': c['est_recommande'],
+            }
+            for c in candidats
+        ],
+        itineraire_recommande=candidats[0]['identifiant'],
+    )
 
 
 @extend_schema_view(
@@ -242,7 +270,7 @@ def _trajet_actif(request, id):
         "A appeler toutes les 1-2 min pendant la navigation avec la position actuelle. Le "
         "serveur recalcule les itineraires depuis cette position avec le trafic temps reel "
         "(vitesses mesurees des conducteurs EasyWay et embouteillages signales), reconnait "
-        "celui deja suivi et propose le plus rapide s'il fait gagner au moins 3 min ET 10 % "
+        "celui deja suivi et propose le plus rapide s'il fait gagner au moins 2 min ET 10 % "
         "du temps restant. reason : BETTER_FOUND (better_route rempli, a proposer au "
         "conducteur), NO_BETTER, NO_ALTERNATIVE, OFF_ROUTE (le conducteur a quitte sa route : "
         "faire un recalcul classique avec routes/calculate), NO_ROUTE. Pour accepter : "

@@ -15,9 +15,9 @@ from .geo import distance_haversine_m
 from .service_itineraire import ServiceItineraire
 
 # Gain minimal pour deranger le conducteur : les deux conditions a la fois
-# (3 min sur 10 min de trajet = 30 %, mais 3 min sur 2 h ne vaut pas un
+# (2 min sur 10 min de trajet = 20 %, mais 2 min sur 2 h ne vaut pas un
 # changement de route). Valeurs pas mesurees sur donnees reelles, a ajuster.
-GAIN_MIN_S = 180
+GAIN_MIN_S = 120
 GAIN_MIN_RATIO = 0.10
 # Un candidat "est" la route suivie si au moins 70 % de ses points sont a
 # moins de 40 m de la geometrie du trajet.
@@ -60,6 +60,7 @@ def chercher_meilleur(trajet, position, utilisateur, cap=None, etapes_restantes=
         depart=position,
         arrivee=(trajet.position_destination.y, trajet.position_destination.x),
         utilisateur=utilisateur, cap_origine=cap, alternatives=True, etapes=etapes_restantes or [],
+        type_vehicule=trajet.type_vehicule or None,
     )
     if not candidats:
         return {**resultat, 'reason': NO_ROUTE}

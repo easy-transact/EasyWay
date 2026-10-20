@@ -127,7 +127,7 @@ signales, deja pris en compte par le calcul d'itineraire).
       "current_duration_s", "new_duration_s", "time_saved_s" }
     BETTER_FOUND : proposer "Itineraire plus rapide : -7 min via ..." (label),
       le conducteur accepte ou ignore -- jamais de changement automatique.
-      Seuil : au moins 3 min ET 10 % du temps restant gagnes.
+      Seuil : au moins 2 min ET 10 % du temps restant gagnes.
     OFF_ROUTE : le conducteur a quitte sa route -> recalcul classique via
       routes/calculate (comme aujourd'hui).
 
@@ -136,3 +136,36 @@ signales, deja pris en compte par le calcul d'itineraire).
     Le trace garde la partie deja parcourue + la nouvelle route. Ensuite :
     guider sur route.maneuvers et redemander speed-zones/along-route et
     places/along-route avec la nouvelle geometry.
+
+------------------------------------------------------------
+7. NOUVEAU — itineraires voiture / moto alourdis par les signalements (20/10/2026)
+
+  POST /api/routes/calculate/  -- deux champs facultatifs en plus :
+    "vehicle_type": "VOITURE"|"MOTO"|"TAXI"|"CAMION"|"BUS"|"UTILITAIRE"
+        (defaut : le vehicule du profil ; le conducteur peut en changer pour ce trajet)
+    "vehicle_id": "<uuid de users/me/vehicles/>"  -- vehicule d'agence : son type prime.
+  Moteur de calcul : moto -> "motorcycle" (pistes et rues etroites acceptees,
+  ignore le trafic en direct mesure sur les voitures) ; voiture/taxi -> "auto" ;
+  camion/utilitaire -> "truck" ; bus -> "bus".
+
+  Chaque itineraire renvoye porte en plus :
+    "vehicle_type": "MOTO",
+    "delay_from_reports": 390,          // secondes ajoutees par les signalements
+    "reports_applied": [ { "id", "type", "subtype", "delay", "applied_as": "delay" } ]
+  "duration_with_traffic" inclut ce retard : c'est la duree a afficher.
+  L'ordre de la liste et "is_recommended" suivent cette duree finale (a moins
+  d'1 min d'ecart : le moins de signalements, puis le plus court).
+  -> afficher "+6 min a cause de 2 signalements".
+
+  Regles cote serveur :
+    - un signalement compte s'il est a moins de 30 m du trace, dans le meme sens
+      (cap a moins de 45 deg), pondere par sa fiabilite (votes) et son age ;
+    - POLICE et RADAR : aucun effet (pas de detour pour eviter un controle) ;
+    - route barree / inondation confirmee (2e auteur ou confirmation) : la route
+      est evitee ; non confirmee : simple ralentissement. Inondation : evitee par
+      une moto des le premier signalement ;
+    - moto : 30 a 50 % du retard voiture selon le type (remonte les files).
+
+  Renvoyer l'itineraire choisi tel quel a POST /api/trips/ (les champs ajoutes
+  sont acceptes). Le type de vehicule est garde sur le trajet et reutilise par
+  better-route (seuil desormais : 2 min ET 10 %).

@@ -13,7 +13,7 @@ from django.core.cache import cache
 from accounts.models import TypeVehicule
 
 from ..models import NiveauTrafic, RoadClass
-from . import service_trafic
+from . import retards_signalements, service_trafic
 from .client_corridor_reference import ClientCorridorReference
 from .client_valhalla import ClientValhalla
 from .corridors import trouver_corridor
@@ -31,6 +31,10 @@ COSTING_PAR_VEHICULE = {
     TypeVehicule.BUS: 'bus',
 }
 COSTING_DEFAUT = 'auto'
+# Premiere version (spec ITINERAIRES_VOITURE_MOTO, section 5) : la moto ignore
+# le trafic en direct, mesure surtout sur des voitures. A repasser a True avec
+# une instance Valhalla moto dediee.
+MOTO_TRAFIC_EN_DIRECT = False
 
 
 class ServiceItineraire:
@@ -38,7 +42,8 @@ class ServiceItineraire:
         self.client = client or ClientValhalla()
 
     def calculer(
-        self, depart, arrivee, utilisateur, eviter=None, cap_origine=None, alternatives=True, etapes=None
+        self, depart, arrivee, utilisateur, eviter=None, cap_origine=None, alternatives=True, etapes=None,
+        type_vehicule=None,
     ) -> list[dict]:
         """depart/arrivee : (lat, lon). etapes (optionnel) : arrets
         intermediaires dans l'ordre de passage -- chaque paire consecutive
@@ -58,7 +63,12 @@ class ServiceItineraire:
         eviter le cout des appels de variantes quand l'appelant n'en a pas
         besoin. Retourne une liste d'itineraires candidats normalises (voir
         _normaliser_trip), le premier etant recommande."""
-        options = self._options_depuis_parametres(utilisateur)
+        type_vehicule = type_vehicule or utilisateur.type_vehicule
+        options = self._options_depuis_parametres(utilisateur, type_vehicule)
+        costing = options['costing']
+        # Fermetures confirmees (route barree, inondation) : exclues du calcul,
+        # comme un point `avoid` (cf. retards_signalements.fermetures_a_eviter).
+        eviter = list(eviter or []) + retards_signalements.fermetures_a_eviter(depart, arrivee, etapes, costing)
         if eviter:
             # cf. https://valhalla.github.io/valhalla/api/turn-by-turn/api-reference/#exclude-locations
             # -- cle top-level du payload /route, pas une costing_option.
@@ -84,10 +94,17 @@ class ServiceItineraire:
             )
             cache.set(cle, trips, timeout=DUREE_CACHE_S)
 
-        return [self._normaliser_trip(trip, index) for index, trip in enumerate(trips)]
+        candidats = [self._normaliser_trip(trip, index) for index, trip in enumerate(trips)]
+        for candidat in candidats:
+            candidat['type_vehicule'] = type_vehicule or TypeVehicule.VOITURE
+        # Retards des signalements recalcules a chaque appel (pas mis en cache :
+        # un signalement peut apparaitre ou expirer entre deux calculs), puis
+        # reclassement par duree finale.
+        trafic_en_direct = 'current' in options['costing_options'][costing]['speed_types']
+        return retards_signalements.appliquer(candidats, costing, trafic_en_direct)
 
-    def _options_depuis_parametres(self, utilisateur) -> dict:
-        costing = COSTING_PAR_VEHICULE.get(utilisateur.type_vehicule, COSTING_DEFAUT)
+    def _options_depuis_parametres(self, utilisateur, type_vehicule=None) -> dict:
+        costing = COSTING_PAR_VEHICULE.get(type_vehicule or utilisateur.type_vehicule, COSTING_DEFAUT)
         parametres = utilisateur.parametres
 
         costing_options = {
@@ -107,6 +124,18 @@ class ServiceItineraire:
             # sert qu'aux departs differes, qui passeraient un date_time.
             'speed_types': ['current', 'predicted', 'constrained', 'freeflow'],
         }
+        if costing == 'motorcycle':
+            # Moto (Valhalla "motorcycle", en essai) : rues etroites et pistes
+            # acceptees, grands axes un peu moins. Reglages de depart a caler.
+            costing_options.update({
+                'use_highways': 0.5, 'use_trails': 0.3, 'use_living_streets': 0.5,
+                'use_tracks': 0.0 if parametres.eviter_non_bitumees else 0.5,
+            })
+            if not MOTO_TRAFIC_EN_DIRECT:
+                # traffic.tar est unique et mesure surtout des voitures : une moto
+                # remonte les files, elle ne subit pas un bouchon comme une voiture.
+                # Ses signalements passent par les retards (part moto reduite).
+                costing_options['speed_types'] = ['predicted', 'constrained', 'freeflow']
         # eviter_intersections_difficiles : aucun levier Valhalla equivalent
         # (pas de notion de "complexite d'intersection" dans ses costing
         # options) -- delibrement non traduit plutot que faussement mappe.

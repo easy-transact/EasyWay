@@ -2,10 +2,11 @@ from django.contrib.gis.geos import LineString, Point
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
+from accounts.models import TypeVehicule
 from community.services import incidents_actifs_par_topologie
 from places.models import Lieu
 
-from .models import EtapeTrajet, Itineraire, Manoeuvre, StatutTrajet, Trajet, ZoneVitesse
+from .models import EtapeTrajet, Itineraire, Manoeuvre, PrevisionItineraire, StatutTrajet, Trajet, ZoneVitesse
 from .polyline import decoder_polyline6
 
 # Champs declares avec `source=` : la reponse API parle anglais, les modeles/
@@ -50,6 +51,34 @@ class CalculItineraireSerializer(serializers.Serializer):
             'honore cote serveur, pas juste tronque apres coup.'
         ),
     )
+    vehicle_type = serializers.ChoiceField(
+        choices=TypeVehicule.choices, required=False, allow_null=True, default=None,
+        help_text='Vehicule pour ce trajet (moteur de calcul : moto, voiture, camion...). Defaut : celui du profil.',
+    )
+    vehicle_id = serializers.UUIDField(
+        required=False, allow_null=True, default=None,
+        help_text="Vehicule d'agence (GET /api/users/me/vehicles/) : son type prime sur vehicle_type.",
+    )
+
+    def validate(self, donnees):
+        vehicule_id = donnees.pop('vehicle_id', None)
+        if vehicule_id:
+            from organisations.flotte import VehiculeRefuse, resoudre_vehicule
+
+            try:
+                vehicule, _fiche = resoudre_vehicule(self.context['request'].user, vehicule_id)
+            except VehiculeRefuse as exc:
+                raise serializers.ValidationError({'vehicle_id': str(exc)}) from exc
+            donnees['vehicle_type'] = vehicule.type
+        return donnees
+
+
+class SignalementApplique(serializers.Serializer):
+    id = serializers.UUIDField()
+    type = serializers.CharField()
+    subtype = serializers.CharField(allow_blank=True)
+    delay = serializers.IntegerField(help_text='secondes')
+    applied_as = serializers.CharField()
 
 
 class ManoeuvreCandidatSerializer(serializers.Serializer):
@@ -81,6 +110,14 @@ class ItineraireCandidatSerializer(serializers.Serializer):
     is_recommended = serializers.BooleanField(source='est_recommande')
     maneuvers = ManoeuvreCandidatSerializer(many=True, source='manoeuvres')
     degraded = serializers.BooleanField(default=False, source='degrade')
+    # Ajouts (spec ITINERAIRES_VOITURE_MOTO) : facultatifs en entree, pour que
+    # le client puisse renvoyer l'itineraire tel quel a POST /api/trips/.
+    vehicle_type = serializers.CharField(source='type_vehicule', required=False, allow_null=True, default=None)
+    delay_from_reports = serializers.IntegerField(
+        source='delai_signalements', required=False, default=0,
+        help_text='Part des signalements dans duration_with_traffic, en secondes.',
+    )
+    reports_applied = SignalementApplique(many=True, source='signalements_appliques', required=False, default=list)
 
 
 class ManoeuvreSerializer(serializers.ModelSerializer):
@@ -240,7 +277,25 @@ class TrajetCreationSerializer(serializers.Serializer):
             distance_prevue=itineraire_data['distance'],
             duree_prevue=itineraire_data['duree'],
             geometrie=geometrie_ligne,
+            # Vehicule d'agence > vehicule choisi pour l'itineraire > profil.
+            type_vehicule=(
+                vehicule_et_fiche[0].type if vehicule_et_fiche
+                else itineraire_data.get('type_vehicule') or self.context['request'].user.type_vehicule or ''
+            ),
         )
+        # Relie la prevision faite au calcul (routes/calculate) au trajet lance.
+        prevision = (
+            PrevisionItineraire.objects.filter(
+                utilisateur=self.context['request'].user, trajet__isnull=True,
+                candidats__contains=[{'route_id': itineraire_data['identifiant']}],
+            )
+            .order_by('-cree_le')
+            .first()
+        )
+        if prevision is not None:
+            prevision.trajet = trajet
+            prevision.itineraire_choisi = itineraire_data['identifiant']
+            prevision.save(update_fields=['trajet', 'itineraire_choisi'])
         trajet.demarrer()  # PLANIFIE -> ACTIF via la machine a etats (fixe demarre_le)
         if vehicule_et_fiche:
             from organisations.flotte import declarer_vehicule
