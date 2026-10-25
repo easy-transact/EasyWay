@@ -148,6 +148,8 @@ class ConnexionTests(TestCase):
         )
         self.assertEqual(reponse.status_code, 200)
         self.assertIn('access', reponse.json()['tokens'])
+        self.utilisateur.refresh_from_db()
+        self.assertIsNotNone(self.utilisateur.last_login)
 
     def test_mauvais_mot_de_passe_rejete(self):
         cache.clear()

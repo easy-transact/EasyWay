@@ -15,7 +15,7 @@ from trips.services import client_locate
 from trips.services.disjoncteur import DisjoncteurOuvert
 
 from .cache_incidents import cle_cache_cellule, ecriture_recente, invalider_cache_cellule
-from .models import Incident, SousTypeIncident, StatutIncident, TypeIncident, Vote
+from .models import Incident, SensVote, SousTypeIncident, StatutIncident, TypeIncident, Vote
 from .services import PositionHorsRoute, QuotaDepasse, ServiceIncident
 from .tasks import expirer_incidents
 
@@ -1118,6 +1118,24 @@ class IncidentModerationApiTests(TestCase):
         self.assertEqual(reponse.status_code, 200)
         ids = [r['id'] for r in reponse.json()['results']]
         self.assertIn(str(self.incident.id), ids)
+
+    def test_fiche_avec_votes_et_historique(self):
+        votant = creer_utilisateur('votant@easyway.local')
+        Vote.objects.create(incident=self.incident, votant=votant, sens=SensVote.CONFIRMATION, poids=1)
+        self.client.post(
+            reverse('community:staff-incident-retirer', kwargs={'id': self.incident.id}),
+            {'reason': 'Doublon'}, content_type='application/json', **self.jetons_staff,
+        )
+        reponse = self.client.get(
+            reverse('community:staff-incident-supprimer', kwargs={'id': self.incident.id}), **self.jetons_staff
+        )
+        self.assertEqual(reponse.status_code, 200)
+        fiche = reponse.json()
+        self.assertEqual([(v['user_id'], v['direction']) for v in fiche['votes']], [(str(votant.id), 'CONFIRMATION')])
+        self.assertEqual(fiche['base_lifetime_min'], 30)
+        self.assertEqual(fiche['history'][0]['action'], 'incidents.remove')
+        self.assertEqual(fiche['history'][0]['details'], {'motif': 'Doublon'})
+        self.assertIsNone(fiche['trip'])
 
     def test_retirer_change_statut_et_motif(self):
         url = reverse('community:staff-incident-retirer', kwargs={'id': self.incident.id})

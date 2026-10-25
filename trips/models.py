@@ -23,6 +23,9 @@ class StatutTrajet(models.TextChoices):
     ACTIF = 'ACTIF', 'Actif'
     TERMINE = 'TERMINE', 'Termine'
     ANNULE = 'ANNULE', 'Annule'
+    # Reste ACTIF sans aucun signe de vie (appli fermee sans terminer) :
+    # cloture par trips.tasks.abandonner_trajets_inactifs.
+    ABANDONNE = 'ABANDONNE', 'Abandonne'
 
 
 # Utilisateur.points : compteur de gamification (cf. aussi
@@ -122,9 +125,10 @@ class Trajet(models.Model):
     # -- ni le PATCH ni les methodes demarrer/terminer/annuler ne l'esquivent.
     TRANSITIONS_AUTORISEES = {
         StatutTrajet.PLANIFIE: {StatutTrajet.ACTIF, StatutTrajet.ANNULE},
-        StatutTrajet.ACTIF: {StatutTrajet.TERMINE, StatutTrajet.ANNULE},
+        StatutTrajet.ACTIF: {StatutTrajet.TERMINE, StatutTrajet.ANNULE, StatutTrajet.ABANDONNE},
         StatutTrajet.TERMINE: set(),
         StatutTrajet.ANNULE: set(),
+        StatutTrajet.ABANDONNE: set(),
     }
 
     class Meta:

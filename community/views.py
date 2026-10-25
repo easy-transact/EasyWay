@@ -19,7 +19,7 @@ from rest_framework.views import APIView
 
 from accounts.pagination import StaffPagination
 from accounts.serializers import MessageSerializer
-from ads_admin.models import NiveauNotification, TypeNotification
+from ads_admin.models import EntreeAudit, NiveauNotification, TypeNotification
 from ads_admin.services import (
     FENETRE_ABUS,
     SEUIL_RETRAITS_ABUS,
@@ -813,7 +813,46 @@ class IncidentRetraitStaffView(APIView):
     responses={204: None},
 )
 class IncidentSupprimerView(APIView):
+    """GET : fiche de moderation (votes, trajet, historique) ; DELETE : suppression."""
+
     permission_classes = [IsAdminUser]
+
+    @extend_schema(
+        tags=['Staff Incidents'],
+        summary="Fiche de moderation d'un signalement",
+        description=(
+            'Reserve au staff (is_staff). IncidentModerationSerializer + `votes` (votant, sens, '
+            'poids, date), `base_lifetime_min`, `in_town`, `trip` (trajet d\'agence rattache) et '
+            '`history` (journal d\'audit de cet incident).'
+        ),
+        responses={200: IncidentModerationSerializer},
+    )
+    def get(self, request, id):
+        incident = get_object_or_404(Incident.objects.select_related('auteur', 'trajet__vehicule'), id=id)
+        donnees = IncidentModerationSerializer(incident).data
+        donnees['base_lifetime_min'] = duree_de_vie_base(incident.type, incident.sous_type, incident.en_agglomeration)
+        donnees['in_town'] = incident.en_agglomeration
+        donnees['merged_into'] = str(incident.fusionne_dans_id) if incident.fusionne_dans_id else None
+        donnees['votes'] = [
+            {
+                'user_id': str(v.votant_id), 'name': v.votant.nom_complet, 'phone': v.votant.telephone,
+                'direction': v.sens, 'weight': float(v.poids), 'created_at': v.cree_le,
+            }
+            for v in incident.votes.select_related('votant').order_by('-cree_le')
+        ]
+        trajet = incident.trajet
+        donnees['trip'] = trajet and {
+            'id': str(trajet.id), 'origin': trajet.libelle_origine, 'destination': trajet.libelle_destination,
+            'status': trajet.statut, 'vehicle': trajet.vehicule and trajet.vehicule.immatriculation,
+        }
+        donnees['history'] = [
+            {
+                'action': e.action, 'actor': e.acteur.nom_complet if e.acteur else None,
+                'at': e.survenue_le, 'details': {k: v for k, v in (e.valeur_nouvelle or {}).items() if k != 'libelle'},
+            }
+            for e in EntreeAudit.objects.filter(identifiant_cible=incident.id).select_related('acteur').order_by('-survenue_le')
+        ]
+        return Response(donnees)
 
     def delete(self, request, id):
         incident = get_object_or_404(Incident, id=id)

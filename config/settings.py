@@ -368,6 +368,10 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'community.tasks.expirer_incidents',
         'schedule': 60.0,
     },
+    'abandonner-trajets-inactifs': {
+        'task': 'trips.tasks.abandonner_trajets_inactifs',
+        'schedule': 15 * 60.0,
+    },
     'purger-incidents-anciens': {
         'task': 'community.tasks.purger_incidents_anciens',
         'schedule': 24 * 3600.0,

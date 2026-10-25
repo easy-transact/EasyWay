@@ -316,6 +316,27 @@ class LieuCreationStaffSerializer(serializers.Serializer):
     lon = serializers.FloatField(min_value=-180, max_value=180)
 
 
+class LieuModificationStaffSerializer(serializers.Serializer):
+    """PATCH /api/staff/places/{id}/ : correction d'un lieu par le staff, tous
+    les champs optionnels. lat et lon vont ensemble."""
+
+    name = serializers.CharField(max_length=255, required=False)
+    category = serializers.CharField(max_length=100, required=False)
+    address = serializers.CharField(max_length=500, required=False, allow_blank=True)
+    neighborhood = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    city = serializers.CharField(max_length=255, required=False)
+    lat = serializers.FloatField(min_value=-90, max_value=90, required=False)
+    lon = serializers.FloatField(min_value=-180, max_value=180, required=False)
+
+    def validate(self, donnees):
+        if ('lat' in donnees) != ('lon' in donnees):
+            raise serializers.ValidationError({'lat': 'lat et lon vont ensemble.'})
+        for champ in ('name', 'category', 'city'):
+            if champ in donnees and not donnees[champ].strip():
+                raise serializers.ValidationError({champ: 'Ce champ ne peut pas etre vide.'})
+        return donnees
+
+
 class LieuActionGroupeeSerializer(serializers.Serializer):
     ids = serializers.ListField(child=serializers.UUIDField(), min_length=1, max_length=100)
     action = serializers.ChoiceField(choices=['approve', 'reject', 'delete'])

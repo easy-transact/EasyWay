@@ -1,12 +1,14 @@
 import logging
 import os
-from datetime import datetime, timezone as dt_timezone
+from datetime import datetime, timedelta, timezone as dt_timezone
 from decimal import Decimal
 
 from celery import shared_task
 from django.conf import settings
+from django.db.models.functions import Greatest
+from django.utils import timezone
 
-from .models import FUSEAU_TRAFIC, EchantillonVitesse
+from .models import FUSEAU_TRAFIC, EchantillonVitesse, StatutTrajet, Trajet
 from .services import trafic_temps_reel
 from .services.tuiles_trafic import TraficIndisponible
 from .services.consommateur_positions import (
@@ -133,9 +135,41 @@ def _flusher_un_bucket(connexion, cle, identifiant_arete, bucket_epoch) -> bool:
 def geocoder_libelles_trajet(trajet_id):
     """Remplace "Votre position" par le nom reel du lieu (cf. trips/geocodage.py)."""
     from .geocodage import geocoder_trajet
-    from .models import Trajet
 
     trajet = Trajet.objects.filter(pk=trajet_id).first()
     if trajet is None:
         return []
     return geocoder_trajet(trajet)
+
+
+# Un trajet ACTIF sans position ni lot de telemetrie depuis ce delai est
+# considere abandonne (appli fermee ou tuee sans "Terminer"). Large par
+# rapport aux envois de l'appli (toutes les 1-2 min) pour ne pas couper un
+# conducteur dans une zone sans reseau.
+DELAI_ABANDON_TRAJET = timedelta(hours=2)
+
+
+@shared_task
+def abandonner_trajets_inactifs():
+    """Celery Beat, toutes les 15 min (cf. CELERY_BEAT_SCHEDULE). Passe en
+    ABANDONNE les trajets ACTIF inactifs depuis DELAI_ABANDON_TRAJET, avec
+    termine_le = dernier signe de vie (pas l'heure de la tache). Sans points
+    de gamification, contrairement a un trajet TERMINE."""
+    trajets = (
+        Trajet.objects.filter(statut=StatutTrajet.ACTIF)
+        .annotate(derniere_activite=Greatest('demarre_le', 'telemetrie_derniere_le', 'derniere_position_le'))
+        .filter(derniere_activite__lt=timezone.now() - DELAI_ABANDON_TRAJET)
+    )
+    nb = 0
+    for trajet in trajets:
+        trajet.changer_statut(StatutTrajet.ABANDONNE)
+        trajet.termine_le = trajet.derniere_activite
+        champs = ['termine_le']
+        if trajet.demarre_le and trajet.duree_reelle is None:
+            trajet.duree_reelle = int((trajet.derniere_activite - trajet.demarre_le).total_seconds())
+            champs.append('duree_reelle')
+        trajet.save(update_fields=champs)
+        nb += 1
+    if nb:
+        logger.info('%d trajet(s) abandonne(s) cloture(s)', nb)
+    return nb

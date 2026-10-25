@@ -1,3 +1,4 @@
+from django.contrib.auth.models import update_last_login
 from django.contrib.auth.tokens import default_token_generator
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import Count, F, Max, Q, Sum
@@ -68,6 +69,9 @@ def _reponse_authentification(nom):
 
 
 def _jetons_pour(utilisateur):
+    # Appele a chaque connexion/inscription (OTP, Google, back-office) :
+    # renseigne last_login, que SimpleJWT ne met a jour que sur sa propre vue.
+    update_last_login(None, utilisateur)
     rafraichissement = RefreshToken.for_user(utilisateur)
     return {'access': str(rafraichissement.access_token), 'refresh': str(rafraichissement)}
 

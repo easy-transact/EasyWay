@@ -591,6 +591,31 @@ class LieuModerationApiTests(TestCase):
         noms = [r['name'] for r in reponse.json()['results']]
         self.assertEqual(noms, ['Boutique Test'])
 
+    def test_modifier_un_lieu(self):
+        url = reverse('places:staff-lieu-supprimer', kwargs={'id': self.lieu_en_attente.id})
+        reponse = self.client.patch(
+            url, {'name': 'Boutique Corrigée', 'category': 'Pharmacie', 'neighborhood': '', 'lat': 4.051, 'lon': 9.701},
+            content_type='application/json', **self.jetons_staff,
+        )
+        self.assertEqual(reponse.status_code, 200, reponse.content)
+        self.assertEqual((reponse.json()['name'], reponse.json()['category']), ('Boutique Corrigée', 'Pharmacie'))
+        self.lieu_en_attente.refresh_from_db()
+        self.assertEqual(self.lieu_en_attente.nom_normalise, normaliser('Boutique Corrigée'))
+        self.assertAlmostEqual(self.lieu_en_attente.position.y, 4.051)
+        self.assertIsNone(self.lieu_en_attente.quartier)
+        self.assertEqual(self.lieu_en_attente.statut, StatutLieu.EN_ATTENTE)
+
+        from ads_admin.models import EntreeAudit
+        entree = EntreeAudit.objects.get(action='places.update')
+        self.assertEqual(entree.valeur_precedente['name'], 'Boutique Test')
+        self.assertEqual(entree.valeur_nouvelle['category'], 'Pharmacie')
+
+    def test_modifier_refuse_nom_vide_et_lat_sans_lon(self):
+        url = reverse('places:staff-lieu-supprimer', kwargs={'id': self.lieu_en_attente.id})
+        for corps in ({'name': '  '}, {'lat': 4.0}):
+            reponse = self.client.patch(url, corps, content_type='application/json', **self.jetons_staff)
+            self.assertEqual(reponse.status_code, 400)
+
     def test_approuver_change_le_statut(self):
         url = reverse('places:staff-lieu-approuver', kwargs={'id': self.lieu_en_attente.id})
         reponse = self.client.post(url, **self.jetons_staff)

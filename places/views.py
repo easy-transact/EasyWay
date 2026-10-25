@@ -31,6 +31,7 @@ from .serializers import (
     EtablissementSerializer,
     LieuActionGroupeeSerializer,
     LieuCreationStaffSerializer,
+    LieuModificationStaffSerializer,
     LieuDetailSerializer,
     LieuxSurTrajetSerializer,
     LieuModerationSerializer,
@@ -492,6 +493,12 @@ class CategoriesLieuxView(APIView):
 # meme ordre de grandeur que la detection a la proposition (ProposerLieuView).
 RAYON_DOUBLONS_M = 150
 
+# Champs de LieuModificationStaffSerializer -> attributs de Lieu (hors position).
+CHAMPS_MODIFIABLES_LIEU = {
+    'name': 'nom', 'category': 'categorie', 'address': 'adresse',
+    'neighborhood': 'quartier', 'city': 'ville',
+}
+
 
 @extend_schema(
     tags=['Staff Places'],
@@ -606,6 +613,43 @@ class LieuSupprimerView(APIView):
             for p in proches
         ]
         return Response(donnees)
+
+    @extend_schema(
+        tags=['Staff Places'],
+        summary='Modifier un lieu',
+        description=(
+            'Reserve au staff (is_staff). Champs optionnels (lat/lon ensemble) ; le statut ne '
+            'change pas. Ancienne et nouvelle valeur des champs modifies dans le journal d\'audit.'
+        ),
+        request=LieuModificationStaffSerializer,
+        responses={200: LieuModerationSerializer},
+    )
+    def patch(self, request, id):
+        lieu = get_object_or_404(Lieu.objects.select_related('propose_par'), id=id)
+        serializer = LieuModificationStaffSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        donnees = serializer.validated_data
+
+        avant, apres = {}, {}
+        for cle, attribut in CHAMPS_MODIFIABLES_LIEU.items():
+            if cle not in donnees:
+                continue
+            valeur = donnees[cle].strip() or (None if attribut == 'quartier' else '')
+            if getattr(lieu, attribut) != valeur:
+                avant[cle], apres[cle] = getattr(lieu, attribut), valeur
+                setattr(lieu, attribut, valeur)
+        if 'name' in apres:
+            lieu.nom_normalise = normaliser(lieu.nom)
+        if 'lat' in donnees:
+            position = Point(donnees['lon'], donnees['lat'], srid=4326)
+            if (lieu.position.x, lieu.position.y) != (position.x, position.y):
+                avant['position'] = [lieu.position.y, lieu.position.x]
+                apres['position'] = [position.y, position.x]
+                lieu.position = position
+        if apres:
+            lieu.save()
+            journaliser(request.user, 'places.update', lieu, avant=avant, apres=apres)
+        return Response(LieuModerationSerializer(lieu).data)
 
     def delete(self, request, id):
         lieu = get_object_or_404(Lieu, id=id)

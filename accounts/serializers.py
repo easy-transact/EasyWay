@@ -358,7 +358,7 @@ class UtilisateurModerationSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'phone', 'full_name', 'email', 'city', 'plan', 'plan_expires_at', 'reputation_score',
             'reputation_stars', 'points', 'is_banned', 'banned_until', 'is_staff', 'date_joined',
-            'reports_count', 'removed_7d', 'last_seen',
+            'reports_count', 'removed_7d', 'last_seen', 'last_login',
         ]
         read_only_fields = fields
 
