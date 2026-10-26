@@ -8,6 +8,7 @@ normalise la reponse (Valhalla ou repli) en une forme stable pour le client.
 import hashlib
 import json
 
+from django.conf import settings
 from django.core.cache import cache
 
 from accounts.models import TypeVehicule
@@ -75,7 +76,8 @@ class ServiceItineraire:
         vitesse_origine_kmh : sous VITESSE_MIN_CAP_KMH, cap_origine est ignore.
         verifier_cap (vitesse inconnue) : compare a un calcul sans cap et
         garde celui-ci s'il evite un detour (cf. GAIN_MIN_SANS_CAP_S)."""
-        if vitesse_origine_kmh is not None and vitesse_origine_kmh < VITESSE_MIN_CAP_KMH:
+        controle = settings.CONTROLE_CAP_ORIGINE  # cf. settings : False = cap transmis tel quel
+        if controle and vitesse_origine_kmh is not None and vitesse_origine_kmh < VITESSE_MIN_CAP_KMH:
             cap_origine = None
         type_vehicule = type_vehicule or utilisateur.type_vehicule
         options = self._options_depuis_parametres(utilisateur, type_vehicule)
@@ -89,7 +91,7 @@ class ServiceItineraire:
             options['exclude_locations'] = [{'lat': lat, 'lon': lon} for lat, lon in eviter]
 
         trips = self._trips(depart, arrivee, options, cap_origine, alternatives, etapes, eviter)
-        if verifier_cap and cap_origine is not None and trips and not trips[0].get('degrade'):
+        if controle and verifier_cap and cap_origine is not None and trips and not trips[0].get('degrade'):
             direct = self._trips(depart, arrivee, options, None, False, etapes, eviter)
             if direct and direct[0]['summary']['time'] + GAIN_MIN_SANS_CAP_S < trips[0]['summary']['time']:
                 trips = self._trips(depart, arrivee, options, None, alternatives, etapes, eviter) if alternatives else direct

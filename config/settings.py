@@ -309,6 +309,11 @@ QUOTA_SIGNALEMENTS_ACTIF = env.bool('QUOTA_SIGNALEMENTS_ACTIF', default=False)
 # trajet lance puis termine a vide rapportait autant qu'un vrai trajet.
 POINTS_TRAJETS_ACTIF = env.bool('POINTS_TRAJETS_ACTIF', default=False)
 
+# Controle du cap d'origine au calcul d'itineraire (ServiceItineraire) :
+# cap ignore sous 10 km/h (origin_speed_kmh), comparaison avec un calcul sans
+# cap quand la vitesse est inconnue. False = cap transmis tel quel, comme avant.
+CONTROLE_CAP_ORIGINE = env.bool('CONTROLE_CAP_ORIGINE', default=True)
+
 # Cache du calcul d'itineraire (ServiceItineraire, 3 min) et compteurs du
 # disjoncteur ClientValhalla. IGNORE_EXCEPTIONS : un Redis indisponible degrade
 # en cache-miss (recalcul a chaque appel) plutot que de faire planter l'API --

@@ -4,7 +4,7 @@
 from unittest.mock import patch
 
 from django.core.cache import cache
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 
 from accounts.tests import connecter, creer_utilisateur
@@ -56,5 +56,11 @@ class CapOrigineTests(TestCase):
 
     def test_en_roulant_cap_respecte(self):
         routes = self.calculer(origin_heading=225, origin_speed_kmh=40)
+        self.assertEqual(routes[0]['duration'], 900)
+        self.assertEqual(set(self.caps), {225})
+
+    @override_settings(CONTROLE_CAP_ORIGINE=False)
+    def test_controle_desactive_cap_transmis_tel_quel(self):
+        routes = self.calculer(origin_heading=225, origin_speed_kmh=2)
         self.assertEqual(routes[0]['duration'], 900)
         self.assertEqual(set(self.caps), {225})
