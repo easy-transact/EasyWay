@@ -36,6 +36,15 @@ COSTING_DEFAUT = 'auto'
 # une instance Valhalla moto dediee.
 MOTO_TRAFIC_EN_DIRECT = False
 
+# Cap d'origine : a l'arret ou au pas, le cap GPS du telephone n'a pas de
+# sens. Transmis tel quel, il oblige Valhalla a partir dans une direction
+# arbitraire, d'ou une boucle/un demi-tour des le depart (vu sur Douala ->
+# Bafoussam). En dessous de cette vitesse, on l'ignore.
+VITESSE_MIN_CAP_KMH = 10
+# Vitesse inconnue (verifier_cap) : si l'itineraire sans cap est plus rapide
+# d'au moins ce delai, le cap a force un detour -- on le laisse tomber.
+GAIN_MIN_SANS_CAP_S = 120
+
 
 class ServiceItineraire:
     def __init__(self, client=None):
@@ -43,7 +52,7 @@ class ServiceItineraire:
 
     def calculer(
         self, depart, arrivee, utilisateur, eviter=None, cap_origine=None, alternatives=True, etapes=None,
-        type_vehicule=None,
+        type_vehicule=None, vitesse_origine_kmh=None, verifier_cap=False,
     ) -> list[dict]:
         """depart/arrivee : (lat, lon). etapes (optionnel) : arrets
         intermediaires dans l'ordre de passage -- chaque paire consecutive
@@ -62,7 +71,12 @@ class ServiceItineraire:
         propage jusqu'a ClientValhalla -- pas juste tronque apres coup, pour
         eviter le cout des appels de variantes quand l'appelant n'en a pas
         besoin. Retourne une liste d'itineraires candidats normalises (voir
-        _normaliser_trip), le premier etant recommande."""
+        _normaliser_trip), le premier etant recommande.
+        vitesse_origine_kmh : sous VITESSE_MIN_CAP_KMH, cap_origine est ignore.
+        verifier_cap (vitesse inconnue) : compare a un calcul sans cap et
+        garde celui-ci s'il evite un detour (cf. GAIN_MIN_SANS_CAP_S)."""
+        if vitesse_origine_kmh is not None and vitesse_origine_kmh < VITESSE_MIN_CAP_KMH:
+            cap_origine = None
         type_vehicule = type_vehicule or utilisateur.type_vehicule
         options = self._options_depuis_parametres(utilisateur, type_vehicule)
         costing = options['costing']
@@ -73,8 +87,25 @@ class ServiceItineraire:
             # cf. https://valhalla.github.io/valhalla/api/turn-by-turn/api-reference/#exclude-locations
             # -- cle top-level du payload /route, pas une costing_option.
             options['exclude_locations'] = [{'lat': lat, 'lon': lon} for lat, lon in eviter]
-        cle = self._cle_cache(depart, arrivee, options, cap_origine, alternatives, etapes)
 
+        trips = self._trips(depart, arrivee, options, cap_origine, alternatives, etapes, eviter)
+        if verifier_cap and cap_origine is not None and trips and not trips[0].get('degrade'):
+            direct = self._trips(depart, arrivee, options, None, False, etapes, eviter)
+            if direct and direct[0]['summary']['time'] + GAIN_MIN_SANS_CAP_S < trips[0]['summary']['time']:
+                trips = self._trips(depart, arrivee, options, None, alternatives, etapes, eviter) if alternatives else direct
+
+        candidats = [self._normaliser_trip(trip, index) for index, trip in enumerate(trips)]
+        for candidat in candidats:
+            candidat['type_vehicule'] = type_vehicule or TypeVehicule.VOITURE
+        # Retards des signalements recalcules a chaque appel (pas mis en cache :
+        # un signalement peut apparaitre ou expirer entre deux calculs), puis
+        # reclassement par duree finale.
+        trafic_en_direct = 'current' in options['costing_options'][costing]['speed_types']
+        return retards_signalements.appliquer(candidats, costing, trafic_en_direct)
+
+    def _trips(self, depart, arrivee, options, cap_origine, alternatives, etapes, eviter):
+        """Trips Valhalla bruts, en cache DUREE_CACHE_S."""
+        cle = self._cle_cache(depart, arrivee, options, cap_origine, alternatives, etapes)
         trips = cache.get(cle)
         if trips is None:
             client = self.client
@@ -93,15 +124,7 @@ class ServiceItineraire:
                 depart, arrivee, options, cap_origine=cap_origine, alternatives=alternatives, etapes=etapes
             )
             cache.set(cle, trips, timeout=DUREE_CACHE_S)
-
-        candidats = [self._normaliser_trip(trip, index) for index, trip in enumerate(trips)]
-        for candidat in candidats:
-            candidat['type_vehicule'] = type_vehicule or TypeVehicule.VOITURE
-        # Retards des signalements recalcules a chaque appel (pas mis en cache :
-        # un signalement peut apparaitre ou expirer entre deux calculs), puis
-        # reclassement par duree finale.
-        trafic_en_direct = 'current' in options['costing_options'][costing]['speed_types']
-        return retards_signalements.appliquer(candidats, costing, trafic_en_direct)
+        return trips
 
     def _options_depuis_parametres(self, utilisateur, type_vehicule=None) -> dict:
         costing = COSTING_PAR_VEHICULE.get(type_vehicule or utilisateur.type_vehicule, COSTING_DEFAUT)

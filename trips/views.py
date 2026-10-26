@@ -89,6 +89,9 @@ class CalculItineraireView(APIView):
             utilisateur=request.user,
             eviter=[(p['lat'], p['lon']) for p in donnees['eviter']],
             cap_origine=donnees['cap_origine'],
+            vitesse_origine_kmh=donnees['vitesse_origine_kmh'],
+            # Vitesse inconnue : le cap peut venir d'un telephone a l'arret.
+            verifier_cap=donnees['vitesse_origine_kmh'] is None,
             alternatives=donnees['alternatives'],
             etapes=[(p['lat'], p['lon']) for p in donnees['etapes']],
             type_vehicule=donnees['vehicle_type'],

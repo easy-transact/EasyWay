@@ -33,6 +33,14 @@ class CalculItineraireSerializer(serializers.Serializer):
             'sur une voie a sens unique ou une chaussee separee.'
         ),
     )
+    origin_speed_kmh = serializers.FloatField(
+        required=False, allow_null=True, min_value=0, default=None, source='vitesse_origine_kmh',
+        help_text=(
+            'Vitesse GPS au depart (km/h). Sous 10 km/h, origin_heading est ignore (cap GPS non '
+            "fiable a l'arret). Absente : le serveur compare avec un calcul sans cap et garde "
+            "celui-ci s'il evite un detour de plus de 2 min."
+        ),
+    )
     destination_lat = serializers.FloatField()
     destination_lon = serializers.FloatField()
     avoid = PointEvitementSerializer(
