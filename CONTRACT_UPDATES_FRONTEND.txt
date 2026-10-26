@@ -169,3 +169,22 @@ signales, deja pris en compte par le calcul d'itineraire).
   Renvoyer l'itineraire choisi tel quel a POST /api/trips/ (les champs ajoutes
   sont acceptes). Le type de vehicule est garde sur le trajet et reutilise par
   better-route (seuil desormais : 2 min ET 10 %).
+
+
+8. CORRIGE — boucle / demi-tour au depart d'un itineraire (26/10/2026)
+
+  POST /api/routes/calculate/ : nouveau champ optionnel
+    origin_speed_kmh (float, km/h) : vitesse GPS au moment du calcul.
+
+  Pourquoi : origin_heading oblige le calcul a partir dans cette direction.
+  A l'arret, le cap GPS du telephone est faux -> l'itineraire partait parfois
+  dans le mauvais sens puis faisait demi-tour (ex. Deido -> Bafoussam).
+
+  Regles cote serveur :
+    - origin_speed_kmh < 10 : origin_heading est ignore ;
+    - origin_speed_kmh >= 10 : origin_heading est respecte ;
+    - origin_speed_kmh absent : le serveur calcule aussi sans cap et garde ce
+      resultat s'il est plus rapide d'au moins 2 min.
+
+  A faire cote appli : envoyer origin_speed_kmh avec origin_heading, ou ne pas
+  envoyer origin_heading quand la vitesse GPS est proche de 0.

@@ -864,7 +864,9 @@ class TrajetApiTests(TestCase):
                 **self.jetons,
             )
         self.assertEqual(reponse.status_code, 200)
-        self.assertEqual(calculer_simule.call_args.kwargs['cap_origine'], 90)
+        # Premier appel avec le cap ; le suivant (sans cap) sert de comparaison
+        # quand la vitesse est inconnue (cf. ServiceItineraire, verifier_cap).
+        self.assertEqual(calculer_simule.call_args_list[0].kwargs['cap_origine'], 90)
 
     def test_calcul_itineraire_sans_origin_heading_transmet_none(self):
         with patch(
