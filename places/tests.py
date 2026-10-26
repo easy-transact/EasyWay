@@ -1,3 +1,6 @@
+import io
+import os
+import tempfile
 from unittest.mock import Mock, patch
 
 import requests
@@ -640,3 +643,44 @@ class LieuModerationApiTests(TestCase):
         self.assertEqual(reponse.status_code, 403)
         self.lieu_en_attente.refresh_from_db()
         self.assertEqual(self.lieu_en_attente.statut, StatutLieu.EN_ATTENTE)
+
+
+CSV_LIEUX = (
+    '﻿nom;categorie;ville;latitude;longitude;sources\n'
+    'Pharmacie du Port;Pharmacie;Douala;4.05;9.70;OpenStreetMap\n'
+    '"JAMS; The Beauty Hub";Beauté / coiffure;;4.09;9.73;Overture\n'
+    'Pharmacie du Port;Pharmacie;Douala;4.05;9.70;Overture\n'
+    'Hors Cameroun;Autre;Paris;48.85;2.35;OpenStreetMap\n'
+    ';Autre;Douala;4.0;9.7;OpenStreetMap\n'
+)
+
+
+class ImportLieuxCsvTests(TestCase):
+    def setUp(self):
+        with tempfile.NamedTemporaryFile('w', suffix='.csv', encoding='utf-8', delete=False) as fichier:
+            fichier.write(CSV_LIEUX)
+        self.chemin = fichier.name
+        self.addCleanup(os.remove, self.chemin)
+        self.ancien = creer_lieu('Ancien import', 4.1, 9.7)
+        self.propose = creer_lieu('Proposé', 4.1, 9.7, source=SourceLieu.UTILISATEUR)
+        self.saisi = creer_lieu('Saisi au BO', 4.1, 9.7, source=SourceLieu.BACK_OFFICE)
+
+    def test_remplacer_garde_les_ajouts_utilisateurs(self):
+        call_command('import_lieux_csv', self.chemin, '--remplacer', stdout=io.StringIO())
+        noms = set(Lieu.objects.values_list('nom', flat=True))
+        # Doublon, position hors Cameroun et nom vide ignores ; ";" dans un nom entre guillemets.
+        self.assertEqual(noms, {'Pharmacie du Port', 'JAMS; The Beauty Hub', 'Proposé', 'Saisi au BO'})
+        importe = Lieu.objects.get(nom='JAMS; The Beauty Hub')
+        self.assertEqual((importe.ville, importe.statut, importe.source), ('', StatutLieu.APPROUVE, SourceLieu.OPENSTREETMAP))
+
+    def test_tout_supprime_aussi_les_ajouts(self):
+        call_command('import_lieux_csv', self.chemin, '--remplacer', '--tout', stdout=io.StringIO())
+        self.assertEqual(Lieu.objects.count(), 2)
+
+    def test_dry_run_n_ecrit_rien(self):
+        call_command('import_lieux_csv', self.chemin, '--remplacer', '--dry-run', stdout=io.StringIO())
+        self.assertEqual(Lieu.objects.count(), 3)
+
+    def test_tout_sans_remplacer_refuse(self):
+        with self.assertRaises(CommandError):
+            call_command('import_lieux_csv', self.chemin, '--tout')
