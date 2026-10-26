@@ -1,17 +1,18 @@
-"""Cloture des trajets restes ACTIF sans signe de vie (trips.tasks.abandonner_trajets_inactifs)."""
+"""Cloture des trajets restes ACTIF sans signe de vie (trips.tasks.abandonner_trajets_inactifs)
+et points des trajets termines (settings.POINTS_TRAJETS_ACTIF)."""
 
 from datetime import timedelta
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from accounts.tests import creer_utilisateur
 
-from .models import StatutTrajet, Trajet
+from .models import POINTS_PAR_TRAJET_TERMINE, StatutTrajet, Trajet
 from .tasks import DELAI_ABANDON_TRAJET, abandonner_trajets_inactifs
 
 
-class AbandonTrajetsTests(TestCase):
+class BaseTrajetTests(TestCase):
     def setUp(self):
         self.utilisateur = creer_utilisateur()
         self.points_depart = self.utilisateur.points
@@ -25,6 +26,8 @@ class AbandonTrajetsTests(TestCase):
         valeurs.update(extra)
         return Trajet.objects.create(**valeurs)
 
+
+class AbandonTrajetsTests(BaseTrajetTests):
     def test_trajet_sans_signe_de_vie_abandonne(self):
         maintenant = timezone.now()
         derniere = maintenant - DELAI_ABANDON_TRAJET - timedelta(minutes=5)
@@ -48,3 +51,18 @@ class AbandonTrajetsTests(TestCase):
         en_route.refresh_from_db()
         termine.refresh_from_db()
         self.assertEqual((en_route.statut, termine.statut), (StatutTrajet.ACTIF, StatutTrajet.TERMINE))
+
+
+class PointsTrajetTermineTests(BaseTrajetTests):
+    def test_pas_de_points_par_defaut(self):
+        trajet = self.trajet()
+        trajet.terminer()
+        self.utilisateur.refresh_from_db()
+        self.assertEqual(self.utilisateur.points, self.points_depart)
+
+    @override_settings(POINTS_TRAJETS_ACTIF=True)
+    def test_points_si_option_activee(self):
+        trajet = self.trajet()
+        trajet.terminer()
+        self.utilisateur.refresh_from_db()
+        self.assertEqual(self.utilisateur.points, self.points_depart + POINTS_PAR_TRAJET_TERMINE)

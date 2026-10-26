@@ -304,6 +304,11 @@ PHOTON_URL = env('PHOTON_URL', default='http://localhost:2322')
 # pendant le developpement. A remettre a True avant un usage reel.
 QUOTA_SIGNALEMENTS_ACTIF = env.bool('QUOTA_SIGNALEMENTS_ACTIF', default=False)
 
+# Points de recompense pour un trajet TERMINE (Trajet.changer_statut) --
+# desactives (2026-10-26) : aucun controle de distance/duree/arrivee, un
+# trajet lance puis termine a vide rapportait autant qu'un vrai trajet.
+POINTS_TRAJETS_ACTIF = env.bool('POINTS_TRAJETS_ACTIF', default=False)
+
 # Cache du calcul d'itineraire (ServiceItineraire, 3 min) et compteurs du
 # disjoncteur ClientValhalla. IGNORE_EXCEPTIONS : un Redis indisponible degrade
 # en cache-miss (recalcul a chaque appel) plutot que de faire planter l'API --

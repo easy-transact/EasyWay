@@ -162,8 +162,10 @@ class Trajet(models.Model):
             champs.append('termine_le')
             # cf. POINTS_PAR_TRAJET_TERMINE : gamification, sans effet sur le
             # fonctionnement du systeme (contrairement a score_reputation).
-            self.utilisateur.points += POINTS_PAR_TRAJET_TERMINE
-            self.utilisateur.save(update_fields=['points'])
+            # Desactive par defaut (settings.POINTS_TRAJETS_ACTIF).
+            if settings.POINTS_TRAJETS_ACTIF:
+                self.utilisateur.points += POINTS_PAR_TRAJET_TERMINE
+                self.utilisateur.save(update_fields=['points'])
         self.save(update_fields=champs)
 
     def demarrer(self):
