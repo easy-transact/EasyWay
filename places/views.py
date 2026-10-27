@@ -42,7 +42,7 @@ from .serializers import (
     RechercheRecenteSerializer,
     stats_auteurs_lieux,
 )
-from .services import carte, garages
+from .services import carte, garages, proximite
 from .services.client_nominatim import ClientNominatim
 from .services.client_photon import ClientPhoton
 from .utils import normaliser
@@ -251,8 +251,12 @@ class LieuDetailView(APIView):
         donnees = LieuDetailSerializer(lieu).data
         # Garages : note moyenne et nombre d'avis (cf. vues_avis.py).
         donnees['is_garage'] = garages.est_garage(lieu)
-        note = garages.note_de(lieu) if donnees['is_garage'] else {'average': None, 'count': 0}
-        donnees['rating_average'], donnees['rating_count'] = note['average'], note['count']
+        note = garages.note_de(lieu) if donnees['is_garage'] else {'average': None, 'count': 0, 'stars': None}
+        donnees['rating_average'], donnees['rating_count'], donnees['stars'] = note['average'], note['count'], note['stars']
+        # Stations et pharmacies : horaires (null si inconnus) et ouvert maintenant.
+        if proximite.type_de(lieu.categorie) in proximite.TYPES_AVEC_HORAIRES:
+            donnees['opening_hours'] = lieu.horaires or None
+            donnees['is_open_now'] = proximite.est_ouvert(lieu.horaires, proximite.maintenant_local())
         return Response(donnees)
 
 
@@ -466,6 +470,7 @@ class LieuModerationListView(APIView):
             position=Point(donnees['lon'], donnees['lat'], srid=4326),
             source=SourceLieu.BACK_OFFICE,
             statut=StatutLieu.APPROUVE,
+            horaires=donnees['opening_hours'],
         )
         journaliser(request.user, 'places.create', lieu)
         return Response(LieuModerationSerializer(lieu).data, status=status.HTTP_201_CREATED)
@@ -647,6 +652,9 @@ class LieuSupprimerView(APIView):
             if getattr(lieu, attribut) != valeur:
                 avant[cle], apres[cle] = getattr(lieu, attribut), valeur
                 setattr(lieu, attribut, valeur)
+        if 'opening_hours' in donnees and donnees['opening_hours'] != lieu.horaires:
+            avant['opening_hours'], apres['opening_hours'] = lieu.horaires, donnees['opening_hours']
+            lieu.horaires = donnees['opening_hours']
         if 'name' in apres:
             lieu.nom_normalise = normaliser(lieu.nom)
         if 'lat' in donnees:

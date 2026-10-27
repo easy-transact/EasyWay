@@ -257,12 +257,13 @@ class LieuModerationSerializer(serializers.ModelSerializer):
     proposer = serializers.SerializerMethodField()
     created_at = serializers.DateTimeField(source='cree_le', read_only=True, allow_null=True)
     reason = serializers.CharField(source='motif_rejet', read_only=True, allow_null=True)
+    opening_hours = serializers.JSONField(source='horaires', read_only=True)
 
     class Meta:
         model = Lieu
         fields = [
             'id', 'name', 'category', 'address', 'neighborhood', 'city',
-            'lat', 'lon', 'source', 'status', 'proposed_by', 'proposer', 'created_at', 'reason',
+            'lat', 'lon', 'source', 'status', 'proposed_by', 'proposer', 'created_at', 'reason', 'opening_hours',
         ]
         read_only_fields = fields
 
@@ -314,6 +315,15 @@ class LieuCreationStaffSerializer(serializers.Serializer):
     city = serializers.CharField(max_length=255, required=False, allow_blank=True, default='')
     lat = serializers.FloatField(min_value=-90, max_value=90)
     lon = serializers.FloatField(min_value=-180, max_value=180)
+    opening_hours = serializers.JSONField(required=False, default=dict)
+
+    def validate_opening_hours(self, horaires):
+        from .services.proximite import HorairesInvalides, valider_horaires
+
+        try:
+            return valider_horaires(horaires)
+        except HorairesInvalides as exc:
+            raise serializers.ValidationError(str(exc)) from exc
 
 
 class LieuModificationStaffSerializer(serializers.Serializer):
@@ -327,6 +337,17 @@ class LieuModificationStaffSerializer(serializers.Serializer):
     city = serializers.CharField(max_length=255, required=False)
     lat = serializers.FloatField(min_value=-90, max_value=90, required=False)
     lon = serializers.FloatField(min_value=-180, max_value=180, required=False)
+    opening_hours = serializers.JSONField(
+        required=False, help_text='{"mon": [["08:00", "20:00"]], ...} ; {} pour effacer (cf. services/proximite.py).',
+    )
+
+    def validate_opening_hours(self, horaires):
+        from .services.proximite import HorairesInvalides, valider_horaires
+
+        try:
+            return valider_horaires(horaires)
+        except HorairesInvalides as exc:
+            raise serializers.ValidationError(str(exc)) from exc
 
     def validate(self, donnees):
         if ('lat' in donnees) != ('lon' in donnees):
@@ -446,3 +467,4 @@ class PointCarteSerializer(serializers.Serializer):
     is_garage = serializers.BooleanField(help_text='Notable via /api/garages/{id}/reviews/.')
     rating_average = serializers.FloatField(allow_null=True, help_text='Note moyenne (1-5), null sans avis ou hors garage.')
     rating_count = serializers.IntegerField()
+    stars = serializers.FloatField(allow_null=True, help_text='Etoiles affichees (0,5 a 5), cf. garages.etoiles.')

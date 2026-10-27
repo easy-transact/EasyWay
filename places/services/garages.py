@@ -14,6 +14,14 @@ from ..utils import normaliser
 # Comparaison sur la categorie normalisee (minuscules, sans accents).
 MOTS_GARAGE = ('garage', 'mecanique', 'car_repair', 'car repair')
 
+# Etoiles affichees (cf. etoiles()) : moyenne bayesienne. Chaque garage part
+# de NOTE_DEPART comme s'il avait deja POIDS_DEPART avis ; les vrais avis
+# l'emportent a mesure qu'ils s'accumulent. Un seul avis 5/5 donne 3,5
+# etoiles, vingt avis 5/5 en donnent 4,5 : il faut beaucoup de votes pour
+# atteindre 5 etoiles, et un seul mauvais avis ne coule pas un garage.
+NOTE_DEPART = 3.0
+POIDS_DEPART = 5
+
 
 def est_garage(lieu_ou_categorie):
     """Lieu, Etablissement ou categorie (texte) -> bool."""
@@ -43,8 +51,17 @@ def filtre_cible(garage):
     return Q(lieu=garage) if isinstance(garage, Lieu) else Q(etablissement=garage)
 
 
+def etoiles(moyenne, nombre):
+    """Nombre d'etoiles affiche (0,5 a 5, par demi-etoile) a partir de la
+    moyenne brute et du nombre d'avis ; None sans avis."""
+    if not nombre or moyenne is None:
+        return None
+    ponderee = (NOTE_DEPART * POIDS_DEPART + moyenne * nombre) / (POIDS_DEPART + nombre)
+    return round(ponderee * 2) / 2
+
+
 def notes(lieu_ids=(), etablissement_ids=()):
-    """{id (str): {'average', 'count'}} des avis PUBLIES, en deux requetes."""
+    """{id (str): {'average', 'count', 'stars'}} des avis PUBLIES, en deux requetes."""
     resultat = {}
     publies = AvisGarage.objects.filter(statut=StatutAvis.PUBLIE)
     for champ, ids in (('lieu_id', lieu_ids), ('etablissement_id', etablissement_ids)):
@@ -53,7 +70,10 @@ def notes(lieu_ids=(), etablissement_ids=()):
             continue
         lignes = publies.filter(**{f'{champ}__in': ids}).values(champ).annotate(moyenne=Avg('note'), total=Count('pk'))
         for ligne in lignes:
-            resultat[str(ligne[champ])] = {'average': round(ligne['moyenne'], 1), 'count': ligne['total']}
+            resultat[str(ligne[champ])] = {
+                'average': round(ligne['moyenne'], 1), 'count': ligne['total'],
+                'stars': etoiles(ligne['moyenne'], ligne['total']),
+            }
     return resultat
 
 
@@ -61,7 +81,7 @@ def note_de(garage):
     return notes(
         [garage.id] if isinstance(garage, Lieu) else (),
         [garage.id] if isinstance(garage, Etablissement) else (),
-    ).get(str(garage.id), {'average': None, 'count': 0})
+    ).get(str(garage.id), {'average': None, 'count': 0, 'stars': None})
 
 
 def ajouter_notes(points):
@@ -77,4 +97,5 @@ def ajouter_notes(points):
         note = stats.get(point['id']) if point['is_garage'] else None
         point['rating_average'] = note['average'] if note else None
         point['rating_count'] = note['count'] if note else 0
+        point['stars'] = note['stars'] if note else None
     return points

@@ -1,6 +1,6 @@
 from django.urls import path
 
-from . import views, vues_avis
+from . import views, vues_avis, vues_proximite
 
 app_name = 'places'
 
@@ -15,6 +15,7 @@ urlpatterns = [
         name='enregistres-detail',
     ),
     path('places/recent/', views.RechercheRecenteView.as_view(), name='recents'),
+    path('places/nearby/', vues_proximite.ProximiteView.as_view(), name='proximite'),
     path('places/map/', views.LieuxCarteView.as_view(), name='carte'),
     path('places/map/categories/', views.CategoriesCarteView.as_view(), name='carte-categories'),
     path('places/along-route/', views.LieuxSurTrajetView.as_view(), name='sur-trajet'),

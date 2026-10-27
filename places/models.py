@@ -84,6 +84,10 @@ class Lieu(models.Model):
     # moderation les classe en dernier.
     cree_le = models.DateTimeField(auto_now_add=True, null=True)
     motif_rejet = models.CharField(max_length=255, null=True, blank=True)
+    # Horaires d'ouverture (stations-service, pharmacies), saisis depuis le
+    # back-office : {"mon": [["08:00", "20:00"]], ...} -- format et calcul de
+    # "ouvert maintenant" dans services/proximite.py. {} = inconnus.
+    horaires = models.JSONField(default=dict, blank=True)
 
     class Meta:
         db_table = 'lieu'

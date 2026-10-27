@@ -199,7 +199,14 @@ signales, deja pris en compte par le calcul d'itineraire).
 
   Reperer un garage : nouveaux champs dans places/map, places/along-route et
   GET /api/places/{id}/ :
-    "is_garage": true, "rating_average": 4.2 | null, "rating_count": 12
+    "is_garage": true, "rating_average": 4.2 | null, "rating_count": 12, "stars": 3.5 | null
+
+  Etoiles a afficher : "stars" (0,5 a 5, par demi-etoile), PAS rating_average.
+  stars tient compte du nombre d'avis : chaque garage part de 3 etoiles comme
+  s'il avait deja 5 avis moyens, et les vrais avis l'emportent peu a peu.
+    1 avis 5/5 -> 3,5 etoiles ; 20 avis 5/5 -> 4,5 ; 100 avis 5/5 -> 5
+    1 avis 1/5 -> 2,5 etoiles ; 30 avis 1/5 -> 1,5
+  Afficher aussi le nombre d'avis a cote : "3,5 ★ (1 avis)".
 
   GET /api/garages/{id}/reviews/?page=1          (public ; {id} = id du lieu
                                                    ou de l'etablissement)
@@ -219,3 +226,35 @@ signales, deja pris en compte par le calcul d'itineraire).
   Un avis peut etre retire par la moderation : il sort de la moyenne ; son
   auteur le voit encore dans my_review avec status "RETIRE". Le modifier le
   republie.
+
+
+10. NOUVEAU — garages, hopitaux, stations et pharmacies a proximite (27/10/2026)
+
+  GET /api/places/nearby/?lat=4.05&lon=9.70&radius_m=2000&types=pharmacie,station
+    lat, lon       obligatoires
+    radius_m       rayon en metres, 100 a 20000 (defaut 2000)
+    types          garage, hopital, station, pharmacie (defaut : les quatre)
+                   hopital inclut cliniques et centres de sante
+    limit          1 a 200 (defaut 50)
+    open_now=true  ecarte stations/pharmacies fermees maintenant
+                   (horaires inconnus : gardees)
+  Public (pas besoin d'etre connecte). Tries du plus proche au plus loin.
+
+  { "radius_m": 2000, "count": 12, "results": [
+      { "id", "kind": "place" | "establishment",
+        "type": "garage" | "hopital" | "station" | "pharmacie",
+        "name", "category", "address", "city", "lat", "lon", "distance_m",
+        -- stations et pharmacies :
+        "opening_hours": {"mon": [["08:00", "20:00"]], ..., "sun": []} | null,
+        "is_open_now": true | false | null,
+        -- garages :
+        "rating_average", "rating_count", "stars" } ] }
+
+  Horaires : une liste de plages par jour ("mon" ... "sun") ; [] = ferme ;
+  [["00:00", "24:00"]] = 24 h/24 ; ["20:00", "02:00"] passe minuit.
+  null = horaires inconnus (pas encore saisis par EasyWay) : afficher
+  "Horaires non renseignes", pas "Ferme". Heure de Douala.
+  Aussi dans GET /api/places/{id}/ pour une station ou une pharmacie.
+
+  Ces resultats incluent les lieux importes (stations, pharmacies... de tout le
+  Cameroun), que la carte (places/map) n'affiche pas.

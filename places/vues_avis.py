@@ -73,7 +73,7 @@ def _resume(garage, utilisateur):
         mien = AvisGarage.objects.filter(garages.filtre_cible(garage), utilisateur=utilisateur).first()
     return {
         'garage': {'id': str(garage.id), 'kind': 'place' if isinstance(garage, Lieu) else 'establishment', 'name': garage.nom},
-        'average': note['average'], 'count': note['count'],
+        'average': note['average'], 'count': note['count'], 'stars': note['stars'],
         # Son propre avis, meme retire par la moderation (status indique).
         'my_review': {**AvisSerializer(mien).data, 'status': mien.statut} if mien else None,
     }
