@@ -13,6 +13,7 @@ retombe alors sur l'historique puis la vitesse de la classe de route.
 """
 
 import logging
+import math
 import statistics
 from collections import defaultdict
 
@@ -21,7 +22,7 @@ from django.utils import timezone
 
 from community.models import Incident, SousTypeIncident, StatutIncident, TypeIncident
 
-from . import client_locate, tuiles_trafic
+from . import client_locate, client_meili, tuiles_trafic
 from .consommateur_positions import (
     ENSEMBLE_BUCKETS_ACTIFS,
     PREFIXE_CHAMP_TRAJET,
@@ -43,7 +44,12 @@ VITESSE_SIGNALEMENT_KMH = {
     SousTypeIncident.IMPORTANT: 15,
 }
 VITESSE_SIGNALEMENT_DEFAUT_KMH = 25
-DUREE_CACHE_ARETE_INCIDENT_S = 3600  # un incident ne bouge pas : un seul /locate par heure
+DUREE_CACHE_ARETE_INCIDENT_S = 3600  # un incident ne bouge pas : un seul recalage par heure
+# La file d'un bouchon s'etend en amont du point signale (spec TRAFIC_VALHALLA,
+# section 3) : aretes ralenties sur cette distance, recalee tous les PAS_AMONT_M.
+AMONT_SIGNALEMENT_M = 200
+PAS_AMONT_M = 40
+METRES_PAR_DEGRE = 111_320
 
 
 def vitesses_mesurees(connexion, maintenant: int) -> dict:
@@ -77,16 +83,47 @@ def vitesses_mesurees(connexion, maintenant: int) -> dict:
     return vitesses
 
 
-def _arete_incident(incident):
-    cle = f'trafic:incident:arete:{incident.id}'
-    graph_id = cache.get(cle)
-    if graph_id is None:
-        arete = client_locate.localiser(incident.position.y, incident.position.x, incident.cap)
-        graph_id = arete.get('graph_id') if arete else None
-        if graph_id is None:
-            return None
-        cache.set(cle, graph_id, timeout=DUREE_CACHE_ARETE_INCIDENT_S)
-    return graph_id
+def _amont(lat, lon, cap, distance_m):
+    """Point a distance_m EN AMONT (d'ou viennent les vehicules) selon cap."""
+    angle = math.radians(cap)
+    return (
+        lat - distance_m * math.cos(angle) / METRES_PAR_DEGRE,
+        lon - distance_m * math.sin(angle) / (METRES_PAR_DEGRE * math.cos(math.radians(lat))),
+    )
+
+
+def _aretes_amont(incident):
+    """Aretes dirigees des AMONT_SIGNALEMENT_M metres qui menent au bouchon,
+    par recalage d'une ligne amont -> signalement : la file d'attente est en
+    amont du point signale, dans le sens du cap. [] si le recalage echoue."""
+    lat, lon = incident.position.y, incident.position.x
+    points = [
+        {'lat': p[0], 'lon': p[1], 'time': i * 4}
+        for i, p in enumerate(
+            _amont(lat, lon, incident.cap, d) for d in range(AMONT_SIGNALEMENT_M, -1, -PAS_AMONT_M)
+        )
+    ]
+    try:
+        aretes, _points = client_meili.tracer(points)
+    except (client_meili.ErreurMeili, DisjoncteurOuvert):
+        return []
+    return [a['id'] for a in aretes if a.get('id') is not None]
+
+
+def _aretes_incident(incident):
+    """Aretes ralenties par un embouteillage signale : son arete et, s'il a
+    un cap, celles des AMONT_SIGNALEMENT_M metres en amont."""
+    cle = f'trafic:incident:aretes:{incident.id}'
+    aretes = cache.get(cle)
+    if aretes is None:
+        aretes = _aretes_amont(incident) if incident.cap is not None else []
+        if not aretes:
+            arete = client_locate.localiser(incident.position.y, incident.position.x, incident.cap)
+            aretes = [arete['graph_id']] if arete and arete.get('graph_id') is not None else []
+        if not aretes:
+            return []
+        cache.set(cle, aretes, timeout=DUREE_CACHE_ARETE_INCIDENT_S)
+    return aretes
 
 
 def vitesses_signalements() -> dict:
@@ -99,15 +136,14 @@ def vitesses_signalements() -> dict:
     )
     for incident in incidents:
         try:
-            graph_id = _arete_incident(incident)
+            aretes = _aretes_incident(incident)
         except (client_locate.ErreurLocate, DisjoncteurOuvert) as exc:
             logger.info('Aretes des embouteillages signales indisponibles: %s', exc)
             break
-        if graph_id is None:
-            continue
         vitesse = VITESSE_SIGNALEMENT_KMH.get(incident.sous_type, VITESSE_SIGNALEMENT_DEFAUT_KMH)
-        # Plusieurs signalements sur la meme arete : le plus severe l'emporte.
-        vitesses[graph_id] = min(vitesse, vitesses.get(graph_id, vitesse))
+        for graph_id in aretes:
+            # Plusieurs signalements sur la meme arete : le plus severe l'emporte.
+            vitesses[graph_id] = min(vitesse, vitesses.get(graph_id, vitesse))
     return vitesses
 
 

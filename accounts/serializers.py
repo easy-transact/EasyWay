@@ -112,6 +112,7 @@ class ParametresSerializer(serializers.ModelSerializer):
         source='eviter_intersections_difficiles', required=False
     )
     map_style = serializers.CharField(source='style_carte', required=False)
+    avoid_degraded_roads = serializers.BooleanField(source='eviter_routes_degradees', required=False)
     voice_guidance_enabled = serializers.BooleanField(source='guidage_vocal_actif', required=False)
     voice_language = serializers.CharField(source='langue_vocale', required=False)
     units = serializers.ChoiceField(choices=Unite.choices, source='unites', required=False)
@@ -141,7 +142,7 @@ class ParametresSerializer(serializers.ModelSerializer):
     class Meta:
         model = Parametres
         fields = [
-            'avoid_tolls', 'avoid_unpaved_roads', 'avoid_difficult_intersections', 'map_style',
+            'avoid_tolls', 'avoid_unpaved_roads', 'avoid_difficult_intersections', 'avoid_degraded_roads', 'map_style',
             'voice_guidance_enabled', 'voice_language', 'units', 'speedometer_enabled', 'speed_alert_enabled',
             'show_speed_limit', 'speed_tolerance_kmh', 'notifications_enabled', 'notify_announcements', 'notify_frequent_incidents',
             'notify_police_alerts', 'notify_route_change', 'notify_news',

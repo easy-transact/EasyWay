@@ -22,6 +22,7 @@ Trois points d'attention (cf. discussion) :
 
 import json
 import logging
+import uuid
 from collections import defaultdict
 from datetime import datetime
 
@@ -32,6 +33,7 @@ from etat_routes.services.troncons import ATTRIBUTS_TRONCON, enregistrer_passage
 
 from .client_meili import ErreurMeili, tracer
 from .disjoncteur import DisjoncteurOuvert
+from .geo import distance_haversine_m
 from .producteur_evenements import FLUX_POSITIONS, connexion_redis_telemetrie
 
 logger = logging.getLogger(__name__)
@@ -41,6 +43,13 @@ TAILLE_LOT = 200
 SEUIL_INACTIVITE_MS = 30_000  # au-dela, un message pending est repris (crash du consommateur ou echec Meili precedent)
 DUREE_ACCUMULATEUR_S = 20 * 60  # marge large avant le flush periodique (5 min, P5 partie 4) -- purge seule si ce flush ne tourne pas encore
 VITESSE_MAX_PLAUSIBLE_KMH = 180  # au-dela, artefact de saut GPS plutot qu'une vitesse reelle -- seuil de bon sens, a affiner avec des donnees reelles
+# Spec TRAFIC_VALHALLA, section 4 : vitesse aberrante au-dela de 1,5 fois la
+# vitesse de la classe de route (road_class Valhalla ; autres classes : 60).
+VITESSE_CLASSE_KMH = {'motorway': 110, 'trunk': 90}
+VITESSE_CLASSE_DEFAUT_KMH = 60
+FACTEUR_VITESSE_ABERRANTE = 1.5
+# Depart et stationnement : on y roule au pas quelle que soit la circulation.
+MARGE_DEPART_ARRIVEE_M = 200
 PREFIXE_ACCUMULATEUR = 'trafic:accumulateur'
 ENSEMBLE_BUCKETS_ACTIFS = 'trafic:buckets:actifs'
 TAILLE_BUCKET_S = 5 * 60
@@ -127,7 +136,7 @@ class ConsommateurPositions:
             logger.info('Meili indisponible, %d positions laissees en pending: %s', len(ids), exc)
             return []
 
-        self._accumuler_vitesses(edges, matched_points, paires)
+        self._accumuler_vitesses(edges, matched_points, paires, self._extremites(paires[0][1]['trajet_id']))
         # Etat des routes : passages par tranche de 100 m. Une erreur ici ne
         # doit jamais bloquer le trafic temps reel (messages acquittes quand meme).
         try:
@@ -136,7 +145,29 @@ class ConsommateurPositions:
             logger.exception('Enregistrement des passages (etat des routes) impossible')
         return ids
 
-    def _accumuler_vitesses(self, edges, matched_points, paires):
+    @staticmethod
+    def _extremites(trajet_id):
+        """[(lat, lon)] du depart et de l'arrivee du trajet ([] si inconnu)."""
+        from ..models import Trajet
+
+        try:
+            trajet = Trajet.objects.filter(id=uuid.UUID(str(trajet_id))).values(
+                'position_origine', 'position_destination',
+            ).first()
+        except ValueError:
+            return []
+        if trajet is None:
+            return []
+        return [(p.y, p.x) for p in trajet.values() if p is not None]
+
+    @staticmethod
+    def _vitesse_max(arete):
+        classe = arete.get('road_class')
+        if classe is None:
+            return VITESSE_MAX_PLAUSIBLE_KMH
+        return VITESSE_CLASSE_KMH.get(classe, VITESSE_CLASSE_DEFAUT_KMH) * FACTEUR_VITESSE_ABERRANTE
+
+    def _accumuler_vitesses(self, edges, matched_points, paires, extremites=()):
         for i in range(len(matched_points) - 1):
             actuel, suivant = matched_points[i], matched_points[i + 1]
             index_arete = actuel.get('edge_index')
@@ -156,8 +187,12 @@ class ConsommateurPositions:
                 continue  # vehicule a l'arret ou artefact de bruit GPS -- pas un signal de vitesse exploitable
 
             vitesse_kmh = distance_km / (duree_s / 3600)
-            if vitesse_kmh > VITESSE_MAX_PLAUSIBLE_KMH:
+            if vitesse_kmh > self._vitesse_max(edges[index_arete]):
                 continue  # saut GPS improbable -- ne pollue pas la moyenne plutot que de le capper arbitrairement
+
+            position = (paires[i][1]['lat'], paires[i][1]['lon'])
+            if any(distance_haversine_m(position, e) < MARGE_DEPART_ARRIVEE_M for e in extremites):
+                continue  # depart/stationnement : lent sans etre un bouchon
 
             identifiant_arete = edges[index_arete]['id']
             bucket = self._bucket_5min(self._parser_horodatage(paires[i][1]['horodatage']))

@@ -3,7 +3,10 @@ WebSocket /ws/incidents/ : signalements en temps reel (cf.
 REALTIME_INCIDENTS_FRONTEND.txt pour le protocole complet).
 
 Telephone -> serveur : auth (premier message, obligatoire), subscribe, ping.
-Serveur -> telephone : ready, incident.created/updated/removed, pong, error.
+  subscribe : {"cells": [...]} (resolution 8, <= MAX_CELLULES) ou
+              {"lat", "lon", "radius_km"} (<= RAYON_KM_MAX ; cellules
+              resolution 6 calculees par le serveur, cf. temps_reel.cellules_zone).
+Serveur -> telephone : ready, subscribed, incident.created/updated/removed, pong, error.
 
 Codes de fermeture :
     4001  jeton invalide ou expire (l'application le renouvelle et se reconnecte)
@@ -33,7 +36,9 @@ from rest_framework_simplejwt.tokens import AccessToken
 
 from .cache_incidents import MAX_CELLULES
 from .models import RESOLUTION_H3_FIN
-from .temps_reel import nom_groupe
+from .temps_reel import MAX_CELLULES_ZONE, RAYON_KM_MAX, cellules_zone, nom_groupe
+
+RAYON_KM_DEFAUT = 10
 
 FERMETURE_JETON_INVALIDE = 4001
 FERMETURE_COMPTE_BANNI = 4003
@@ -81,6 +86,8 @@ class IncidentsConsumer(AsyncJsonWebsocketConsumer):
         if self.utilisateur is None:
             return await self.close(code=FERMETURE_NON_AUTHENTIFIE)
         if type_message == 'subscribe':
+            if 'cells' not in contenu and ('lat' in contenu or 'lon' in contenu):
+                return await self._abonner_zone(contenu.get('lat'), contenu.get('lon'), contenu.get('radius_km'))
             return await self._abonner(contenu.get('cells'))
         await self._erreur('unknown_type', f'Unknown message type: {type_message!r}.')
 
@@ -122,11 +129,35 @@ class IncidentsConsumer(AsyncJsonWebsocketConsumer):
                 'invalid_cells', f'Invalid or non resolution-{RESOLUTION_H3_FIN} H3 cells: {", ".join(sorted(invalides)[:5])}.',
             )
 
+        await self._appliquer(cellules)
+
+    async def _abonner_zone(self, lat, lon, rayon_km):
+        """Abonnement par position et rayon (complement du 08/10) : le serveur
+        calcule lui-meme les cellules (resolution RESOLUTION_ZONE)."""
+        try:
+            lat, lon = float(lat), float(lon)
+            rayon_km = float(rayon_km) if rayon_km is not None else RAYON_KM_DEFAUT
+        except (TypeError, ValueError):
+            return await self._erreur('invalid_position', "'lat', 'lon' and 'radius_km' must be numbers.")
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180) or not 0 < rayon_km <= RAYON_KM_MAX:
+            return await self._erreur(
+                'invalid_position', f"Invalid position, or 'radius_km' not in ]0, {RAYON_KM_MAX}].",
+            )
+        cellules = cellules_zone(lat, lon, rayon_km)
+        if len(cellules) > MAX_CELLULES_ZONE:  # garde-fou : n'arrive pas sous RAYON_KM_MAX
+            await self._erreur('too_many_cells', f'Too many cells ({len(cellules)}), maximum {MAX_CELLULES_ZONE}.')
+            return await self.close(code=FERMETURE_TROP_DE_CELLULES)
+        await self._appliquer(set(cellules))
+
+    async def _appliquer(self, cellules):
         for cellule in self.cellules - cellules:
             await self.channel_layer.group_discard(nom_groupe(cellule), self.channel_name)
         for cellule in cellules - self.cellules:
             await self.channel_layer.group_add(nom_groupe(cellule), self.channel_name)
         self.cellules = cellules
+        # Accuse de reception : l'appli sait que l'abonnement est en place et
+        # peut ralentir son rafraichissement de secours.
+        await self.send_json({'type': 'subscribed', 'cells': len(cellules)})
 
     async def incident_evenement(self, evenement):
         """group_send de community.temps_reel : payload deja au format client."""

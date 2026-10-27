@@ -264,3 +264,57 @@ class RepliAttributsValhallaTests(SimpleTestCase):
             edges, _ = client_meili.tracer([{'lat': 4, 'lon': 9}], attributs=troncons.ATTRIBUTS_TRONCON)
         self.assertEqual(edges, [{'id': 1}])
         self.assertEqual(post.call_args.kwargs['json']['filters']['attributes'], client_meili.ATTRIBUTS_DEFAUT)
+
+
+class EvitementTests(SimpleTestCase):
+    def candidat(self, duree, bad_m=0, degraded_m=0):
+        etat = {'good_m': 0, 'degraded_m': degraded_m, 'bad_m': bad_m, 'unknown_m': 0, 'flood_prone_m': 0, 'worst': []}
+        return {'duree': duree, 'duree_avec_trafic': None, 'distance': 3000, 'etat_route': etat,
+                'est_recommande': False, 'libelle': ''}
+
+    def test_route_mauvaise_passe_derriere(self):
+        from .services import evitement
+
+        direct = self.candidat(400, bad_m=1000)  # 7,5 m/s : 1 km a moitie vitesse = +133 s
+        detour = self.candidat(500)
+        classes = evitement.classer([direct, detour])
+        self.assertIs(classes[0], detour)
+        self.assertTrue(detour['est_recommande'])
+        self.assertEqual(direct['etat_route']['avoid_penalty_s'], 133)
+        self.assertEqual(direct['duree'], 400)  # la duree affichee ne change pas
+
+    def test_sans_etat_connu_rien_ne_change(self):
+        from .services import evitement
+
+        a, b = self.candidat(400), self.candidat(500)
+        a['etat_route'] = None
+        self.assertIs(evitement.classer([a, b])[0], a)
+
+
+class EvitementCalculItineraireTests(TestCase):
+    def test_reglage_utilisateur_applique_au_calcul(self):
+        from trips.tests_retards import DIRECT, NORD, trip_valhalla
+        from trips.polyline import encoder_polyline6
+
+        cache.clear()
+        utilisateur = creer_utilisateur()
+        jetons = connecter(self.client, utilisateur.telephone)
+        self.client.patch(reverse('accounts:moi-parametres'), {'avoid_degraded_roads': True},
+                          content_type='application/json', **jetons)
+        mauvais = {'good_m': 0, 'degraded_m': 0, 'bad_m': 3000, 'flood_prone_m': 0, 'worst': []}
+
+        def trafic(geometrie):
+            etat = mauvais if geometrie == encoder_polyline6(DIRECT) else {**mauvais, 'bad_m': 0}
+            return {'niveau_trafic': 'NORMAL', 'duree_avec_trafic': None, 'etat_route': etat}
+
+        with patch('trips.services.service_itineraire.service_trafic.evaluer_route', side_effect=trafic), \
+                patch('trips.services.service_itineraire.ClientValhalla') as Client:
+            Client.return_value.calculer_itineraires.return_value = [trip_valhalla(DIRECT, 400), trip_valhalla(NORD, 520)]
+            routes = self.client.post(
+                reverse('trips:calculer-itineraire'),
+                {'origin_lat': 4.05, 'origin_lon': 9.70, 'destination_lat': 4.05, 'destination_lon': 9.73},
+                content_type='application/json', **jetons,
+            ).json()
+        self.assertEqual(routes[0]['duration'], 520)  # le detour en bon etat passe devant
+        self.assertGreater(routes[1]['road_condition']['avoid_penalty_s'], 0)
+        self.assertEqual(routes[1]['road_condition']['unknown_m'], 3300 - 3000)

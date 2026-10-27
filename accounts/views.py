@@ -753,6 +753,7 @@ class UtilisateurFicheView(APIView):
             {
                 'avoid_tolls': parametres.eviter_peages,
                 'avoid_unpaved': parametres.eviter_non_bitumees,
+                'avoid_degraded_roads': parametres.eviter_routes_degradees,
                 'voice_guidance': parametres.guidage_vocal_actif,
                 'voice_language': parametres.langue_vocale,
                 'units': parametres.unites,

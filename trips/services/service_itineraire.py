@@ -7,11 +7,13 @@ normalise la reponse (Valhalla ou repli) en une forme stable pour le client.
 
 import hashlib
 import json
+import logging
 
 from django.conf import settings
 from django.core.cache import cache
 
 from accounts.models import TypeVehicule
+from etat_routes.services import evitement
 from etat_routes.services.score_trajet import completer as completer_etat_route
 
 from ..models import NiveauTrafic, RoadClass
@@ -19,6 +21,8 @@ from . import retards_signalements, service_trafic
 from .client_corridor_reference import ClientCorridorReference
 from .client_valhalla import ClientValhalla
 from .corridors import trouver_corridor
+
+logger = logging.getLogger(__name__)
 
 DUREE_CACHE_S = 180
 
@@ -46,6 +50,19 @@ VITESSE_MIN_CAP_KMH = 10
 # Vitesse inconnue (verifier_cap) : si l'itineraire sans cap est plus rapide
 # d'au moins ce delai, le cap a force un detour -- on le laisse tomber.
 GAIN_MIN_SANS_CAP_S = 120
+
+
+def ajouter_reperes_sans_risque(candidat):
+    """Points de repere des manoeuvres (places/services/reperes.py) : un
+    echec ne doit jamais empecher de calculer l'itineraire."""
+    from places.services.reperes import ajouter_reperes
+
+    try:
+        ajouter_reperes(candidat)
+    except Exception:
+        logger.exception('Points de repere indisponibles')
+        for manoeuvre in candidat.get('manoeuvres') or []:
+            manoeuvre['repere'] = None
 
 
 class ServiceItineraire:
@@ -100,11 +117,15 @@ class ServiceItineraire:
         candidats = [self._normaliser_trip(trip, index) for index, trip in enumerate(trips)]
         for candidat in candidats:
             candidat['type_vehicule'] = type_vehicule or TypeVehicule.VOITURE
+            ajouter_reperes_sans_risque(candidat)
         # Retards des signalements recalcules a chaque appel (pas mis en cache :
         # un signalement peut apparaitre ou expirer entre deux calculs), puis
         # reclassement par duree finale.
         trafic_en_direct = 'current' in options['costing_options'][costing]['speed_types']
-        return retards_signalements.appliquer(candidats, costing, trafic_en_direct)
+        candidats = retards_signalements.appliquer(candidats, costing, trafic_en_direct)
+        if utilisateur.parametres.eviter_routes_degradees:
+            candidats = evitement.classer(candidats)
+        return candidats
 
     def _trips(self, depart, arrivee, options, cap_origine, alternatives, etapes, eviter):
         """Trips Valhalla bruts, en cache DUREE_CACHE_S."""

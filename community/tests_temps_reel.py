@@ -134,8 +134,7 @@ class IncidentsConsumerTests(TransactionTestCase):
     async def test_reception_dans_sa_cellule_seulement(self):
         communicateur = await self._connecter()
         await communicateur.send_json_to({'type': 'subscribe', 'cells': [CELLULE_AKWA]})
-        await communicateur.send_json_to({'type': 'ping'})  # subscribe traite avant le pong
-        await communicateur.receive_json_from()
+        self.assertEqual(await communicateur.receive_json_from(), {'type': 'subscribed', 'cells': 1})
 
         await sync_to_async(temps_reel.publier_retrait)('id-bonaberi', h3.str_to_int(CELLULE_BONABERI), 'withdrawn')
         await sync_to_async(temps_reel.publier_retrait)('id-akwa', h3.str_to_int(CELLULE_AKWA), 'withdrawn')
@@ -148,8 +147,8 @@ class IncidentsConsumerTests(TransactionTestCase):
         communicateur = await self._connecter()
         await communicateur.send_json_to({'type': 'subscribe', 'cells': [CELLULE_AKWA]})
         await communicateur.send_json_to({'type': 'subscribe', 'cells': [CELLULE_BONABERI]})
-        await communicateur.send_json_to({'type': 'ping'})
         await communicateur.receive_json_from()
+        await communicateur.receive_json_from()  # deux accuses "subscribed"
 
         await sync_to_async(temps_reel.publier_retrait)('id-akwa', h3.str_to_int(CELLULE_AKWA), 'withdrawn')
         self.assertTrue(await communicateur.receive_nothing())
@@ -175,14 +174,62 @@ class IncidentsConsumerTests(TransactionTestCase):
 
         communicateur = await self._connecter()
         await communicateur.send_json_to({'type': 'subscribe', 'cells': [CELLULE_AKWA]})
-        await communicateur.send_json_to({'type': 'ping'})
-        await communicateur.receive_json_from()
+        await communicateur.receive_json_from()  # "subscribed"
 
         corps = await sync_to_async(signaler_par_l_api)()
         message = await asyncio.wait_for(communicateur.receive_json_from(), timeout=3)
         self.assertEqual(message['type'], 'incident.created')
         self.assertEqual(message['incident']['id'], corps['id'])
         await communicateur.disconnect()
+
+
+    async def test_abonnement_par_position_et_rayon(self):
+        communicateur = await self._connecter()
+        await communicateur.send_json_to({'type': 'subscribe', 'lat': AKWA[0], 'lon': AKWA[1], 'radius_km': 15})
+        accuse = await communicateur.receive_json_from()
+        self.assertEqual(accuse['type'], 'subscribed')
+        self.assertLess(accuse['cells'], temps_reel.MAX_CELLULES_ZONE)  # ~40 au lieu de ~1000 en resolution 8
+
+        # Akwa et Bonaberi sont a ~4 km : les deux dans le rayon de 15 km.
+        await sync_to_async(temps_reel.publier_retrait)('id-bonaberi', h3.str_to_int(CELLULE_BONABERI), 'withdrawn')
+        self.assertEqual((await communicateur.receive_json_from())['id'], 'id-bonaberi')
+        # Yaounde (~200 km) : rien.
+        yaounde = h3.latlng_to_cell(3.848, 11.502, 8)
+        await sync_to_async(temps_reel.publier_retrait)('id-yaounde', h3.str_to_int(yaounde), 'withdrawn')
+        self.assertTrue(await communicateur.receive_nothing())
+        await communicateur.disconnect()
+
+    async def test_petit_rayon_n_ecoute_pas_l_autre_rive(self):
+        # Critere 4 de la spec : abonne a Akwa (1 km), rien de Bonaberi.
+        communicateur = await self._connecter()
+        await communicateur.send_json_to({'type': 'subscribe', 'lat': AKWA[0], 'lon': AKWA[1], 'radius_km': 1})
+        await communicateur.receive_json_from()
+        loin = h3.latlng_to_cell(4.12, 9.60, 8)  # ~13 km
+        await sync_to_async(temps_reel.publier_retrait)('id-loin', h3.str_to_int(loin), 'withdrawn')
+        self.assertTrue(await communicateur.receive_nothing())
+        await communicateur.disconnect()
+
+    async def test_position_invalide_ou_rayon_trop_grand(self):
+        communicateur = await self._connecter()
+        for message in (
+            {'type': 'subscribe', 'lat': 'abc', 'lon': 9.7},
+            {'type': 'subscribe', 'lat': 4.05, 'lon': 9.7, 'radius_km': 25},
+            {'type': 'subscribe', 'lat': 4.05, 'lon': 9.7, 'radius_km': 0},
+        ):
+            await communicateur.send_json_to(message)
+            erreur = await communicateur.receive_json_from()
+            self.assertEqual((erreur['type'], erreur['code']), ('error', 'invalid_position'))
+        await communicateur.disconnect()
+
+
+class CellulesZoneTests(TestCase):
+    def test_le_disque_est_couvert(self):
+        cellules = set(temps_reel.cellules_zone(*AKWA, 20))
+        self.assertLessEqual(len(cellules), temps_reel.MAX_CELLULES_ZONE)
+        # Points a 19 km dans les 4 directions : leur cellule est dans l'abonnement.
+        for dlat, dlon in ((0.171, 0), (-0.171, 0), (0, 0.171), (0, -0.171)):
+            point = (AKWA[0] + dlat, AKWA[1] + dlon)
+            self.assertIn(h3.latlng_to_cell(*point, temps_reel.RESOLUTION_ZONE), cellules)
 
 
 class GroupeEnregistreur:
@@ -226,9 +273,12 @@ class PublicationTempsReelTests(TestCase):
     def test_creation_publiee_dans_la_cellule_de_l_incident(self):
         reponse = self._signaler('cle-1', *AKWA)
         self.assertEqual(reponse.status_code, 201)
-        self.assertEqual(len(self.couche.envois), 1)
+        # Cellule resolution 8 (abonnement par cellules) et sa parente
+        # resolution 6 (abonnement par position), meme message.
+        zone = h3.cell_to_parent(CELLULE_AKWA, temps_reel.RESOLUTION_ZONE)
+        self.assertEqual([g for g, _ in self.couche.envois], [f'incidents.h3.{CELLULE_AKWA}', f'incidents.h3.{zone}'])
+        self.assertEqual(self.couche.envois[0][1], self.couche.envois[1][1])
         groupe, payload = self.couche.envois[0]
-        self.assertEqual(groupe, f'incidents.h3.{CELLULE_AKWA}')
         self.assertEqual(payload['type'], 'incident.created')
         # Meme contenu que la reponse de l'API (schema Incident).
         self.assertEqual(payload['incident'], {k: v for k, v in reponse.json().items() if k != 'duplicate_of_existing'})
@@ -288,7 +338,9 @@ class PublicationTempsReelTests(TestCase):
                 content_type='application/json', **jetons_staff,
             )
             self.client.delete(reverse('community:staff-incident-supprimer', args=[supprime.id]), **jetons_staff)
-        self.assertEqual([p for _, p in self.couche.envois], [
+        # Un envoi par groupe (resolution 8 puis 6) : on regarde les envois en resolution 8.
+        fins = [p for g, p in self.couche.envois if h3.get_resolution(g.rsplit('.', 1)[1]) == 8]
+        self.assertEqual(fins, [
             {'type': 'incident.removed', 'id': str(retire.id), 'reason': 'moderated'},
             {'type': 'incident.removed', 'id': str(supprime.id), 'reason': 'moderated'},
         ])

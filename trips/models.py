@@ -243,6 +243,9 @@ class Manoeuvre(models.Model):
     # cloture un troncon intermediaire (trajet avec waypoints) ; null sinon,
     # y compris pour l'arrivee finale. cf. ServiceItineraire._normaliser_trip.
     arrivee_etape_index = models.PositiveIntegerField(null=True, blank=True)
+    # Point de repere ({"name", "kind"}) annonce avec la manoeuvre, garde pour
+    # la reprise/relecture du trajet (cf. places/services/reperes.py).
+    repere = models.JSONField(null=True, blank=True)
 
     class Meta:
         db_table = 'manoeuvre'

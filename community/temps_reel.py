@@ -15,6 +15,7 @@ puis recharge par l'API doit y trouver le meme etat, pas l'etat d'avant.
 """
 
 import logging
+import math
 
 import h3
 from asgiref.sync import async_to_sync
@@ -33,6 +34,14 @@ RETIRE = 'incident.removed'
 RAISON_CONTESTE = 'disputed'      # votes "Plus rien" : expire_le ramene dans le passe
 RAISON_RETIRE_AUTEUR = 'withdrawn'
 RAISON_MODERE = 'moderated'
+
+# Abonnement par position et rayon (complement du 08/10) : des cellules plus
+# grandes que la resolution 8 de l'API, sinon 15 km demanderaient ~1000
+# cellules. Resolution 6 : ~3,7 km de cote, ~40 cellules pour 15 km. Chaque
+# evenement est publie dans les deux groupes (cf. groupes_de).
+RESOLUTION_ZONE = 6
+RAYON_KM_MAX = 20  # meme plafond que /api/incidents/nearby/ (community.views.RAYON_KM_MAX)
+MAX_CELLULES_ZONE = 100
 
 
 def nom_groupe(cellule_hex: str) -> str:
@@ -55,15 +64,35 @@ def publier_retrait(incident_id, cellule_h3: int, raison: str) -> None:
     _publier_apres_commit(cellule_h3, payload)
 
 
+def groupes_de(cellule_h3: int) -> list[str]:
+    """Groupe de la cellule resolution 8 (abonnement par cellules) et de sa
+    cellule parente resolution RESOLUTION_ZONE (abonnement par position)."""
+    fine = h3.int_to_str(cellule_h3)
+    return [nom_groupe(fine), nom_groupe(h3.cell_to_parent(fine, RESOLUTION_ZONE))]
+
+
+def cellules_zone(lat: float, lon: float, rayon_km: float) -> list[str]:
+    """Cellules RESOLUTION_ZONE qui couvrent le disque (lat, lon, rayon_km) :
+    toute cellule dont le centre est a moins de rayon + un cote de cellule."""
+    cote_km = h3.average_hexagon_edge_length(RESOLUTION_ZONE, unit='km')
+    pas_km = cote_km * 3 ** 0.5 * 0.866  # distance minimale entre deux anneaux
+    k = math.ceil((rayon_km + cote_km) / pas_km)
+    centre = h3.latlng_to_cell(lat, lon, RESOLUTION_ZONE)
+    return sorted(
+        c for c in h3.grid_disk(centre, k)
+        if h3.great_circle_distance((lat, lon), h3.cell_to_latlng(c), unit='km') <= rayon_km + cote_km
+    )
+
+
 def _publier_apres_commit(cellule_h3: int, payload: dict) -> None:
-    groupe = nom_groupe(h3.int_to_str(cellule_h3))
+    groupes = groupes_de(cellule_h3)
 
     def envoyer():
-        try:
-            async_to_sync(get_channel_layer().group_send)(
-                groupe, {'type': 'incident.evenement', 'payload': payload},
-            )
-        except Exception:
-            journal.warning('Publication temps reel impossible (%s, %s)', payload['type'], groupe, exc_info=True)
+        couche = get_channel_layer()
+        for groupe in groupes:
+            try:
+                async_to_sync(couche.group_send)(groupe, {'type': 'incident.evenement', 'payload': payload})
+            except Exception:
+                journal.warning('Publication temps reel impossible (%s, %s)', payload['type'], groupe, exc_info=True)
 
     transaction.on_commit(envoyer)

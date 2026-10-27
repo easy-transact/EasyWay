@@ -101,6 +101,23 @@ class ManoeuvreCandidatSerializer(serializers.Serializer):
         allow_null=True, required=False, source='arrivee_etape_index',
         help_text="Index (0-based) de l'etape atteinte si ce maneuver cloture un troncon intermediaire, sinon null.",
     )
+    landmark = serializers.JSONField(
+        required=False, allow_null=True, default=None, source='repere',
+        help_text='{"name", "kind"} : repere a annoncer (CARREFOUR, STATION, CULTE, SANTE, MARCHE, AUTRE). Absent sinon.',
+    )
+
+    def validate_landmark(self, repere):
+        # Renvoye tel quel par l'appli (POST /api/trips/, switch-route) : on ne
+        # garde que la forme attendue, jamais un objet arbitraire.
+        if not isinstance(repere, dict) or not isinstance(repere.get('name'), str):
+            return None
+        return {'name': repere['name'][:100], 'kind': str(repere.get('kind', 'AUTRE'))[:20]}
+
+    def to_representation(self, instance):
+        donnees = super().to_representation(instance)
+        if donnees.get('landmark') is None:
+            donnees.pop('landmark', None)  # absent plutot que null (spec)
+        return donnees
 
 
 class ItineraireCandidatSerializer(serializers.Serializer):

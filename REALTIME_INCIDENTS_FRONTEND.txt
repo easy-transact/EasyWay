@@ -18,7 +18,9 @@ READ THIS FIRST — the shape of the whole flow
   3. Wait  {"type": "ready", "server_time": "..."}
   4. Fetch incidents through the REST API as today
      (GET incidents/nearby/?cells=... or POST incidents/along-route/)
-  5. Send  {"type": "subscribe", "cells": ["88...fff", ...]}   (<= 50 cells)
+  5. Send  {"type": "subscribe", "lat": 4.0711, "lon": 9.7143, "radius_km": 15}
+     (or the older form {"type": "subscribe", "cells": [...]}, see 1)
+     and wait {"type": "subscribed", "cells": <n>}
   6. Apply incident.created / incident.updated / incident.removed as they
      arrive; send {"type": "ping"} every 25 s.
   7. On every (re)connection: repeat 2 -> 5. Step 4 is what catches up
@@ -28,8 +30,19 @@ Open the socket only while the app is in the foreground; close it in the
 background.
 
 ------------------------------------------------------------
-1. CELLS
+1. SUBSCRIBING: BY POSITION (RECOMMENDED) OR BY CELLS
 
+By position and radius (added 27/10/2026):
+  {"type": "subscribe", "lat": 4.0711, "lon": 9.7143, "radius_km": 15}
+  radius_km: up to 20 (default 10). The server computes the cells itself --
+  no H3 on the phone. It uses LARGER cells than the REST API (H3 resolution
+  6, ~3.7 km per side): a 15 km radius is ~40 cells instead of ~1000 at
+  resolution 8. Consequence: you may receive incidents up to ~4 km beyond
+  your radius -- keep or drop them as you like.
+  Home map: radius 15 km, re-subscribe after moving 2 km.
+  Navigation: radius 10 km around the vehicle, re-subscribe every 2 km.
+
+By cells (original form, still accepted):
 Exactly the same H3 cells as GET incidents/nearby/?cells= : resolution 8,
 hex string form ("88754e6499fffff"), 50 at most per connection.
   - Home map: the cells around the visible area / your position.
@@ -65,8 +78,10 @@ it goes in the first message, see 3.
       You may send it again later on an open connection with a refreshed
       token (resets the expiry, see 5) -- no need to reconnect for that.
 
+  {"type": "subscribe", "lat": ..., "lon": ..., "radius_km": ...}
   {"type": "subscribe", "cells": ["88754e6499fffff", ...]}
-      Replaces the current subscription. Only after `ready`.
+      Replaces the current subscription. Only after `ready`. Answered by
+      `subscribed` once in place.
 
   {"type": "ping"}
       Keep-alive, every 25 s. Answered by `pong`. Allowed before auth too.
@@ -95,13 +110,18 @@ it goes in the first message, see 3.
         withdrawn  removed by its author
         moderated  removed by a moderator
 
+  {"type": "subscribed", "cells": 37}
+      The subscription is in place (number of cells). Only after this may
+      the fallback polling slow down to 3 min.
+
   {"type": "pong"}
 
   {"type": "error", "code": "...", "detail": "..."}
       code: invalid_message (not a JSON object), unknown_type,
             invalid_cells (not a list of resolution-8 H3 cells -- the
-            previous subscription is kept), too_many_cells (followed by
-            close 4008).
+            previous subscription is kept), invalid_position (lat/lon not
+            numbers, or radius_km not in ]0, 20] -- previous subscription
+            kept), too_many_cells (followed by close 4008).
 
 EXPIRY HAS NO MESSAGE. Every incident carries `expires_at`: remove it
 yourself at that time (and again whenever an incident.updated changes it).
@@ -130,7 +150,8 @@ API.
   along-route), then subscribe.
   Fallback polling:
     - socket NOT connected: keep polling every 40 s as today;
-    - socket connected: poll every 3 min as a safety net.
+    - socket connected AND `subscribed` received: poll every 3 min as a
+      safety net.
 
 ------------------------------------------------------------
 7. ACCEPTANCE CHECKS

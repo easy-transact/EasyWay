@@ -314,3 +314,37 @@ signales, deja pris en compte par le calcul d'itineraire).
 
   Au debut, presque tout sera "inconnu" : la vitesse de nuit demande 20
   passages de 5 conducteurs sur 60 jours, et les signalements 2 personnes.
+
+  V3 -- "Eviter les routes degradees" (reglage utilisateur) :
+    GET/PATCH /api/users/me/settings/ : nouveau booleen "avoid_degraded_roads"
+    (false par defaut), a placer avec avoid_tolls / avoid_unpaved_roads.
+    Active : les itineraires sont classes en penalisant les metres DEGRADE
+    (vitesse x 0,8) et MAUVAIS (x 0,5) ; aucune route n'est interdite et la
+    duree affichee reste la vraie. road_condition.avoid_penalty_s donne le
+    temps de penalite retenu (pour debogage, pas a afficher).
+
+13. AMELIORE — trafic en direct (27/10/2026, spec TRAFIC_VALHALLA)
+  Rien a changer cote appli. Un embouteillage signale ralentit maintenant les
+  ~200 m en amont dans le sens du cap (la file), pas seulement le point ; les
+  vitesses aberrantes pour le type de route et les passages a moins de 200 m
+  du depart/de l'arrivee d'un trajet ne comptent plus dans le trafic.
+  Envoyer le cap ("heading") avec les signalements d'embouteillage : sans lui,
+  seul le point signale est ralenti.
+
+
+14. NOUVEAU — points de repere dans le guidage (27/10/2026, spec du 26/10)
+
+  Dans chaque manoeuvre de routes/calculate (donc aussi better-route) :
+    "landmark": { "name": "Carrefour Ndokoti", "kind": "CARREFOUR" }
+  kind : CARREFOUR, STATION, CULTE, SANTE, MARCHE, AUTRE. Champ ABSENT (pas
+  null) quand il n'y a pas de repere sur -- et toujours absent au depart et a
+  l'arrivee. Un seul repere par manoeuvre ; jamais le meme deux fois de suite.
+
+  Choix cote serveur : lieux nommes a moins de 60 m du point de manoeuvre,
+  visibles en arrivant (pas apres le virage), par priorite carrefour >
+  station > culte > sante > marche > autre (banque, ecole, hotel...), puis le
+  plus proche. Ecartes : lieux non valides, a position approximative (centre
+  de quartier), noms de plus de 40 caracteres ou contenant ";".
+
+  Renvoyer la route telle quelle a POST /api/trips/ et switch-route : le
+  repere est garde avec les manoeuvres du trajet.

@@ -177,6 +177,9 @@ class Parametres(models.Model):
     eviter_peages = models.BooleanField(default=False)
     eviter_non_bitumees = models.BooleanField(default=False)
     eviter_intersections_difficiles = models.BooleanField(default=False)
+    # Etat des routes V3 : classe les itineraires en penalisant les tronçons
+    # DEGRADE/MAUVAIS (etat_routes/services/evitement.py), sans en interdire aucun.
+    eviter_routes_degradees = models.BooleanField(default=False)
     style_carte = models.CharField(max_length=50, default='STANDARD')
 
     guidage_vocal_actif = models.BooleanField(default=True)
