@@ -42,7 +42,7 @@ from .serializers import (
     RechercheRecenteSerializer,
     stats_auteurs_lieux,
 )
-from .services import carte
+from .services import carte, garages
 from .services.client_nominatim import ClientNominatim
 from .services.client_photon import ClientPhoton
 from .utils import normaliser
@@ -248,7 +248,12 @@ class LieuDetailView(APIView):
 
     def get(self, request, id):
         lieu = get_object_or_404(Lieu, id=id, statut=StatutLieu.APPROUVE)
-        return Response(LieuDetailSerializer(lieu).data)
+        donnees = LieuDetailSerializer(lieu).data
+        # Garages : note moyenne et nombre d'avis (cf. vues_avis.py).
+        donnees['is_garage'] = garages.est_garage(lieu)
+        note = garages.note_de(lieu) if donnees['is_garage'] else {'average': None, 'count': 0}
+        donnees['rating_average'], donnees['rating_count'] = note['average'], note['count']
+        return Response(donnees)
 
 
 @extend_schema(
@@ -612,6 +617,10 @@ class LieuSupprimerView(APIView):
             }
             for p in proches
         ]
+        # Garages : note moyenne (avis publies) ; la liste vient de /api/staff/reviews/.
+        donnees['is_garage'] = garages.est_garage(lieu)
+        note = garages.note_de(lieu) if donnees['is_garage'] else {'average': None, 'count': 0}
+        donnees['rating_average'], donnees['rating_count'] = note['average'], note['count']
         return Response(donnees)
 
     @extend_schema(

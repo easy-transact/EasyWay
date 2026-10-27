@@ -443,3 +443,6 @@ class PointCarteSerializer(serializers.Serializer):
     lon = serializers.FloatField()
     position_m = serializers.IntegerField(required=False, help_text='along-route seulement')
     distance_m = serializers.IntegerField(required=False, help_text='along-route seulement')
+    is_garage = serializers.BooleanField(help_text='Notable via /api/garages/{id}/reviews/.')
+    rating_average = serializers.FloatField(allow_null=True, help_text='Note moyenne (1-5), null sans avis ou hors garage.')
+    rating_count = serializers.IntegerField()

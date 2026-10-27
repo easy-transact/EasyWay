@@ -170,6 +170,8 @@ REST_FRAMEWORK = {
         'verification-existence': '20/hour',
         # Invitations de membres d'agence : chaque appel envoie un email.
         'invitation': '30/hour',
+        # Avis sur les garages (creation/modification).
+        'avis-garage': '10/hour',
     },
 }
 

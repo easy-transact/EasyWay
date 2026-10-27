@@ -662,8 +662,10 @@ class ImportLieuxCsvTests(TestCase):
         self.chemin = fichier.name
         self.addCleanup(os.remove, self.chemin)
         self.ancien = creer_lieu('Ancien import', 4.1, 9.7)
-        self.propose = creer_lieu('Proposé', 4.1, 9.7, source=SourceLieu.UTILISATEUR)
-        self.saisi = creer_lieu('Saisi au BO', 4.1, 9.7, source=SourceLieu.BACK_OFFICE)
+        self.propose = creer_lieu('Proposé', 4.1, 9.7)
+        self.saisi = creer_lieu('Saisi au BO', 4.1, 9.7)
+        Lieu.objects.filter(pk=self.propose.pk).update(source=SourceLieu.UTILISATEUR)
+        Lieu.objects.filter(pk=self.saisi.pk).update(source=SourceLieu.BACK_OFFICE)
 
     def test_remplacer_garde_les_ajouts_utilisateurs(self):
         call_command('import_lieux_csv', self.chemin, '--remplacer', stdout=io.StringIO())

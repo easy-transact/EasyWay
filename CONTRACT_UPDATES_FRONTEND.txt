@@ -188,3 +188,34 @@ signales, deja pris en compte par le calcul d'itineraire).
 
   A faire cote appli : envoyer origin_speed_kmh avec origin_heading, ou ne pas
   envoyer origin_heading quand la vitesse GPS est proche de 0.
+
+
+9. NOUVEAU — noter un garage (27/10/2026)
+
+  Seuls les garages se notent : lieu de categorie garage/mecanique (ex.
+  "Garage / mecanique") ou etablissement de type GARAGE. Note 1 a 5 +
+  commentaire facultatif (500 caracteres max). Un seul avis par utilisateur et
+  par garage : renvoyer une note la remplace. Aucun point gagne.
+
+  Reperer un garage : nouveaux champs dans places/map, places/along-route et
+  GET /api/places/{id}/ :
+    "is_garage": true, "rating_average": 4.2 | null, "rating_count": 12
+
+  GET /api/garages/{id}/reviews/?page=1          (public ; {id} = id du lieu
+                                                   ou de l'etablissement)
+    { "garage": {id, kind, name}, "average": 4.2 | null, "count": 12,
+      "my_review": {id, rating, comment, status, ...} | null,   (si connecte)
+      "count"/"next"/"previous"/"results": [
+        {id, rating, comment, author_name | null, created_at, updated_at} ] }
+    author_name est null si l'auteur est en mode invisible.
+
+  POST /api/garages/{id}/reviews/                 (connecte)
+    { "rating": 1-5, "comment": "..." }
+    -> 201 (premier avis) ou 200 (modification) : l'avis + average/count/my_review
+    Limite : 10 avis par heure. 404 si {id} n'est pas un garage.
+
+  DELETE /api/garages/{id}/reviews/mine/          -> 204
+
+  Un avis peut etre retire par la moderation : il sort de la moyenne ; son
+  auteur le voit encore dans my_review avec status "RETIRE". Le modifier le
+  republie.

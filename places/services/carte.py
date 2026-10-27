@@ -16,6 +16,7 @@ from trips.services.geo import distance_haversine_m
 from trips.services.zones_vitesse import _longueurs_cumulees, _plan_vers_metres
 
 from ..models import Etablissement, Lieu, SourceLieu, StatutLieu
+from .garages import ajouter_notes
 
 # Au-dela, la reponse serait illisible sur un ecran de telephone : l'appli
 # zoome pour en voir davantage.
@@ -65,7 +66,7 @@ def lieux_dans_zone(min_lat, min_lon, max_lat, max_lon, categories=None):
     lieux = list(_lieux(categories).filter(position__intersects=rectangle).order_by('-score_popularite', 'nom')[: reste + 1])
     tronque = len(lieux) > reste
     points += [point_lieu(l) for l in lieux[:reste]]
-    return points, tronque
+    return ajouter_notes(points), tronque
 
 
 def lieux_sur_trajet(points_trajet, buffer_m, categories=None):
@@ -94,7 +95,7 @@ def lieux_sur_trajet(points_trajet, buffer_m, categories=None):
         donnees['distance_m'] = round(ecart)
         resultats.append(donnees)
     resultats.sort(key=lambda p: p['position_m'])
-    return resultats[:MAX_RESULTATS]
+    return ajouter_notes(resultats[:MAX_RESULTATS])
 
 
 def categories_affichees():

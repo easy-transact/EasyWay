@@ -250,3 +250,57 @@ class Ville(models.Model):
 
     def __str__(self):
         return self.nom
+
+
+class StatutAvis(models.TextChoices):
+    PUBLIE = 'PUBLIE', 'Publie'
+    # Retire par la moderation : garde (motif, journal), exclu de la moyenne.
+    RETIRE = 'RETIRE', 'Retire'
+
+
+class AvisGarage(models.Model):
+    """Note (1-5) et commentaire d'un utilisateur sur un garage : un Lieu de
+    categorie garage/mecanique (cf. services.garages.est_garage) ou un
+    Etablissement de type GARAGE. Un seul avis par utilisateur et par garage,
+    modifiable. Aucun point de recompense (decision du 27/10)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    utilisateur = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='avis_garages')
+    lieu = models.ForeignKey(Lieu, on_delete=models.CASCADE, null=True, blank=True, related_name='avis')
+    etablissement = models.ForeignKey(
+        Etablissement, on_delete=models.CASCADE, null=True, blank=True, related_name='avis'
+    )
+    note = models.PositiveSmallIntegerField()
+    commentaire = models.CharField(max_length=500, blank=True)
+    statut = models.CharField(max_length=10, choices=StatutAvis.choices, default=StatutAvis.PUBLIE)
+    motif_retrait = models.CharField(max_length=255, blank=True)
+    cree_le = models.DateTimeField(auto_now_add=True)
+    modifie_le = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'avis_garage'
+        ordering = ['-modifie_le']
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(lieu__isnull=False, etablissement__isnull=True)
+                    | models.Q(lieu__isnull=True, etablissement__isnull=False)
+                ),
+                name='avis_garage_une_seule_cible',
+            ),
+            models.CheckConstraint(condition=models.Q(note__gte=1, note__lte=5), name='avis_garage_note_1_a_5'),
+            models.UniqueConstraint(
+                fields=['utilisateur', 'lieu'], condition=models.Q(lieu__isnull=False), name='avis_garage_unique_lieu',
+            ),
+            models.UniqueConstraint(
+                fields=['utilisateur', 'etablissement'], condition=models.Q(etablissement__isnull=False),
+                name='avis_garage_unique_etablissement',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.note}/5 - {self.lieu or self.etablissement}'
+
+    @property
+    def garage(self):
+        return self.lieu or self.etablissement
