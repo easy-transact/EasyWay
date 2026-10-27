@@ -146,6 +146,7 @@ def a_proximite(lat, lon, rayon_m, types, limite, maintenant):
             'id': str(lieu.id), 'kind': 'place', 'type': type_lieu, 'name': lieu.nom, 'category': lieu.categorie,
             'address': lieu.adresse, 'city': lieu.ville, 'lat': lieu.position.y, 'lon': lieu.position.x,
             'distance_m': round(lieu.distance.m), 'horaires': lieu.horaires,
+            'phone': lieu.telephone, 'position_approximate': lieu.position_approximative,
         })
     for etablissement in etablissements:
         resultats.append({
@@ -154,8 +155,11 @@ def a_proximite(lat, lon, rayon_m, types, limite, maintenant):
             'name': etablissement.nom, 'category': etablissement.get_type_display(), 'address': etablissement.adresse,
             'city': etablissement.ville, 'lat': etablissement.position.y, 'lon': etablissement.position.x,
             'distance_m': round(etablissement.distance.m), 'horaires': {},
+            'phone': etablissement.telephone, 'position_approximate': False,
         })
-    resultats.sort(key=lambda r: r['distance_m'])
+    # Positions sures d'abord (on peut y aller), puis les approximatives
+    # (centre du quartier), chacune par distance.
+    resultats.sort(key=lambda r: (r['position_approximate'], r['distance_m']))
     resultats = resultats[:limite]
 
     garages = [r for r in resultats if r['type'] == 'garage']

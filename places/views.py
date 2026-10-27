@@ -421,6 +421,9 @@ class LieuModerationListView(APIView):
             lieux = lieux.filter(statut=statut)
         if request.query_params.get('proposed_by'):
             lieux = lieux.filter(propose_par_id=request.query_params['proposed_by'])
+        if request.query_params.get('approximate') in ('1', 'true'):
+            # Positions a corriger (cf. services/positions.py).
+            lieux = lieux.filter(position_approximative=True)
         recherche = request.query_params.get('search', '').strip()
         if recherche:
             lieux = lieux.filter(
@@ -471,6 +474,7 @@ class LieuModerationListView(APIView):
             source=SourceLieu.BACK_OFFICE,
             statut=StatutLieu.APPROUVE,
             horaires=donnees['opening_hours'],
+            telephone=donnees['phone'],
         )
         journaliser(request.user, 'places.create', lieu)
         return Response(LieuModerationSerializer(lieu).data, status=status.HTTP_201_CREATED)
@@ -652,6 +656,9 @@ class LieuSupprimerView(APIView):
             if getattr(lieu, attribut) != valeur:
                 avant[cle], apres[cle] = getattr(lieu, attribut), valeur
                 setattr(lieu, attribut, valeur)
+        if 'phone' in donnees and donnees['phone'] != lieu.telephone:
+            avant['phone'], apres['phone'] = lieu.telephone, donnees['phone']
+            lieu.telephone = donnees['phone']
         if 'opening_hours' in donnees and donnees['opening_hours'] != lieu.horaires:
             avant['opening_hours'], apres['opening_hours'] = lieu.horaires, donnees['opening_hours']
             lieu.horaires = donnees['opening_hours']
@@ -663,6 +670,8 @@ class LieuSupprimerView(APIView):
                 avant['position'] = [lieu.position.y, lieu.position.x]
                 apres['position'] = [position.y, position.x]
                 lieu.position = position
+                # Place a la main : ce n'est plus le centre du quartier.
+                lieu.position_approximative = False
         if apres:
             lieu.save()
             journaliser(request.user, 'places.update', lieu, avant=avant, apres=apres)

@@ -22,6 +22,8 @@ from django.core.cache import cache
 from django.db.models import F, Sum
 from django.utils import timezone
 
+from etat_routes.services.score_trajet import etat_du_trace
+
 from ..models import FUSEAU_TRAFIC, EchantillonVitesse, NiveauTrafic
 from ..polyline import decoder_polyline6
 from .client_meili import ErreurMeili, tracer
@@ -108,7 +110,7 @@ def _evaluer_sans_cache(geometrie_encodee: str) -> dict:
         # /route (cf. client_meili.tracer), pas d'une trace GPS bruitee --
         # tente edge_walk (rapide, precis) et ne bascule sur map_snap que si
         # necessaire plutot que d'echouer sur la moindre micro-discontinuite.
-        edges, _matched_points = tracer(
+        edges, matched_points = tracer(
             [{'lat': lat, 'lon': lon} for lon, lat in points_route],
             shape_match='walk_or_snap',
         )
@@ -118,6 +120,15 @@ def _evaluer_sans_cache(geometrie_encodee: str) -> dict:
 
     if not edges:
         return repli
+
+    # Etat des routes le long du trace (road_condition) : meme recalage, pas
+    # d'appel en plus. Ne doit jamais faire echouer l'evaluation du trafic.
+    try:
+        etat_route = etat_du_trace(edges, matched_points)
+    except Exception:
+        logger.exception("Etat des routes du trace indisponible")
+        etat_route = None
+    repli = {**repli, 'etat_route': etat_route}
 
     maintenant_local = timezone.now().astimezone(FUSEAU_TRAFIC)
     jour_semaine, heure_jour = maintenant_local.weekday(), maintenant_local.hour
@@ -149,4 +160,4 @@ def _evaluer_sans_cache(geometrie_encodee: str) -> dict:
     if not a_mesure_une_arete:
         return repli
 
-    return {'niveau_trafic': niveau_pire, 'duree_avec_trafic': round(duree_estimee_s)}
+    return {'niveau_trafic': niveau_pire, 'duree_avec_trafic': round(duree_estimee_s), 'etat_route': etat_route}

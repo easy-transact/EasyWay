@@ -12,6 +12,7 @@ from django.conf import settings
 from django.core.cache import cache
 
 from accounts.models import TypeVehicule
+from etat_routes.services.score_trajet import completer as completer_etat_route
 
 from ..models import NiveauTrafic, RoadClass
 from . import retards_signalements, service_trafic
@@ -236,6 +237,8 @@ class ServiceItineraire:
             'duree': round(trip['summary']['time']),
             'duree_avec_trafic': trafic['duree_avec_trafic'],
             'niveau_trafic': trafic['niveau_trafic'],
+            # Etat des routes (bon/degrade/mauvais/inconnu en metres), null si indisponible.
+            'etat_route': completer_etat_route(trafic.get('etat_route'), round(trip['summary']['length'] * 1000)),
             'geometrie': geometrie,
             'est_recommande': index == 0,
             'manoeuvres': [

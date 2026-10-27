@@ -1,6 +1,10 @@
 """
 Importe les Lieu depuis un CSV (ex. lieux_cameroun.csv, separateur ";") :
-    nom;categorie;ville;latitude;longitude;sources
+    nom;categorie;ville;latitude;longitude;sources[;telephone]
+
+Colonne telephone (ou phone) facultative : numeros normalises en +237...,
+un numero illisible est laisse vide. Apres l'import, les positions partagees
+par plusieurs lieux sont marquees approximatives (cf. services/positions.py).
 
 Avec --remplacer, supprime d'abord les lieux importes (source OPENSTREETMAP)
 et garde ceux proposes par les utilisateurs ou ajoutes depuis le back-office ;
@@ -20,7 +24,9 @@ from django.contrib.gis.geos import Point
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
+from accounts.utils import NumeroTelephoneInvalide, valider_et_normaliser_telephone
 from places.models import Lieu, SourceLieu, StatutLieu
+from places.services.positions import marquer_positions_approximatives
 from places.utils import normaliser
 
 # Emprise large du Cameroun : une position hors de ce cadre est une erreur
@@ -30,6 +36,15 @@ LON_MIN, LON_MAX = 8.4, 16.3
 
 TAILLE_LOT = 2000
 COLONNES = {'nom', 'categorie', 'ville', 'latitude', 'longitude'}
+
+
+def _telephone(brut):
+    if not (brut or '').strip():
+        return ''
+    try:
+        return valider_et_normaliser_telephone(brut.strip())
+    except NumeroTelephoneInvalide:
+        return ''
 
 
 class Command(BaseCommand):
@@ -70,7 +85,9 @@ class Command(BaseCommand):
             for debut in range(0, len(lieux), TAILLE_LOT):
                 Lieu.objects.bulk_create(lieux[debut:debut + TAILLE_LOT])
                 self.stdout.write(f'  {min(debut + TAILLE_LOT, len(lieux))}/{len(lieux)}')
+            approximatifs = marquer_positions_approximatives()
         self.stdout.write(self.style.SUCCESS(f'{len(lieux)} lieu(x) importe(s), {nb_supprimes} supprime(s).'))
+        self.stdout.write(f'{approximatifs} lieu(x) a position approximative (centre de quartier).')
 
     def _lire(self, chemin):
         try:
@@ -105,6 +122,7 @@ class Command(BaseCommand):
                     nom_normalise=normaliser(nom)[:255],
                     categorie=(ligne['categorie'] or 'Autre').strip()[:100],
                     ville=(ligne['ville'] or '').strip()[:255],
+                    telephone=_telephone(ligne.get('telephone') or ligne.get('phone')),
                     position=Point(lon, lat, srid=4326),
                     source=SourceLieu.OPENSTREETMAP,
                     statut=StatutLieu.APPROUVE,

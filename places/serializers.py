@@ -67,6 +67,27 @@ class LieuRechercheSerializer(serializers.ModelSerializer):
         return round(distance.m) if distance is not None else None
 
 
+class ChampTelephone(serializers.CharField):
+    """Telephone d'un lieu : '' si inconnu, sinon forme internationale
+    (+237...) -- l'appli compose le numero tel quel ("Appeler")."""
+
+    def __init__(self, **kwargs):
+        kwargs.setdefault('max_length', 32)
+        kwargs.setdefault('allow_blank', True)
+        super().__init__(**kwargs)
+
+    def to_internal_value(self, donnee):
+        from accounts.utils import NumeroTelephoneInvalide, valider_et_normaliser_telephone
+
+        texte = super().to_internal_value(donnee).strip()
+        if not texte:
+            return ''
+        try:
+            return valider_et_normaliser_telephone(texte)
+        except NumeroTelephoneInvalide as exc:
+            raise serializers.ValidationError('Numero de telephone invalide.') from exc
+
+
 class LieuDetailSerializer(serializers.ModelSerializer):
     name = serializers.CharField(source='nom', read_only=True)
     category = serializers.CharField(source='categorie', read_only=True)
@@ -77,12 +98,14 @@ class LieuDetailSerializer(serializers.ModelSerializer):
     lon = serializers.SerializerMethodField()
     status = serializers.CharField(source='statut', read_only=True)
     popularity_score = serializers.IntegerField(source='score_popularite', read_only=True)
+    phone = serializers.CharField(source='telephone', read_only=True)
+    position_approximate = serializers.BooleanField(source='position_approximative', read_only=True)
 
     class Meta:
         model = Lieu
         fields = [
             'id', 'name', 'category', 'address', 'neighborhood', 'city',
-            'lat', 'lon', 'source', 'status', 'popularity_score',
+            'lat', 'lon', 'source', 'status', 'popularity_score', 'phone', 'position_approximate',
         ]
         read_only_fields = fields
 
@@ -258,12 +281,15 @@ class LieuModerationSerializer(serializers.ModelSerializer):
     created_at = serializers.DateTimeField(source='cree_le', read_only=True, allow_null=True)
     reason = serializers.CharField(source='motif_rejet', read_only=True, allow_null=True)
     opening_hours = serializers.JSONField(source='horaires', read_only=True)
+    phone = serializers.CharField(source='telephone', read_only=True)
+    position_approximate = serializers.BooleanField(source='position_approximative', read_only=True)
 
     class Meta:
         model = Lieu
         fields = [
             'id', 'name', 'category', 'address', 'neighborhood', 'city',
             'lat', 'lon', 'source', 'status', 'proposed_by', 'proposer', 'created_at', 'reason', 'opening_hours',
+            'phone', 'position_approximate',
         ]
         read_only_fields = fields
 
@@ -316,6 +342,7 @@ class LieuCreationStaffSerializer(serializers.Serializer):
     lat = serializers.FloatField(min_value=-90, max_value=90)
     lon = serializers.FloatField(min_value=-180, max_value=180)
     opening_hours = serializers.JSONField(required=False, default=dict)
+    phone = ChampTelephone(required=False, default='')
 
     def validate_opening_hours(self, horaires):
         from .services.proximite import HorairesInvalides, valider_horaires
@@ -340,6 +367,7 @@ class LieuModificationStaffSerializer(serializers.Serializer):
     opening_hours = serializers.JSONField(
         required=False, help_text='{"mon": [["08:00", "20:00"]], ...} ; {} pour effacer (cf. services/proximite.py).',
     )
+    phone = ChampTelephone(required=False)
 
     def validate_opening_hours(self, horaires):
         from .services.proximite import HorairesInvalides, valider_horaires
@@ -380,7 +408,7 @@ class EtablissementSerializer(serializers.ModelSerializer):
         model = Etablissement
         fields = [
             'id', 'nom', 'type', 'adresse', 'ville', 'lat', 'lon',
-            'visible_sur_carte', 'cree_le',
+            'visible_sur_carte', 'telephone', 'cree_le',
         ]
         read_only_fields = fields
 
@@ -405,6 +433,7 @@ class EtablissementEcritureSerializer(serializers.Serializer):
     lat = serializers.FloatField()
     lon = serializers.FloatField()
     visible_sur_carte = serializers.BooleanField(required=False, default=True)
+    telephone = ChampTelephone(required=False)
 
     def create(self, validated_data):
         from django.contrib.gis.geos import Point
@@ -467,4 +496,6 @@ class PointCarteSerializer(serializers.Serializer):
     is_garage = serializers.BooleanField(help_text='Notable via /api/garages/{id}/reviews/.')
     rating_average = serializers.FloatField(allow_null=True, help_text='Note moyenne (1-5), null sans avis ou hors garage.')
     rating_count = serializers.IntegerField()
+    phone = serializers.CharField(allow_blank=True, help_text="'' si inconnu.")
+    position_approximate = serializers.BooleanField(help_text='Position = centre du quartier : ne pas guider vers ce point.')
     stars = serializers.FloatField(allow_null=True, help_text='Etoiles affichees (0,5 a 5), cf. garages.etoiles.')

@@ -126,6 +126,9 @@ class ItineraireCandidatSerializer(serializers.Serializer):
         help_text='Part des signalements dans duration_with_traffic, en secondes.',
     )
     reports_applied = SignalementApplique(many=True, source='signalements_appliques', required=False, default=list)
+    # Etat des routes (etat_routes/services/score_trajet.py) : good_m, degraded_m,
+    # bad_m, unknown_m, flood_prone_m, worst. Null si indisponible.
+    road_condition = serializers.JSONField(source='etat_route', required=False, allow_null=True, default=None)
 
 
 class ManoeuvreSerializer(serializers.ModelSerializer):

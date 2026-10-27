@@ -27,6 +27,9 @@ from datetime import datetime
 
 import redis
 
+from etat_routes.services.reglages import reglages
+from etat_routes.services.troncons import ATTRIBUTS_TRONCON, enregistrer_passages
+
 from .client_meili import ErreurMeili, tracer
 from .disjoncteur import DisjoncteurOuvert
 from .producteur_evenements import FLUX_POSITIONS, connexion_redis_telemetrie
@@ -119,12 +122,18 @@ class ConsommateurPositions:
         ]
 
         try:
-            edges, matched_points = tracer(points)
+            edges, matched_points = tracer(points, attributs=ATTRIBUTS_TRONCON)
         except (ErreurMeili, DisjoncteurOuvert) as exc:
             logger.info('Meili indisponible, %d positions laissees en pending: %s', len(ids), exc)
             return []
 
         self._accumuler_vitesses(edges, matched_points, paires)
+        # Etat des routes : passages par tranche de 100 m. Une erreur ici ne
+        # doit jamais bloquer le trafic temps reel (messages acquittes quand meme).
+        try:
+            enregistrer_passages(paires[0][1]['trajet_id'], edges, matched_points, paires, reglages())
+        except Exception:
+            logger.exception('Enregistrement des passages (etat des routes) impossible')
         return ids
 
     def _accumuler_vitesses(self, edges, matched_points, paires):

@@ -6,6 +6,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import environ
+from celery.schedules import crontab
 from django.core.exceptions import ImproperlyConfigured
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -75,6 +76,7 @@ INSTALLED_APPS = [
     'ads_admin',
     'infractions',
     'organisations',
+    'etat_routes',
 ]
 
 MIDDLEWARE = [
@@ -376,6 +378,16 @@ CELERY_BROKER_URL = env('CELERY_BROKER_URL', default='redis://localhost:6379/2')
 CELERY_RESULT_BACKEND = env('CELERY_RESULT_BACKEND', default='redis://localhost:6379/2')
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_BEAT_SCHEDULE = {
+    # Etat des routes : calcul nocturne (02:00 UTC = 03:00 a Douala) et purge
+    # des passages de plus de 90 jours (cf. etat_routes/tasks.py).
+    'calculer-etat-routes': {
+        'task': 'etat_routes.tasks.calculer_etat_routes',
+        'schedule': crontab(hour=2, minute=0),
+    },
+    'purger-passages-troncons': {
+        'task': 'etat_routes.tasks.purger_passages_anciens',
+        'schedule': crontab(hour=2, minute=30),
+    },
     'expirer-incidents': {
         'task': 'community.tasks.expirer_incidents',
         'schedule': 60.0,

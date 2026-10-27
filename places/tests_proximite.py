@@ -10,7 +10,7 @@ from django.urls import reverse
 from accounts.tests import connecter, creer_utilisateur
 
 from .models import AvisGarage, Etablissement, TypeEtablissement
-from .services import garages, proximite
+from .services import garages, positions, proximite
 from .tests import creer_lieu
 
 # 1 deg de latitude ~ 111 km : 0.005 ~ 555 m, 0.03 ~ 3,3 km.
@@ -115,3 +115,60 @@ class HorairesStaffTests(TestCase):
         self.assertEqual(pharmacie.horaires['sat'], [['08:00', '20:00']])
         mauvais = self.client.patch(url, {'opening_hours': {'mon': [['9h', '18h']]}}, content_type='application/json', **jetons)
         self.assertEqual(mauvais.status_code, 400)
+
+
+class PositionsApproximativesTests(TestCase):
+    def test_trois_lieux_au_meme_point_marques_et_classes_apres(self):
+        for i in range(3):
+            creer_lieu(f'Garage centre {i}', 4.03587, 9.7581, categorie='Garage / mécanique')
+        vrai = creer_lieu('Garage vrai', 4.0400, 9.7581, categorie='Garage / mécanique')
+        deux = [creer_lieu(f'Duo {i}', 4.045, 9.76, categorie='Pharmacie') for i in range(2)]
+        self.assertEqual(positions.marquer_positions_approximatives(), 3)
+        vrai.refresh_from_db()
+        deux[0].refresh_from_db()
+        self.assertFalse(vrai.position_approximative)
+        self.assertFalse(deux[0].position_approximative)  # 2 lieux au meme point : sous le seuil
+
+        with patch('places.services.proximite.maintenant_local', return_value=LUNDI_10H):
+            resultats = self.client.get(
+                reverse('places:proximite'), {'lat': 4.03587, 'lon': 9.7581, 'types': 'garage'},
+            ).json()['results']
+        # Le vrai garage (a ~490 m) passe avant ceux du centre du quartier (a 0 m).
+        self.assertEqual(resultats[0]['name'], 'Garage vrai')
+        self.assertEqual([r['position_approximate'] for r in resultats], [False, True, True, True])
+        self.assertEqual(resultats[0]['phone'], '')
+
+    def test_deplace_par_le_staff_n_est_plus_approximatif(self):
+        lieux = [creer_lieu(f'G{i}', 4.03587, 9.7581, categorie='Garage') for i in range(3)]
+        positions.marquer_positions_approximatives()
+        staff = creer_utilisateur('staff@easyway.local', is_staff=True)
+        jetons = connecter(self.client, staff.telephone)
+        url = reverse('places:staff-lieu-supprimer', kwargs={'id': lieux[0].id})
+        reponse = self.client.patch(url, {'lat': 4.0371, 'lon': 9.7599}, content_type='application/json', **jetons)
+        self.assertEqual(reponse.status_code, 200)
+        self.assertFalse(reponse.json()['position_approximate'])
+        liste = self.client.get(reverse('places:staff-lieux'), {'status': 'ALL', 'approximate': '1'}, **jetons).json()
+        self.assertEqual({r['name'] for r in liste['results']}, {'G1', 'G2'})
+
+
+class TelephoneTests(TestCase):
+    def setUp(self):
+        staff = creer_utilisateur('staff@easyway.local', is_staff=True)
+        self.jetons = connecter(self.client, staff.telephone)
+        self.lieu = creer_lieu('Pharmacie', 4.05, 9.70, categorie='Pharmacie')
+        self.url = reverse('places:staff-lieu-supprimer', kwargs={'id': self.lieu.id})
+
+    def test_numero_normalise_et_expose(self):
+        reponse = self.client.patch(self.url, {'phone': '6 77 12 34 56'}, content_type='application/json', **self.jetons)
+        self.assertEqual(reponse.status_code, 200, reponse.content)
+        self.assertEqual(reponse.json()['phone'], '+237677123456')
+        detail = self.client.get(reverse('places:lieu-detail', kwargs={'id': self.lieu.id})).json()
+        self.assertEqual(detail['phone'], '+237677123456')
+
+    def test_numero_invalide_refuse_et_vide_accepte(self):
+        self.assertEqual(
+            self.client.patch(self.url, {'phone': '12'}, content_type='application/json', **self.jetons).status_code, 400,
+        )
+        self.assertEqual(
+            self.client.patch(self.url, {'phone': ''}, content_type='application/json', **self.jetons).json()['phone'], '',
+        )

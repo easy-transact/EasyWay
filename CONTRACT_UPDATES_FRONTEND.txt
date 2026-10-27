@@ -258,3 +258,59 @@ signales, deja pris en compte par le calcul d'itineraire).
 
   Ces resultats incluent les lieux importes (stations, pharmacies... de tout le
   Cameroun), que la carte (places/map) n'affiche pas.
+
+
+11. NOUVEAU — telephone et position approximative des lieux (27/10/2026)
+
+  Dans places/nearby, places/map, places/along-route et GET /api/places/{id}/ :
+    "phone": "+237677123456"   format international, a composer tel quel
+                               (tel:+237...) ; "" si inconnu, jamais null
+    "position_approximate": true | false
+
+  position_approximate = true : le lieu est au centre de son quartier, pas a
+  son adresse (plusieurs lieux importes partagent exactement ce point, ex.
+  69 lieux a Makepe en 4.03587, 9.7581). Ne pas proposer "Y aller" vers ce
+  point (ou avec "Position approximative") ; "Appeler" reste valable.
+  places/nearby classe d'abord les lieux bien places, par distance, puis les
+  approximatifs, par distance.
+
+  Les numeros sont encore rares : le fichier des lieux importes n'en contient
+  aucun. Ils sont saisis depuis le back-office, ou viendront d'un nouvel
+  import avec une colonne telephone.
+
+  Avis des garages : c'est deja disponible, cf. section 9 (POST /api/garages/{id}/reviews/).
+  Pour les etoiles, afficher "stars" (pas rating_average).
+
+
+12. NOUVEAU — etat des routes, V1 (27/10/2026, spec ETAT_DES_ROUTES du 29/09)
+
+  Note de 0 a 100 par tronçon d'environ 100 m, calculee chaque nuit (03:00) a
+  partir des signalements (nids-de-poule, inondations, travaux, voie reduite,
+  route glissante) et des vitesses mesurees de nuit (22 h - 5 h). Les chocs
+  (accelerometre) sont la V2.
+  Une route sans donnees est INCONNU, jamais BON.
+
+  Carte :
+    GET /api/road-conditions/?cells=<h3 res 8, max 50>    (public)
+    [ { "segment_id": "123456:4", "geometry": "<polyline6>", "score": 32,
+        "class": "MAUVAIS" | "DEGRADE" | null, "confidence": 0.6,
+        "causes": ["NID_DE_POULE", "VITESSE"], "flood_prone": false,
+        "updated_at": "..." } ]
+    Seuls les tronçons DEGRADE/MAUVAIS et les inondables (class null s'ils ne
+    sont pas degrades) sont renvoyes. Stable une heure : inutile de rappeler
+    plus souvent. causes : sous-types de signalement, "VITESSE" (circulation
+    ralentie de nuit). segment_id : "{arete du graphe}:{tranche}" (et non
+    "{way_id}:{index}" comme dans la spec : le graphe ne donne pas la position
+    dans la voie OSM) -- a traiter comme un identifiant opaque.
+
+  Score du trajet, dans chaque element de POST /api/routes/calculate/ :
+    "road_condition": { "good_m", "degraded_m", "bad_m", "unknown_m",
+                        "flood_prone_m",
+                        "worst": [ {segment_id, class, causes,
+                                    distance_from_start_m} ] }   (3 au plus,
+                                    dans l'ordre du trajet)
+    good_m + degraded_m + bad_m + unknown_m = distance. Afficher unknown_m tel
+    quel ("65 % en bon etat, 19 % inconnu"). null si indisponible (Valhalla).
+
+  Au debut, presque tout sera "inconnu" : la vitesse de nuit demande 20
+  passages de 5 conducteurs sur 60 jours, et les signalements 2 personnes.

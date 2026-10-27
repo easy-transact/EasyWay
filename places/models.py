@@ -88,6 +88,12 @@ class Lieu(models.Model):
     # back-office : {"mon": [["08:00", "20:00"]], ...} -- format et calcul de
     # "ouvert maintenant" dans services/proximite.py. {} = inconnus.
     horaires = models.JSONField(default=dict, blank=True)
+    # Format international (+237...), '' si inconnu (cf. serializers.ChampTelephone).
+    telephone = models.CharField(max_length=32, blank=True, default='')
+    # Position partagee par plusieurs lieux importes (centre du quartier plutot
+    # que l'adresse reelle, cf. services/positions.py) : "Y aller" n'y mene pas.
+    # Remis a False quand le staff deplace le lieu sur la carte.
+    position_approximative = models.BooleanField(default=False, db_index=True)
 
     class Meta:
         db_table = 'lieu'
@@ -210,6 +216,7 @@ class Etablissement(models.Model):
     position = gis_models.PointField(srid=4326, geography=True)
 
     visible_sur_carte = models.BooleanField(default=True)
+    telephone = models.CharField(max_length=32, blank=True, default='')
 
     cree_le = models.DateTimeField(auto_now_add=True)
     cree_par = models.ForeignKey(

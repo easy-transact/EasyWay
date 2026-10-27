@@ -686,3 +686,24 @@ class ImportLieuxCsvTests(TestCase):
     def test_tout_sans_remplacer_refuse(self):
         with self.assertRaises(CommandError):
             call_command('import_lieux_csv', self.chemin, '--tout')
+
+
+class ImportLieuxCsvTelephoneTests(TestCase):
+    def test_colonne_telephone_et_positions_approximatives(self):
+        contenu = (
+            'nom;categorie;ville;latitude;longitude;sources;telephone\n'
+            'Garage A;Garage / mécanique;Douala;4.03587;9.7581;Overture;677123456\n'
+            'Garage B;Garage / mécanique;Douala;4.03587;9.7581;Overture;pas un numero\n'
+            'Garage C;Garage / mécanique;Douala;4.03587;9.7581;Overture;\n'
+            'Garage D;Garage / mécanique;Douala;4.04;9.76;OpenStreetMap;\n'
+        )
+        with tempfile.NamedTemporaryFile('w', suffix='.csv', encoding='utf-8', delete=False) as fichier:
+            fichier.write(contenu)
+        self.addCleanup(os.remove, fichier.name)
+        call_command('import_lieux_csv', fichier.name, stdout=io.StringIO())
+        lieux = {l.nom: l for l in Lieu.objects.all()}
+        self.assertEqual((lieux['Garage A'].telephone, lieux['Garage B'].telephone), ('+237677123456', ''))
+        self.assertEqual(
+            [lieux[n].position_approximative for n in ('Garage A', 'Garage B', 'Garage C', 'Garage D')],
+            [True, True, True, False],
+        )

@@ -44,6 +44,7 @@ def point_lieu(lieu):
         'id': str(lieu.id), 'kind': 'place', 'name': lieu.nom, 'category': lieu.categorie,
         'category_label': lieu.categorie, 'address': lieu.adresse, 'neighborhood': lieu.quartier or '',
         'city': lieu.ville, 'lat': lieu.position.y, 'lon': lieu.position.x,
+        'phone': lieu.telephone, 'position_approximate': lieu.position_approximative,
     }
 
 
@@ -53,6 +54,7 @@ def point_etablissement(etablissement):
         'category': etablissement.type, 'category_label': etablissement.get_type_display(),
         'address': etablissement.adresse, 'neighborhood': '', 'city': etablissement.ville,
         'lat': etablissement.position.y, 'lon': etablissement.position.x,
+        'phone': etablissement.telephone, 'position_approximate': False,
     }
 
 
