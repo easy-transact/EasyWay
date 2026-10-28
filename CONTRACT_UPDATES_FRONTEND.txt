@@ -348,3 +348,15 @@ signales, deja pris en compte par le calcul d'itineraire).
 
   Renvoyer la route telle quelle a POST /api/trips/ et switch-route : le
   repere est garde avec les manoeuvres du trajet.
+
+
+15. CORRIGE — durees en ville et itineraires alternatifs (28/10/2026)
+  Rien a changer cote appli.
+  - En ville (trajets de plus de 1 km), routes/calculate propose maintenant
+    jusqu'a 3 itineraires vraiment differents (avant : souvent un seul, ex.
+    Akwa Palace -> Total Bonateki).
+  - Durees plus realistes a Douala et Yaounde : les vitesses par defaut du
+    moteur sont corrigees selon l'heure (x 3 aux heures de pointe en semaine,
+    x 2 en journee, x 1,4 la nuit), sauf la ou le trafic EasyWay est mesure.
+    duration, duration_with_traffic et la duree des manoeuvres sont corrigees
+    ensemble. Valeurs de depart, a caler sur les trajets reels.

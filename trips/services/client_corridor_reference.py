@@ -105,6 +105,7 @@ def _mettre_a_echelle(trip, facteur):
     return {
         **trip,
         'summary': {**trip['summary'], 'time': round(trip['summary']['time'] * facteur)},
+        'corridor': True,  # duree a l'echelle du corridor : pas de correction ville
         'legs': [
             {**leg, 'maneuvers': [{**m, 'time': m.get('time', 0) * facteur} for m in leg['maneuvers']]}
             for leg in trip['legs']
@@ -212,6 +213,7 @@ class ClientCorridorReference(ClientRoutage):
             # viennent d'appels/calculs independants.
             'legs': [{'shape': encoder_polyline6(tous_points), 'maneuvers': toutes_manoeuvres}],
             'degrade': False,
+            'corridor': True,  # duree de confiance : pas de correction ville (duree_ville)
         }]
 
     def _connecteur(self, point_a, point_b, options, cap_origine=None):

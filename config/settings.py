@@ -2,6 +2,7 @@
 Django settings for config project.
 """
 
+import sys
 from datetime import timedelta
 from pathlib import Path
 
@@ -317,6 +318,11 @@ POINTS_TRAJETS_ACTIF = env.bool('POINTS_TRAJETS_ACTIF', default=False)
 # cap ignore sous 10 km/h (origin_speed_kmh), comparaison avec un calcul sans
 # cap quand la vitesse est inconnue. False = cap transmis tel quel, comme avant.
 CONTROLE_CAP_ORIGINE = env.bool('CONTROLE_CAP_ORIGINE', default=True)
+
+# Correction des durees Valhalla en agglomeration (trips/services/duree_ville.py).
+# Coupee par defaut pendant les tests : le facteur depend de l'heure, les
+# tests de duree ne seraient plus reproductibles (tests_duree_ville la remet).
+CORRECTION_DUREE_VILLE = env.bool('CORRECTION_DUREE_VILLE', default='test' not in sys.argv[1:2])
 
 # Cache du calcul d'itineraire (ServiceItineraire, 3 min) et compteurs du
 # disjoncteur ClientValhalla. IGNORE_EXCEPTIONS : un Redis indisponible degrade

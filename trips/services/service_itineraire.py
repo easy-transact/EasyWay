@@ -17,7 +17,7 @@ from etat_routes.services import evitement
 from etat_routes.services.score_trajet import completer as completer_etat_route
 
 from ..models import NiveauTrafic, RoadClass
-from . import retards_signalements, service_trafic
+from . import duree_ville, retards_signalements, service_trafic
 from .client_corridor_reference import ClientCorridorReference
 from .client_valhalla import ClientValhalla
 from .corridors import trouver_corridor
@@ -251,7 +251,7 @@ class ServiceItineraire:
         else:
             trafic = service_trafic.evaluer_route(geometrie)
 
-        return {
+        candidat = {
             'identifiant': hashlib.sha1(f"{geometrie}{index}".encode()).hexdigest()[:16],
             'libelle': f"Itineraire {index + 1}" if index else 'Itineraire recommande',
             'distance': round(trip['summary']['length'] * 1000),  # km -> m
@@ -277,3 +277,8 @@ class ServiceItineraire:
             ],
             'degrade': trip.get('degrade', False),
         }
+        # Durees Valhalla trop optimistes en ville : correction selon l'heure,
+        # sauf pour un corridor de reference (duree deja de confiance).
+        if not trip.get('corridor'):
+            duree_ville.corriger(candidat, trafic)
+        return candidat

@@ -135,6 +135,9 @@ def _evaluer_sans_cache(geometrie_encodee: str) -> dict:
 
     niveau_pire = NiveauTrafic.NORMAL
     duree_estimee_s = 0.0
+    # Part mesuree (trafic EasyWay) vs part a la vitesse Valhalla : seule la
+    # seconde recoit la correction ville (cf. duree_ville.corriger).
+    duree_mesuree_s = duree_valhalla_s = 0.0
     a_mesure_une_arete = False
 
     for edge in edges:
@@ -155,9 +158,17 @@ def _evaluer_sans_cache(geometrie_encodee: str) -> dict:
         vitesse_a_utiliser = float(recente) if recente else edge.get('speed')
         if vitesse_a_utiliser:
             a_mesure_une_arete = True
-            duree_estimee_s += longueur_km / vitesse_a_utiliser * 3600
+            duree_arete_s = longueur_km / vitesse_a_utiliser * 3600
+            duree_estimee_s += duree_arete_s
+            if recente:
+                duree_mesuree_s += duree_arete_s
+            else:
+                duree_valhalla_s += duree_arete_s
 
     if not a_mesure_une_arete:
         return repli
 
-    return {'niveau_trafic': niveau_pire, 'duree_avec_trafic': round(duree_estimee_s), 'etat_route': etat_route}
+    return {
+        'niveau_trafic': niveau_pire, 'duree_avec_trafic': round(duree_estimee_s), 'etat_route': etat_route,
+        'duree_mesuree_s': round(duree_mesuree_s), 'duree_valhalla_s': round(duree_valhalla_s),
+    }
