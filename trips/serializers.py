@@ -385,6 +385,10 @@ class MeilleurItineraireSerializer(serializers.Serializer):
         many=True, required=False, default=list,
         help_text='Etapes pas encore atteintes, dans l\'ordre (vide si aucune).',
     )
+    avoid = PointEvitementSerializer(
+        many=True, required=False, default=list,
+        help_text='Points a eviter (memes que routes/calculate) : le recalcul en cours de route les contourne aussi.',
+    )
 
 
 class AutreItineraireSerializer(ItineraireCandidatSerializer):

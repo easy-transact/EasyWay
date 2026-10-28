@@ -49,7 +49,7 @@ def recouvrement(candidat, reference):
     return proches / len(points)
 
 
-def chercher_meilleur(trajet, position, utilisateur, cap=None, etapes_restantes=None):
+def chercher_meilleur(trajet, position, utilisateur, cap=None, etapes_restantes=None, eviter=None):
     """position : (lat, lon). Retourne un dict :
       reason : BETTER_FOUND | NO_BETTER | NO_ALTERNATIVE | OFF_ROUTE | NO_ROUTE
       better_route : candidat (forme ServiceItineraire) si BETTER_FOUND
@@ -60,7 +60,7 @@ def chercher_meilleur(trajet, position, utilisateur, cap=None, etapes_restantes=
         depart=position,
         arrivee=(trajet.position_destination.y, trajet.position_destination.x),
         utilisateur=utilisateur, cap_origine=cap, alternatives=True, etapes=etapes_restantes or [],
-        type_vehicule=trajet.type_vehicule or None,
+        type_vehicule=trajet.type_vehicule or None, eviter=eviter or [],
     )
     if not candidats:
         return {**resultat, 'reason': NO_ROUTE}
@@ -87,7 +87,7 @@ def chercher_meilleur(trajet, position, utilisateur, cap=None, etapes_restantes=
 ALTERNATIVES_FOUND = 'ALTERNATIVES_FOUND'
 
 
-def chercher_autres(trajet, position, utilisateur, cap=None, etapes_restantes=None):
+def chercher_autres(trajet, position, utilisateur, cap=None, etapes_restantes=None, eviter=None):
     """Le conducteur DEMANDE un autre itineraire ("je veux une autre route") :
     contrairement a chercher_meilleur, aucune condition de gain -- toutes les
     routes differentes de celle suivie, plus lentes comprises, de la plus
@@ -99,7 +99,7 @@ def chercher_autres(trajet, position, utilisateur, cap=None, etapes_restantes=No
         depart=position,
         arrivee=(trajet.position_destination.y, trajet.position_destination.x),
         utilisateur=utilisateur, cap_origine=cap, alternatives=True, etapes=etapes_restantes or [],
-        type_vehicule=trajet.type_vehicule or None,
+        type_vehicule=trajet.type_vehicule or None, eviter=eviter or [],
     )
     if not candidats:
         return {'reason': NO_ROUTE, 'routes': [], 'current_duration_s': None}

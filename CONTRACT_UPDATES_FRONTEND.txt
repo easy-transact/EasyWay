@@ -383,3 +383,15 @@ signales, deja pris en compte par le calcul d'itineraire).
   Les deux appels coexistent :
     better-route        automatique, toutes les 1-2 min : route plus rapide ?
     alternative-routes  a la demande du conducteur : autres routes, meme plus lentes.
+
+
+17. AJOUT — points evites en cours de route (28/10/2026)
+  better-route et alternative-routes acceptent maintenant le meme champ que
+  routes/calculate :
+    "avoid": [{"lat": ..., "lon": ...}]
+  Envoyer les points evites par le conducteur : le recalcul les contourne.
+  Si la route suivie passe par un point evite, better-route repond OFF_ROUTE
+  (refaire routes/calculate avec avoid) et alternative-routes renvoie toutes
+  les routes qui le contournent (time_difference_s null).
+  alternative-routes reste facultatif : l'appli peut aussi refaire
+  routes/calculate depuis sa position et ecarter elle-meme la route suivie.

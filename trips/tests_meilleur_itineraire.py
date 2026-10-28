@@ -136,3 +136,27 @@ class AutresItinerairesTests(TestCase):
         donnees = self.demander([candidat(loin, 600, 'a'), candidat(loin, 300, 'b')])
         self.assertEqual([r['route_id'] for r in donnees['routes']], ['b', 'a'])
         self.assertIsNone(donnees['routes'][0]['time_difference_s'])
+
+
+class PointsEvitesEnCoursDeRouteTests(TestCase):
+    """better-route et alternative-routes contournent aussi les points evites."""
+
+    def setUp(self):
+        cache.clear()
+        utilisateur = creer_utilisateur()
+        self.jetons = connecter(self.client, utilisateur.telephone)
+        self.trajet = _trajet_actif_pour(
+            utilisateur, geometrie=LineString(ROUTE_SUIVIE, srid=4326), position_destination='POINT(9.73 4.05)',
+        )
+
+    def test_avoid_transmis_au_calcul(self):
+        for nom in ('trips:trajet-meilleur-itineraire', 'trips:trajet-autres-itineraires'):
+            with patch('trips.services.meilleur_itineraire.ServiceItineraire') as Service:
+                Service.return_value.calculer.return_value = [candidat(ROUTE_SUIVIE, 300, 'suivie')]
+                reponse = self.client.post(
+                    reverse(nom, kwargs={'id': self.trajet.id}),
+                    {'lat': 4.05, 'lon': 9.705, 'avoid': [{'lat': 4.05, 'lon': 9.72}]},
+                    content_type='application/json', **self.jetons,
+                )
+            self.assertEqual(reponse.status_code, 200, reponse.content)
+            self.assertEqual(Service.return_value.calculer.call_args.kwargs['eviter'], [(4.05, 9.72)])

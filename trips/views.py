@@ -297,6 +297,7 @@ class MeilleurItineraireView(APIView):
         resultat = chercher_meilleur(
             trajet, (donnees['lat'], donnees['lon']), request.user, cap=donnees['heading'],
             etapes_restantes=[(p['lat'], p['lon']) for p in donnees['remaining_waypoints']],
+            eviter=[(p['lat'], p['lon']) for p in donnees['avoid']],
         )
         return Response(MeilleurItineraireReponseSerializer(resultat).data)
 
@@ -328,6 +329,7 @@ class AutresItinerairesView(APIView):
         resultat = chercher_autres(
             trajet, (donnees['lat'], donnees['lon']), request.user, cap=donnees['heading'],
             etapes_restantes=[(p['lat'], p['lon']) for p in donnees['remaining_waypoints']],
+            eviter=[(p['lat'], p['lon']) for p in donnees['avoid']],
         )
         return Response(AutresItinerairesReponseSerializer(resultat).data)
 
