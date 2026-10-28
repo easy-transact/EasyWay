@@ -395,3 +395,50 @@ signales, deja pris en compte par le calcul d'itineraire).
   les routes qui le contournent (time_difference_s null).
   alternative-routes reste facultatif : l'appli peut aussi refaire
   routes/calculate depuis sa position et ecarter elle-meme la route suivie.
+
+
+18. NOUVEAU — itineraire le plus SUR, pas seulement le plus rapide (28/10/2026)
+  Avant : la route recommandee etait la plus rapide ; un accident ne coutait
+  que 1-2 min de retard simule et ne faisait presque jamais changer de route.
+  Maintenant chaque route recoit un risque (dangers signales dessus, dans le
+  bon sens, ponderes par leur gravite et leur fiabilite : votes, validation
+  moderation, age ; x1,5 la nuit ; etat des routes) et la recommandee est la
+  meilleure en  duree + risque  (1 point = 1 min), jamais plus de 5 a 10 min
+  plus longue que la plus rapide. Si la meilleure route traverse un danger
+  grave et confirme, le serveur demande en plus une route qui le contourne.
+
+  POST /api/routes/calculate/ -- meme reponse (liste), chaque route a en plus :
+    "risk_score": 8.0,
+    "risk_level": "LOW" | "MEDIUM" | "HIGH",
+    "risks": [ { "id", "type", "subtype", "distance_from_start_m",
+                 "severity" (0-10), "confidence" (0-1), "points" } ],
+    "selection_reason": { "code": "FASTEST" | "SAFER" | "BETTER_ROAD",
+                          "extra_time_s": 120,
+                          "avoided": [ {"type", "subtype", "severity"} ] }
+                        (sur la recommandee seulement, null sur les autres)
+  A afficher : "Itineraire choisi pour eviter un accident (+2 min)" quand
+  code = SAFER ; un badge risk_level ; les risks sur la carte.
+  L'appli peut n'afficher que la recommandee : les autres restent
+  disponibles (liste complete, ou alternative-routes pendant le trajet).
+
+  POST /api/trips/{id}/better-route/ -- nouvelles valeurs de reason :
+    REROUTE_REQUIRED  route barree CONFIRMEE devant : better_route a
+                      appliquer (switch-route), meme plus longue.
+    BETTER_FOUND      inchange : plus rapide (2 min et 10 %), et
+                      sans plus de risque.
+    SAFER_FOUND       better_route evite un danger serieux devant
+                      (avoided_hazards) : "Accident signale a 1,5 km.
+                      Contourner ? +2 min". Jamais deux fois pour le meme
+                      danger (sauf s'il s'aggrave), au plus une fois / 3 min.
+    HAZARD_AHEAD      danger serieux devant mais pas de contournement utile
+                      (ou trop proche, < 300 m) : alerte seulement
+                      ("Accident dans 800 m, ralentissez"), better_route null.
+    NO_BETTER, NO_ALTERNATIVE, OFF_ROUTE, NO_ROUTE : inchanges.
+  Toute valeur inconnue de reason = NO_BETTER.
+  Champs ajoutes : "risk_before", "risk_after", "hazards_ahead": [...],
+  "avoided_hazards": [...] (meme forme que risks). time_saved_s peut etre
+  NEGATIF (route plus sure mais plus longue).
+
+  Conseil : sur incident.created (WebSocket) d'un danger grave pres de la
+  route suivie, appeler better-route tout de suite au lieu d'attendre le
+  prochain appel periodique.

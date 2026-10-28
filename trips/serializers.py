@@ -89,6 +89,16 @@ class SignalementApplique(serializers.Serializer):
     applied_as = serializers.CharField()
 
 
+class DangerSerializer(serializers.Serializer):
+    id = serializers.UUIDField()
+    type = serializers.CharField()
+    subtype = serializers.CharField(allow_blank=True)
+    distance_from_start_m = serializers.IntegerField()
+    severity = serializers.IntegerField(help_text='Gravite 0-10.')
+    confidence = serializers.FloatField(help_text='Fiabilite 0-1 (votes, validation, age).')
+    points = serializers.FloatField()
+
+
 class ManoeuvreCandidatSerializer(serializers.Serializer):
     type = serializers.CharField()
     instruction = serializers.CharField(allow_blank=True)
@@ -146,6 +156,21 @@ class ItineraireCandidatSerializer(serializers.Serializer):
     # Etat des routes (etat_routes/services/score_trajet.py) : good_m, degraded_m,
     # bad_m, unknown_m, flood_prone_m, worst. Null si indisponible.
     road_condition = serializers.JSONField(source='etat_route', required=False, allow_null=True, default=None)
+    # Risque (trips/services/risque_itineraire.py) : la recommandee est la
+    # meilleure en duree + risque, pas seulement la plus rapide.
+    risk_score = serializers.FloatField(
+        source='risque', required=False, default=0,
+        help_text='Points de risque (somme gravite x fiabilite des dangers + etat des routes).',
+    )
+    risk_level = serializers.ChoiceField(
+        choices=['LOW', 'MEDIUM', 'HIGH'], source='niveau_risque', required=False, allow_null=True, default=None,
+    )
+    risks = DangerSerializer(many=True, source='risques', required=False, default=list)
+    selection_reason = serializers.JSONField(
+        source='raison_choix', required=False, allow_null=True, default=None,
+        help_text='Sur la recommandee : {"code": FASTEST|SAFER|BETTER_ROAD, "extra_time_s", "avoided": '
+                  '[{type, subtype, severity}]}. Null sur les autres.',
+    )
 
 
 class ManoeuvreSerializer(serializers.ModelSerializer):
@@ -405,11 +430,18 @@ class AutresItinerairesReponseSerializer(serializers.Serializer):
 
 
 class MeilleurItineraireReponseSerializer(serializers.Serializer):
-    reason = serializers.ChoiceField(choices=['BETTER_FOUND', 'NO_BETTER', 'NO_ALTERNATIVE', 'OFF_ROUTE', 'NO_ROUTE'])
+    reason = serializers.ChoiceField(choices=[
+        'REROUTE_REQUIRED', 'BETTER_FOUND', 'SAFER_FOUND', 'HAZARD_AHEAD',
+        'NO_BETTER', 'NO_ALTERNATIVE', 'OFF_ROUTE', 'NO_ROUTE',
+    ])
     better_route = ItineraireCandidatSerializer(allow_null=True)
     current_duration_s = serializers.IntegerField(allow_null=True)
     new_duration_s = serializers.IntegerField(allow_null=True)
-    time_saved_s = serializers.IntegerField(allow_null=True)
+    time_saved_s = serializers.IntegerField(allow_null=True, help_text='Negatif : la route proposee est plus longue (SAFER_FOUND, REROUTE_REQUIRED).')
+    risk_before = serializers.FloatField(allow_null=True, help_text='Risque restant sur la route suivie.')
+    risk_after = serializers.FloatField(allow_null=True, help_text='Risque de better_route.')
+    hazards_ahead = DangerSerializer(many=True, help_text='Dangers serieux (gravite >= 6) devant sur la route suivie.')
+    avoided_hazards = DangerSerializer(many=True, help_text='Ceux que better_route evite.')
 
 
 class ChangerItineraireSerializer(serializers.Serializer):

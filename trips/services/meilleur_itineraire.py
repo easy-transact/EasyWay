@@ -3,16 +3,22 @@ Meilleur itineraire en cours de route : pendant la navigation, l'appli envoie
 sa position toutes les 1-2 min (POST /api/trips/{id}/better-route/). On
 recalcule les itineraires depuis cette position avec le trafic temps reel
 (deja injecte dans Valhalla, cf. trafic_temps_reel.py), on reconnait parmi
-eux celui que le conducteur suit deja, et on propose le plus rapide s'il fait
-gagner assez de temps. Le conducteur accepte ou ignore : jamais de
+eux celui que le conducteur suit deja, et on propose : un changement oblige
+si la route est barree devant, le plus rapide s'il fait gagner assez de temps
+sans plus de risque, ou le plus sur s'il evite un danger serieux devant
+(cf. risque_itineraire). Le conducteur accepte ou ignore : jamais de
 changement impose (POST /api/trips/{id}/switch-route/ pour accepter).
 """
 
+import time
+
 from django.contrib.gis.geos import LineString, Point
+from django.core.cache import cache
 
 from ..polyline import decoder_polyline6
+from . import risque_itineraire as risque
 from .geo import distance_haversine_m
-from .service_itineraire import ServiceItineraire
+from .service_itineraire import COSTING_DEFAUT, COSTING_PAR_VEHICULE, ServiceItineraire
 
 # Gain minimal pour deranger le conducteur : les deux conditions a la fois
 # (2 min sur 10 min de trajet = 20 %, mais 2 min sur 2 h ne vaut pas un
@@ -27,7 +33,21 @@ SEUIL_RECOUVREMENT = 0.7
 NB_POINTS_ECHANTILLON = 60
 METRES_PAR_DEGRE = 111_320
 
+# "Plus sur" (cf. risque_itineraire) : le cout (duree + risque) doit baisser
+# d'au moins 3 min-equivalent ET 15 %, en evitant au moins un danger serieux.
+BAISSE_MIN_COUT_S = 180
+BAISSE_MIN_RATIO = 0.15
+# Une route plus rapide n'est proposee que si elle n'ajoute pas plus d'1 point de risque.
+TOLERANCE_RISQUE = 1
+PAUSE_PROPOSITION_S = 180
+AGGRAVATION = 1.5             # un danger deja propose revient s'il vaut 50 % de points en plus
+DUREE_MEMOIRE_S = 3 * 3600
+CLE_PROPOSITIONS = 'better-route:propositions:'
+
+REROUTE_REQUIRED = 'REROUTE_REQUIRED'
 BETTER_FOUND = 'BETTER_FOUND'
+SAFER_FOUND = 'SAFER_FOUND'
+HAZARD_AHEAD = 'HAZARD_AHEAD'
 NO_BETTER = 'NO_BETTER'
 NO_ALTERNATIVE = 'NO_ALTERNATIVE'
 OFF_ROUTE = 'OFF_ROUTE'
@@ -49,13 +69,47 @@ def recouvrement(candidat, reference):
     return proches / len(points)
 
 
+def _dangers_serieux(candidat):
+    return [d for d in candidat.get('risques') or [] if d['severity'] >= risque.GRAVITE_SERIEUSE]
+
+
+def _deja_propose(trajet, evites):
+    """Anti-harcelement : pas deux propositions "plus sur" a moins de
+    PAUSE_PROPOSITION_S, ni deux fois pour le meme danger -- sauf s'il s'est
+    aggrave depuis (confirme par d'autres, valide par la moderation)."""
+    memoire = cache.get(f'{CLE_PROPOSITIONS}{trajet.id}') or {}
+    if time.time() - memoire.get('le', 0) < PAUSE_PROPOSITION_S:
+        return True
+    connus = memoire.get('dangers', {})
+    return all(d['id'] in connus and d['points'] < connus[d['id']] * AGGRAVATION for d in evites)
+
+
+def _memoriser_proposition(trajet, evites):
+    cle = f'{CLE_PROPOSITIONS}{trajet.id}'
+    memoire = cache.get(cle) or {}
+    dangers = {**memoire.get('dangers', {}), **{d['id']: d['points'] for d in evites}}
+    cache.set(cle, {'le': time.time(), 'dangers': dangers}, timeout=DUREE_MEMOIRE_S)
+
+
+def troncon_restant(coords, position):
+    """Partie de la geometrie (liste (lon, lat)) qui reste a parcourir depuis
+    position (lat, lon)."""
+    parcouru = troncon_parcouru(coords, position)
+    return [(position[1], position[0]), *coords[len(parcouru):]] if coords else []
+
+
 def chercher_meilleur(trajet, position, utilisateur, cap=None, etapes_restantes=None, eviter=None):
     """position : (lat, lon). Retourne un dict :
-      reason : BETTER_FOUND | NO_BETTER | NO_ALTERNATIVE | OFF_ROUTE | NO_ROUTE
-      better_route : candidat (forme ServiceItineraire) si BETTER_FOUND
-      current_duration_s, new_duration_s, time_saved_s."""
+      reason : REROUTE_REQUIRED | BETTER_FOUND | SAFER_FOUND | HAZARD_AHEAD |
+               NO_BETTER | NO_ALTERNATIVE | OFF_ROUTE | NO_ROUTE
+      better_route : candidat (forme ServiceItineraire) si REROUTE_REQUIRED,
+               BETTER_FOUND ou SAFER_FOUND
+      current_duration_s, new_duration_s, time_saved_s (negatif : plus long),
+      risk_before, risk_after, hazards_ahead (dangers serieux devant sur la
+      route suivie), avoided_hazards (ceux que better_route evite)."""
     resultat = {'reason': NO_BETTER, 'better_route': None, 'current_duration_s': None,
-                'new_duration_s': None, 'time_saved_s': None}
+                'new_duration_s': None, 'time_saved_s': None, 'risk_before': None, 'risk_after': None,
+                'hazards_ahead': [], 'avoided_hazards': []}
     candidats = ServiceItineraire().calculer(
         depart=position,
         arrivee=(trajet.position_destination.y, trajet.position_destination.x),
@@ -64,8 +118,20 @@ def chercher_meilleur(trajet, position, utilisateur, cap=None, etapes_restantes=
     )
     if not candidats:
         return {**resultat, 'reason': NO_ROUTE}
-    if trajet.geometrie is None or len(candidats) < 2:
+    if trajet.geometrie is None:
         return {**resultat, 'reason': NO_ALTERNATIVE}
+
+    # Route barree confirmee devant sur la route suivie : les candidats la
+    # contournent deja (exclue du calcul) -- changement necessaire, meme plus long.
+    costing = COSTING_PAR_VEHICULE.get(trajet.type_vehicule or utilisateur.type_vehicule, COSTING_DEFAUT)
+    fermetures = risque.fermetures_devant(troncon_restant(list(trajet.geometrie.coords), position), costing)
+    if fermetures:
+        nouvelle = candidats[0]
+        return {
+            **resultat, 'reason': REROUTE_REQUIRED, 'better_route': nouvelle,
+            'new_duration_s': duree_effective(nouvelle), 'risk_after': nouvelle.get('risque'),
+            'hazards_ahead': fermetures, 'avoided_hazards': fermetures,
+        }
 
     reference = LineString(trajet.geometrie.coords, srid=4326)
     scores = [(recouvrement(c, reference), c) for c in candidats]
@@ -75,13 +141,43 @@ def chercher_meilleur(trajet, position, utilisateur, cap=None, etapes_restantes=
         # (routes/calculate), pas une proposition de "meilleur" itineraire.
         return {**resultat, 'reason': OFF_ROUTE}
 
-    meilleur = min(candidats, key=duree_effective)
-    actuelle, nouvelle = duree_effective(actuel), duree_effective(meilleur)
-    resultat.update(current_duration_s=actuelle, new_duration_s=nouvelle)
-    gain = actuelle - nouvelle
-    if meilleur is actuel or gain < GAIN_MIN_S or gain < GAIN_MIN_RATIO * actuelle:
-        return resultat
-    return {**resultat, 'reason': BETTER_FOUND, 'better_route': meilleur, 'time_saved_s': gain}
+    actuelle = duree_effective(actuel)
+    devant = _dangers_serieux(actuel)
+    resultat.update(current_duration_s=actuelle, risk_before=actuel.get('risque', 0), hazards_ahead=devant)
+    autres = [c for c in candidats if c is not actuel]
+    if not autres:
+        return {**resultat, 'reason': HAZARD_AHEAD if devant else NO_ALTERNATIVE}
+
+    def proposer(raison, route, evites=()):
+        return {**resultat, 'reason': raison, 'better_route': route, 'new_duration_s': duree_effective(route),
+                'time_saved_s': actuelle - duree_effective(route), 'risk_after': route.get('risque', 0),
+                'avoided_hazards': list(evites)}
+
+    # 1. Plus rapide, sans etre plus risquee.
+    rapide = min(autres, key=duree_effective)
+    gain = actuelle - duree_effective(rapide)
+    if (gain >= GAIN_MIN_S and gain >= GAIN_MIN_RATIO * actuelle
+            and rapide.get('risque', 0) <= actuel.get('risque', 0) + TOLERANCE_RISQUE):
+        sur_rapide = {d['id'] for d in rapide.get('risques') or []}
+        return proposer(BETTER_FOUND, rapide, [d for d in devant if d['id'] not in sur_rapide])
+
+    # 2. Plus sure : evite un danger serieux encore assez loin pour changer de
+    # route, pour un cout (duree + risque) nettement plus bas, detour borne.
+    contournables = [d for d in devant if d['distance_from_start_m'] >= risque.DISTANCE_MIN_CONTOURNEMENT_M]
+    if contournables:
+        limite = actuelle + risque.ecart_max_s(actuelle)
+        sure = min((c for c in autres if duree_effective(c) <= limite), key=risque.cout, default=None)
+        if sure is not None:
+            sur_sure = {d['id'] for d in sure.get('risques') or []}
+            evites = [d for d in contournables if d['id'] not in sur_sure]
+            baisse = risque.cout(actuel) - risque.cout(sure)
+            if evites and baisse >= BAISSE_MIN_COUT_S and baisse >= BAISSE_MIN_RATIO * risque.cout(actuel):
+                if not _deja_propose(trajet, evites):
+                    _memoriser_proposition(trajet, evites)
+                    return proposer(SAFER_FOUND, sure, evites)
+
+    # 3. Rien de mieux : on previent quand meme du danger.
+    return {**resultat, 'reason': HAZARD_AHEAD} if devant else resultat
 
 
 ALTERNATIVES_FOUND = 'ALTERNATIVES_FOUND'

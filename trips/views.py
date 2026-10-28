@@ -274,11 +274,14 @@ def _trajet_actif(request, id):
         "A appeler toutes les 1-2 min pendant la navigation avec la position actuelle. Le "
         "serveur recalcule les itineraires depuis cette position avec le trafic temps reel "
         "(vitesses mesurees des conducteurs EasyWay et embouteillages signales), reconnait "
-        "celui deja suivi et propose le plus rapide s'il fait gagner au moins 2 min ET 10 % "
-        "du temps restant. reason : BETTER_FOUND (better_route rempli, a proposer au "
-        "conducteur), NO_BETTER, NO_ALTERNATIVE, OFF_ROUTE (le conducteur a quitte sa route : "
-        "faire un recalcul classique avec routes/calculate), NO_ROUTE. Pour accepter : "
-        "POST /api/trips/{id}/switch-route/."
+        "celui deja suivi. reason : REROUTE_REQUIRED (route barree confirmee devant : "
+        "better_route a appliquer, meme plus long), BETTER_FOUND (plus rapide d'au moins 2 min "
+        "ET 10 %, sans plus de risque), SAFER_FOUND (evite un danger serieux devant -- "
+        "avoided_hazards -- pour un detour borne ; jamais deux fois pour le meme danger), "
+        "HAZARD_AHEAD (danger serieux devant sans contournement utile : alerter seulement, "
+        "hazards_ahead), NO_BETTER, NO_ALTERNATIVE, OFF_ROUTE (le conducteur a quitte sa route : "
+        "faire un recalcul classique avec routes/calculate), NO_ROUTE. Une valeur inconnue "
+        "doit etre traitee comme NO_BETTER. Pour accepter : POST /api/trips/{id}/switch-route/."
     ),
     request=MeilleurItineraireSerializer,
     responses={200: MeilleurItineraireReponseSerializer, 400: MessageSerializer},

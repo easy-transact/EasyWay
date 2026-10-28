@@ -17,9 +17,9 @@ from etat_routes.services import evitement
 from etat_routes.services.score_trajet import completer as completer_etat_route
 
 from ..models import NiveauTrafic, RoadClass
-from . import duree_ville, retards_signalements, service_trafic
+from . import duree_ville, retards_signalements, risque_itineraire, service_trafic
 from .client_corridor_reference import ClientCorridorReference
-from .client_valhalla import ClientValhalla
+from .client_valhalla import NOMBRE_MAX_ITINERAIRES, ClientValhalla
 from .corridors import trouver_corridor
 
 logger = logging.getLogger(__name__)
@@ -125,18 +125,42 @@ class ServiceItineraire:
             if direct and direct[0]['summary']['time'] + GAIN_MIN_SANS_CAP_S < trips[0]['summary']['time']:
                 trips = self._trips(depart, arrivee, options, None, alternatives, etapes, eviter) if alternatives else direct
 
-        candidats = [self._normaliser_trip(trip, index) for index, trip in enumerate(trips)]
+        trafic_en_direct = 'current' in options['costing_options'][costing]['speed_types']
+        penalite = evitement.penalite_appliquee if parametres_de(utilisateur).eviter_routes_degradees else None
+        candidats = self._evaluer(trips, 0, type_vehicule, costing, trafic_en_direct)
+        candidats = risque_itineraire.classer(candidats, penalite)
+
+        # La route choisie traverse un danger serieux et confirme (accident...) :
+        # si aucune variante ne l'evite, on en demande une a Valhalla en
+        # excluant ce point, puis on compare (un appel de plus, seulement dans ce cas).
+        if candidats and not candidats[0].get('degrade'):
+            dangers = risque_itineraire.a_contourner(candidats[0], [depart, arrivee, *(etapes or [])])
+            if dangers:
+                options_contournement = {
+                    **options, 'exclude_locations': [{'lat': lat, 'lon': lon} for lat, lon in eviter + dangers],
+                }
+                contournement = self._trips(
+                    depart, arrivee, options_contournement, cap_origine, False, etapes, eviter + dangers,
+                )
+                connues = {c['geometrie'] for c in candidats}
+                nouveaux = [
+                    c for c in self._evaluer(contournement, len(candidats), type_vehicule, costing, trafic_en_direct)
+                    if c['geometrie'] not in connues and not c.get('degrade')
+                ]
+                if nouveaux:
+                    candidats = risque_itineraire.classer(candidats + nouveaux, penalite)
+        return candidats[:NOMBRE_MAX_ITINERAIRES] if alternatives else candidats[:1]
+
+    def _evaluer(self, trips, premier_index, type_vehicule, costing, trafic_en_direct):
+        """Trips Valhalla -> candidats normalises, avec reperes, retards des
+        signalements et risque. Retards et risque recalcules a chaque appel (pas
+        mis en cache : un signalement peut apparaitre ou expirer entre deux calculs)."""
+        candidats = [self._normaliser_trip(trip, premier_index + index) for index, trip in enumerate(trips)]
         for candidat in candidats:
             candidat['type_vehicule'] = type_vehicule or TypeVehicule.VOITURE
             ajouter_reperes_sans_risque(candidat)
-        # Retards des signalements recalcules a chaque appel (pas mis en cache :
-        # un signalement peut apparaitre ou expirer entre deux calculs), puis
-        # reclassement par duree finale.
-        trafic_en_direct = 'current' in options['costing_options'][costing]['speed_types']
         candidats = retards_signalements.appliquer(candidats, costing, trafic_en_direct)
-        if parametres_de(utilisateur).eviter_routes_degradees:
-            candidats = evitement.classer(candidats)
-        return candidats
+        return risque_itineraire.evaluer(candidats, costing)
 
     def _trips(self, depart, arrivee, options, cap_origine, alternatives, etapes, eviter):
         """Trips Valhalla bruts, en cache DUREE_CACHE_S."""

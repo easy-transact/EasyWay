@@ -23,6 +23,15 @@ def penalite_s(candidat):
     return round(sum(etat.get(cle, 0) / vitesse * (1 / f - 1) for cle, f in FACTEUR_VITESSE.items()))
 
 
+def penalite_appliquee(candidat):
+    """penalite_s, notee dans etat_route.avoid_penalty_s : utilisee par le
+    classement par risque (trips/services/risque_itineraire.classer)."""
+    penalite = penalite_s(candidat)
+    if candidat.get('etat_route'):
+        candidat['etat_route'] = {**candidat['etat_route'], 'avoid_penalty_s': penalite}
+    return penalite
+
+
 def classer(candidats):
     """Reclasse par duree + penalite ; ajoute etat_route.avoid_penalty_s."""
     for candidat in candidats:
