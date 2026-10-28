@@ -84,6 +84,45 @@ def chercher_meilleur(trajet, position, utilisateur, cap=None, etapes_restantes=
     return {**resultat, 'reason': BETTER_FOUND, 'better_route': meilleur, 'time_saved_s': gain}
 
 
+ALTERNATIVES_FOUND = 'ALTERNATIVES_FOUND'
+
+
+def chercher_autres(trajet, position, utilisateur, cap=None, etapes_restantes=None):
+    """Le conducteur DEMANDE un autre itineraire ("je veux une autre route") :
+    contrairement a chercher_meilleur, aucune condition de gain -- toutes les
+    routes differentes de celle suivie, plus lentes comprises, de la plus
+    rapide a la plus lente. Retourne {reason, routes, current_duration_s},
+    chaque route portant ecart_s (difference de duree avec la route suivie,
+    positive = plus lente ; None si la route suivie n'est pas reconnue).
+      reason : ALTERNATIVES_FOUND | NO_ALTERNATIVE | NO_ROUTE"""
+    candidats = ServiceItineraire().calculer(
+        depart=position,
+        arrivee=(trajet.position_destination.y, trajet.position_destination.x),
+        utilisateur=utilisateur, cap_origine=cap, alternatives=True, etapes=etapes_restantes or [],
+        type_vehicule=trajet.type_vehicule or None,
+    )
+    if not candidats:
+        return {'reason': NO_ROUTE, 'routes': [], 'current_duration_s': None}
+
+    actuelle = None
+    autres = candidats
+    if trajet.geometrie is not None:
+        reference = LineString(trajet.geometrie.coords, srid=4326)
+        scores = [(recouvrement(c, reference), c) for c in candidats]
+        score_actuel, suivie = max(scores, key=lambda s: s[0])
+        if score_actuel >= SEUIL_RECOUVREMENT:
+            actuelle = duree_effective(suivie)
+            autres = [c for score, c in scores if score < SEUIL_RECOUVREMENT]
+    autres = sorted(autres, key=duree_effective)
+    for route in autres:
+        route['ecart_s'] = duree_effective(route) - actuelle if actuelle is not None else None
+    return {
+        'reason': ALTERNATIVES_FOUND if autres else NO_ALTERNATIVE,
+        'routes': autres,
+        'current_duration_s': actuelle,
+    }
+
+
 def troncon_parcouru(coords, position):
     """Partie deja parcourue de la geometrie (liste (lon, lat)) jusqu'au point
     le plus proche de position (lat, lon) -- gardee quand le conducteur change

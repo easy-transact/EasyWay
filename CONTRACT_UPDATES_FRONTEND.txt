@@ -360,3 +360,26 @@ signales, deja pris en compte par le calcul d'itineraire).
     x 2 en journee, x 1,4 la nuit), sauf la ou le trafic EasyWay est mesure.
     duration, duration_with_traffic et la duree des manoeuvres sont corrigees
     ensemble. Valeurs de depart, a caler sur les trajets reels.
+
+
+16. NOUVEAU — "je veux un autre itineraire" pendant le trajet (28/10/2026)
+
+  better-route NE CONVIENT PAS a ce bouton : il ne propose qu'une route PLUS
+  RAPIDE (au moins 2 min et 10 % de gain) et repond NO_BETTER sinon -- d'ou
+  "pas d'autre chemin" sur Akwa Palace -> Total Bonateki.
+
+  POST /api/trips/{id}/alternative-routes/     (trajet ACTIF de l'appelant)
+    meme corps que better-route :
+    { "lat", "lon", "heading"?, "remaining_waypoints"?: [{lat, lon}] }
+  -> { "reason": "ALTERNATIVES_FOUND" | "NO_ALTERNATIVE" | "NO_ROUTE",
+       "current_duration_s": 300 | null,
+       "routes": [ <element de routes/calculate> + "time_difference_s": 240 ] }
+  routes : toutes les routes DIFFERENTES de celle suivie, plus lentes
+  comprises, de la plus rapide a la plus lente. time_difference_s = duree de
+  la route - duree restante de la route suivie (positif = plus lente ;
+  null si le conducteur a quitte sa route). Afficher par ex. "+4 min".
+  Le conducteur choisit -> switch-route avec la route choisie (inchange).
+
+  Les deux appels coexistent :
+    better-route        automatique, toutes les 1-2 min : route plus rapide ?
+    alternative-routes  a la demande du conducteur : autres routes, meme plus lentes.

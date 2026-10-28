@@ -32,6 +32,7 @@ from .serializers import (
     ChangerItineraireSerializer,
     ItineraireCandidatSerializer,
     LimiteVitesseSerializer,
+    AutresItinerairesReponseSerializer,
     MeilleurItineraireReponseSerializer,
     MeilleurItineraireSerializer,
     NoterTrajetSerializer,
@@ -47,7 +48,7 @@ from .serializers import (
     ZoneVitesseSurTrajetSerializer,
 )
 from .services.producteur_evenements import FLUX_POSITIONS, ProducteurRedisStreams
-from .services.meilleur_itineraire import chercher_meilleur, troncon_parcouru
+from .services.meilleur_itineraire import chercher_autres, chercher_meilleur, troncon_parcouru
 from .services.service_itineraire import ServiceItineraire
 from .services.zones_vitesse import zones_sur_trajet
 
@@ -298,6 +299,37 @@ class MeilleurItineraireView(APIView):
             etapes_restantes=[(p['lat'], p['lon']) for p in donnees['remaining_waypoints']],
         )
         return Response(MeilleurItineraireReponseSerializer(resultat).data)
+
+
+@extend_schema(
+    tags=['Trips'],
+    summary="Autres itineraires a la demande du conducteur",
+    description=(
+        "Le conducteur demande une autre route (\"je veux un autre itineraire\"). Meme corps que "
+        "better-route, mais SANS condition de gain : toutes les routes differentes de celle "
+        "suivie depuis la position actuelle, plus lentes comprises, de la plus rapide a la plus "
+        "lente, avec time_difference_s (difference de duree avec la route suivie). Le conducteur "
+        "en choisit une -> switch-route. better-route reste l'appel automatique (route plus rapide)."
+    ),
+    request=MeilleurItineraireSerializer,
+    responses={200: AutresItinerairesReponseSerializer},
+)
+class AutresItinerairesView(APIView):
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'meilleur-itineraire'
+
+    def post(self, request, id):
+        trajet, erreur = _trajet_actif(request, id)
+        if erreur:
+            return erreur
+        serializer = MeilleurItineraireSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        donnees = serializer.validated_data
+        resultat = chercher_autres(
+            trajet, (donnees['lat'], donnees['lon']), request.user, cap=donnees['heading'],
+            etapes_restantes=[(p['lat'], p['lon']) for p in donnees['remaining_waypoints']],
+        )
+        return Response(AutresItinerairesReponseSerializer(resultat).data)
 
 
 @extend_schema(

@@ -99,3 +99,40 @@ class MeilleurItineraireTests(TestCase):
         # Debut deja parcouru (9.70 -> 9.71 sur 4.05) puis la variante par le nord.
         self.assertEqual(coords, [(9.70, 4.05), (9.71, 4.05), (9.71, 4.07), (9.73, 4.05)])
         self.assertEqual(self.trajet.itineraires.get(identifiant='nord').manoeuvres.count(), 1)
+
+
+class AutresItinerairesTests(TestCase):
+    """Le conducteur demande une autre route : proposee meme plus lente."""
+
+    def setUp(self):
+        cache.clear()
+        self.utilisateur = creer_utilisateur()
+        self.jetons = connecter(self.client, self.utilisateur.telephone)
+        self.trajet = _trajet_actif_pour(
+            self.utilisateur, geometrie=LineString(ROUTE_SUIVIE, srid=4326), position_destination='POINT(9.73 4.05)',
+        )
+        self.url = reverse('trips:trajet-autres-itineraires', kwargs={'id': self.trajet.id})
+
+    def demander(self, candidats):
+        with patch('trips.services.meilleur_itineraire.ServiceItineraire') as Service:
+            Service.return_value.calculer.return_value = candidats
+            return self.client.post(
+                self.url, {'lat': 4.05, 'lon': 9.705, 'heading': 90}, content_type='application/json', **self.jetons,
+            ).json()
+
+    def test_route_plus_lente_proposee_quand_meme(self):
+        # La ou better-route repond NO_BETTER (variante plus lente de 5 min).
+        donnees = self.demander([candidat(ROUTE_SUIVIE, 300, 'suivie'), candidat(VARIANTE, 600, 'nord')])
+        self.assertEqual(donnees['reason'], 'ALTERNATIVES_FOUND')
+        self.assertEqual([r['route_id'] for r in donnees['routes']], ['nord'])  # jamais la route suivie
+        self.assertEqual((donnees['current_duration_s'], donnees['routes'][0]['time_difference_s']), (300, 300))
+
+    def test_pas_d_autre_route(self):
+        donnees = self.demander([candidat(ROUTE_SUIVIE, 300, 'suivie')])
+        self.assertEqual((donnees['reason'], donnees['routes']), ('NO_ALTERNATIVE', []))
+
+    def test_hors_de_sa_route_toutes_les_routes(self):
+        loin = [(9.70, 4.10), (9.73, 4.10)]
+        donnees = self.demander([candidat(loin, 600, 'a'), candidat(loin, 300, 'b')])
+        self.assertEqual([r['route_id'] for r in donnees['routes']], ['b', 'a'])
+        self.assertIsNone(donnees['routes'][0]['time_difference_s'])

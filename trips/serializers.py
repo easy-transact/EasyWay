@@ -387,6 +387,19 @@ class MeilleurItineraireSerializer(serializers.Serializer):
     )
 
 
+class AutreItineraireSerializer(ItineraireCandidatSerializer):
+    time_difference_s = serializers.IntegerField(
+        source='ecart_s', allow_null=True, read_only=True,
+        help_text='Duree par rapport a la route suivie (positif = plus lente), null si elle est inconnue.',
+    )
+
+
+class AutresItinerairesReponseSerializer(serializers.Serializer):
+    reason = serializers.ChoiceField(choices=['ALTERNATIVES_FOUND', 'NO_ALTERNATIVE', 'NO_ROUTE'])
+    current_duration_s = serializers.IntegerField(allow_null=True)
+    routes = AutreItineraireSerializer(many=True)
+
+
 class MeilleurItineraireReponseSerializer(serializers.Serializer):
     reason = serializers.ChoiceField(choices=['BETTER_FOUND', 'NO_BETTER', 'NO_ALTERNATIVE', 'OFF_ROUTE', 'NO_ROUTE'])
     better_route = ItineraireCandidatSerializer(allow_null=True)
