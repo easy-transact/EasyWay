@@ -21,10 +21,15 @@ from .geo import distance_haversine_m
 VITESSE_REPLI_KMH = 25  # vitesse urbaine moyenne prudente, pour l'estimation degradee
 
 NOMBRE_MAX_ITINERAIRES = 3
-# Variantes par detour (cf. _variantes_par_detour) reservees aux trajets
-# longs : en ville, les alternates de Valhalla suffisent en general, et un
-# carre d'exclusion de ~900 m y couperait vite tout un quartier.
+# Au-dela, carres de detour de taille fixe (~900 m). En dessous, en ville, les
+# alternates de Valhalla ne suffisent PAS (verifie le 28/10 : Akwa Palace ->
+# Total Bonateki, une seule route) : carres plus petits, a l'echelle du
+# trajet, pour ne pas couper tout un quartier (cf. _demi_cote_detour).
 DISTANCE_MIN_DETOUR_KM = 20
+DISTANCE_MIN_VARIANTES_VILLE_KM = 1   # en dessous, pas de variante : rien a contourner
+FRACTIONS_DETOUR_VILLE = (0.3, 0.5, 0.7)
+DEMI_COTE_DETOUR_VILLE_MIN_DEG = 0.0008  # ~90 m
+DEMI_COTE_PAR_KM_DEG = 0.0004            # ~45 m par km de trajet : ~130 m pour 3 km
 # Positions (fraction de la distance de la meilleure route) ou l'on bloque un
 # carre pour forcer un autre chemin -- verifie sur Douala -> Bafoussam :
 # 0.3 -> par Yabassi, 0.5 -> Provinciale 17a, 0.7/0.85 -> par la N4.
@@ -36,6 +41,9 @@ DISTANCE_MIN_DETOUR_ETAPE_M = 2000
 # Filtres d'une variante vs les routes deja retenues -- ordre de grandeur de
 # ce que Google propose, pas mesure sur donnees reelles.
 RATIO_TEMPS_MAX_VARIANTE = 1.3
+# En ville, 1,3 x 3 min ecarterait toute vraie alternative : on accepte aussi
+# jusqu'a ECART_MAX_VARIANTE_S de plus que la meilleure.
+ECART_MAX_VARIANTE_S = 5 * 60
 PARTAGE_MAX_VARIANTE = 0.8
 TAILLE_CELLULE_DEG = 0.001  # ~110 m : deux routes paralleles distinctes tombent dans des cellules differentes
 
@@ -72,7 +80,8 @@ def selectionner_variantes(retenus, candidats):
     PARTAGE_MAX_VARIANTE de leur trace avec chaque route deja retenue --
     une variante qui ne differe que de quelques centaines de metres n'est
     pas une vraie option. Partage aussi par ClientCorridorReference."""
-    temps_max = retenus[0]['summary']['time'] * RATIO_TEMPS_MAX_VARIANTE
+    reference = retenus[0]['summary']['time']
+    temps_max = max(reference * RATIO_TEMPS_MAX_VARIANTE, reference + ECART_MAX_VARIANTE_S)
     selection = [(trip, _cellules(trip)) for trip in retenus]
     for candidat in sorted(candidats, key=lambda t: t['summary']['time']):
         if len(selection) >= NOMBRE_MAX_ITINERAIRES:
@@ -88,8 +97,7 @@ def selectionner_variantes(retenus, candidats):
     return [trip for trip, _ in selection]
 
 
-def _carre(lat, lon):
-    d = DEMI_COTE_DETOUR_DEG
+def _carre(lat, lon, d=DEMI_COTE_DETOUR_DEG):
     return [[lon - d, lat - d], [lon + d, lat - d], [lon + d, lat + d], [lon - d, lat + d], [lon - d, lat - d]]
 
 
@@ -110,6 +118,11 @@ def _points_a_fractions(points, fractions):
         (lon_a, lat_a), (lon_b, lat_b) = points[indice - 1], points[indice]
         resultat.append((lat_a + (lat_b - lat_a) * t, lon_a + (lon_b - lon_a) * t))
     return resultat
+
+
+def _demi_cote_detour(longueur_km):
+    """Demi-cote du carre de detour en ville, proportionnel au trajet."""
+    return min(max(DEMI_COTE_DETOUR_VILLE_MIN_DEG, longueur_km * DEMI_COTE_PAR_KM_DEG), DEMI_COTE_DETOUR_DEG)
 
 
 class ClientValhalla(ClientRoutage):
@@ -145,36 +158,52 @@ class ClientValhalla(ClientRoutage):
         Trajets longs : on bloque un petit carre sur la meilleure route a
         plusieurs endroits (exclude_polygons) pour forcer Valhalla a trouver
         un autre chemin -- appels en parallele, cf. _variantes_par_detour.
-        Trajets courts : un appel avec l'objectif distance (shortest) plutot
-        que temps. Dans les deux cas, selectionner_variantes ecarte les
-        candidats trop lents ou quasi identiques a une route deja retenue."""
+        Trajets courts (ville) : un appel avec l'objectif distance (shortest)
+        ET des detours a carres plus petits. Dans les deux cas,
+        selectionner_variantes ecarte les candidats trop lents ou quasi
+        identiques a une route deja retenue."""
         trips = self._appeler_avec_retry(
             depart, arrivee, options, alternates=2, cap_origine=cap_origine, etapes=etapes
         )
         if len(trips) >= NOMBRE_MAX_ITINERAIRES:
             return trips[:NOMBRE_MAX_ITINERAIRES]
 
-        if trips[0]['summary']['length'] >= DISTANCE_MIN_DETOUR_KM:
+        longueur_km = trips[0]['summary']['length']
+        if longueur_km >= DISTANCE_MIN_DETOUR_KM:
             candidats = self._variantes_par_detour(trips[0], depart, arrivee, options, cap_origine, etapes)
         else:
             options_distance = copy.deepcopy(options)
             costing = options_distance.get('costing', 'auto')
             options_distance.setdefault('costing_options', {}).setdefault(costing, {})['shortest'] = True
             candidats = self._appeler_variante(depart, arrivee, options_distance, cap_origine, etapes)
+            if longueur_km >= DISTANCE_MIN_VARIANTES_VILLE_KM:
+                candidats += self._variantes_par_detour(
+                    trips[0], depart, arrivee, options, cap_origine, etapes,
+                    fractions=FRACTIONS_DETOUR_VILLE, demi_cote=_demi_cote_detour(longueur_km),
+                )
 
         return selectionner_variantes(trips, candidats)
 
-    def _variantes_par_detour(self, meilleur, depart, arrivee, options, cap_origine=None, etapes=None):
+    def _variantes_par_detour(
+        self, meilleur, depart, arrivee, options, cap_origine=None, etapes=None,
+        fractions=FRACTIONS_DETOUR, demi_cote=DEMI_COTE_DETOUR_DEG,
+    ):
+        # Un carre ne doit jamais rendre une etape inaccessible ; en ville (petits
+        # carres, trajet court), ni le depart ni l'arrivee.
+        proteges, marge_m = list(etapes or []), DISTANCE_MIN_DETOUR_ETAPE_M
+        if demi_cote != DEMI_COTE_DETOUR_DEG:
+            proteges += [depart, arrivee]
+            marge_m = demi_cote * 111_320 * 2
         centres = [
-            centre for centre in _points_a_fractions(_points(meilleur), FRACTIONS_DETOUR)
-            if all(distance_haversine_m(centre, etape) >= DISTANCE_MIN_DETOUR_ETAPE_M for etape in etapes or [])
+            centre for centre in _points_a_fractions(_points(meilleur), fractions)
+            if all(distance_haversine_m(centre, point) >= marge_m for point in proteges)
         ]
         if not centres:
             return []
 
         def appeler(centre):
             options_detour = copy.deepcopy(options)
-            options_detour['exclude_polygons'] = [*options_detour.get('exclude_polygons', []), _carre(*centre)]
+            options_detour['exclude_polygons'] = [*options_detour.get('exclude_polygons', []), _carre(*centre, demi_cote)]
             return self._appeler_variante(depart, arrivee, options_detour, cap_origine, etapes)
 
         with ThreadPoolExecutor(max_workers=len(centres)) as executeur:

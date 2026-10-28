@@ -335,14 +335,15 @@ class AlternativesValhallaTests(TestCase):
     def test_alternatives_true_par_defaut_collecte_les_variantes(self):
         # Meme reponse (un seul trip, jamais de vraie 2e route pour ce
         # segment) -- le point ici est le NOMBRE d'appels, pas le resultat :
-        # _collecter_variantes retente toujours avec l'objectif "shortest"
-        # tant qu'elle a moins de 3 trips, contrairement a alternatives=False.
+        # _collecter_variantes retente toujours avec l'objectif "shortest" (et,
+        # au-dela de 1 km, avec des detours) tant qu'elle a moins de 3 trips,
+        # contrairement a alternatives=False.
         client = ClientValhalla()
         with patch(
             'trips.services.client_valhalla.requests.post', return_value=self._reponse()
         ) as post_simule:
             client.calculer_itineraires((4.0, 9.7), (4.01, 9.71), {'costing': 'auto'})
-        self.assertEqual(post_simule.call_count, 2)
+        self.assertGreaterEqual(post_simule.call_count, 2)
         self.assertEqual(post_simule.call_args_list[0].kwargs['json']['alternates'], 2)
 
 
@@ -474,6 +475,50 @@ class VariantesParDetourTests(SimpleTestCase):
                 (4.0, 9.7), (4.3, 9.7), {'costing': 'auto'}, etapes=[(4.15, 9.7)]
             )
         self.assertEqual(post_simule.call_count, 1 + 4)
+
+
+def _trip_ville(points, duree_s, longueur_km=3.2):
+    return {
+        'summary': {'length': longueur_km, 'time': duree_s},
+        'legs': [{'shape': encoder_polyline6(points), 'maneuvers': [{'length': longueur_km, 'time': duree_s}]}],
+    }
+
+
+# ~3,3 km en ville (cas Akwa Palace -> Total Bonateki, une seule route avant le 28/10).
+VILLE_DIRECT = [(9.695, 4.050), (9.714, 4.070)]
+VILLE_EST = [(9.695, 4.050), (9.710, 4.055), (9.714, 4.070)]
+VILLE_OUEST = [(9.695, 4.050), (9.698, 4.066), (9.714, 4.070)]
+
+
+class VariantesEnVilleTests(SimpleTestCase):
+    def setUp(self):
+        cache.clear()
+
+    def test_detours_a_petits_carres_donnent_des_alternatives(self):
+        detours = [_trip_ville(VILLE_EST, 330), _trip_ville(VILLE_OUEST, 420), _trip_ville(VILLE_DIRECT, 300)]
+
+        def post(url, json, timeout):
+            if 'exclude_polygons' in json:
+                return _reponse_valhalla({'trip': detours.pop(0)})
+            return _reponse_valhalla({'trip': _trip_ville(VILLE_DIRECT, 300)})  # alternates + shortest
+
+        with patch('trips.services.client_valhalla.requests.post', side_effect=post) as post_simule:
+            trips = ClientValhalla().calculer_itineraires((4.050, 9.695), (4.070, 9.714), {'costing': 'auto'})
+
+        # 420 s > 1,3 x 300 s, mais moins de 5 min de plus : gardee en ville.
+        self.assertEqual([t['summary']['time'] for t in trips], [300, 330, 420])
+        carres = [c.kwargs['json']['exclude_polygons'][0] for c in post_simule.call_args_list if 'exclude_polygons' in c.kwargs['json']]
+        self.assertEqual(len(carres), 3)
+        cote_deg = carres[0][1][0] - carres[0][0][0]
+        self.assertLess(cote_deg, 0.004)  # bien plus petit que les ~900 m des trajets longs
+
+    def test_trajet_tres_court_sans_detour(self):
+        with patch(
+            'trips.services.client_valhalla.requests.post',
+            return_value=_reponse_valhalla({'trip': _trip_ville(VILLE_DIRECT, 60, longueur_km=0.6)}),
+        ) as post_simule:
+            ClientValhalla().calculer_itineraires((4.050, 9.695), (4.054, 9.698), {'costing': 'auto'})
+        self.assertEqual(post_simule.call_count, 2)  # alternates + shortest, pas de carre
 
 
 class VariantesCorridorReferenceTests(SimpleTestCase):
