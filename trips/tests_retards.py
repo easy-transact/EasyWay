@@ -169,6 +169,19 @@ class ValidationParLaModerationTests(RetardsSignalementsTests):
         self.calculer()
         self.assertEqual(self.options['exclude_locations'], [{'lat': 4.05, 'lon': 9.715}])
 
+    def test_voie_bloquee_sans_sous_type_validee_exclue(self):
+        # Cas du 28/10 (Logbessou) : signalee depuis la carte de test, sans
+        # sous-type ni cap -- ignoree jusqu'ici, meme validee.
+        incident = self.signaler(T.VOIE_BLOQUEE, '', cap=None, confirmations=0)
+        routes = self.calculer()
+        self.assertNotIn('exclude_locations', self.options)
+        self.assertGreater(next(r for r in routes if r['duration'] == 400)['delay_from_reports'], 0)  # au moins ralentie
+
+        incident.valider_par_moderation()
+        cache.clear()
+        self.calculer()
+        self.assertEqual(self.options['exclude_locations'], [{'lat': 4.05, 'lon': 9.715}])
+
     def test_validation_reservee_au_staff(self):
         incident = self.signaler(T.VOIE_BLOQUEE, S.ROUTE_BARREE)
         url = reverse('community:staff-incident-valider', kwargs={'id': incident.id})

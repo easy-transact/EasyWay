@@ -67,6 +67,25 @@ EFFETS = {
     # (releve de l'etat des routes).
 }
 
+# Signalement SANS sous-type (ex. envoye depuis la carte de test du
+# back-office, qui n'envoie que le type) : il etait ignore -- aucun
+# ralentissement, aucun contournement, meme valide par la moderation (vu le
+# 28/10 sur une "Voie bloquee" a Logbessou). On applique le cas principal du type.
+EFFETS_SANS_SOUS_TYPE = {
+    T.VOIE_BLOQUEE: EFFETS[(T.VOIE_BLOQUEE, S.ROUTE_BARREE)],
+    T.ROUTE_BARREE: EFFETS[(T.VOIE_BLOQUEE, S.ROUTE_BARREE)],
+    T.ACCIDENT: EFFETS[(T.ACCIDENT, S.ACCIDENT)],
+    T.EMBOUTEILLAGE: EFFETS[(T.EMBOUTEILLAGE, S.EMBOUTEILLAGE)],
+    T.MAUVAIS_TEMPS: EFFETS[(T.MAUVAIS_TEMPS, S.MAUVAIS_TEMPS)],
+}
+
+
+def effet_de(incident):
+    """Effet du signalement sur le temps de parcours, ou None (aucun)."""
+    if not incident.sous_type:
+        return EFFETS_SANS_SOUS_TYPE.get(incident.type)
+    return EFFETS.get((incident.type, incident.sous_type))
+
 COULOIR_M = 30             # signalement a moins de 30 m de la ligne du trajet
 ECART_CAP_MAX = 45         # degres entre le cap du signalement et le sens du trajet
 MARGE_EXTREMITES_M = 100   # jamais de fermeture pres du depart ou de l'arrivee
@@ -133,7 +152,7 @@ def fermetures_a_eviter(depart, arrivee, etapes, costing):
     extremites = [depart, arrivee, *(etapes or [])]
     exclusions = []
     for incident in _incidents_actifs(_rectangle(extremites)):
-        effet = EFFETS.get((incident.type, incident.sous_type))
+        effet = effet_de(incident)
         if effet is None or not fermeture_confirmee(incident, effet, costing):
             continue
         lat, lon = incident.position.y, incident.position.x
@@ -185,7 +204,7 @@ def appliquer(candidats, costing, trafic_en_direct):
     toutes_coords = [(lat, lon) for c in candidats for lon, lat in decoder_polyline6(c['geometrie'])[::20]]
     incidents = [
         i for i in _incidents_actifs(_rectangle(toutes_coords))
-        if (i.type, i.sous_type) in EFFETS
+        if effet_de(i) is not None
     ]
 
     for candidat in candidats:
@@ -201,7 +220,7 @@ def appliquer(candidats, costing, trafic_en_direct):
         vitesse_normale = max(candidat['distance'] / max(candidat['duree'], 1), 2.0)  # m/s
         total = 0.0
         for incident in incidents:
-            effet = EFFETS[(incident.type, incident.sous_type)]
+            effet = effet_de(incident)
             position = Point(incident.position.x, incident.position.y, srid=4326)
             if ligne.distance(position) * METRES_PAR_DEGRE > COULOIR_M:
                 continue
