@@ -64,3 +64,29 @@ class CapOrigineTests(TestCase):
         routes = self.calculer(origin_heading=225, origin_speed_kmh=2)
         self.assertEqual(routes[0]['duration'], 900)
         self.assertEqual(set(self.caps), {225})
+
+
+class CompteSansParametresTests(TestCase):
+    """Compte staff cree par createsuperuser : pas de Parametres -> le calcul
+    repondait 500 (carte de test du back-office, 28/10)."""
+
+    def test_calcul_cree_les_parametres_manquants(self):
+        from accounts.models import Parametres
+
+        cache.clear()
+        staff = creer_utilisateur('staff@easyway.local', is_staff=True)
+        Parametres.objects.filter(utilisateur=staff).delete()
+        jetons = connecter(self.client, staff.telephone)
+        with patch('trips.services.service_itineraire.ClientValhalla') as Client, patch(
+            'trips.services.service_itineraire.service_trafic.evaluer_route',
+            return_value={'niveau_trafic': 'NORMAL', 'duree_avec_trafic': None},
+        ):
+            Client.return_value.calculer_itineraires.return_value = [trip_valhalla(DIRECT, 400)]
+            reponse = self.client.post(
+                reverse('trips:calculer-itineraire'),
+                {'origin_lat': 4.05, 'origin_lon': 9.70, 'destination_lat': 4.05, 'destination_lon': 9.73},
+                content_type='application/json', **jetons,
+            )
+        self.assertEqual(reponse.status_code, 200, reponse.content)
+        self.assertTrue(Parametres.objects.filter(utilisateur=staff).exists())
+        self.assertEqual(self.client.get(reverse('accounts:moi-parametres'), **jetons).status_code, 200)

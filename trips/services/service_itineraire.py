@@ -12,7 +12,7 @@ import logging
 from django.conf import settings
 from django.core.cache import cache
 
-from accounts.models import TypeVehicule
+from accounts.models import Parametres, TypeVehicule
 from etat_routes.services import evitement
 from etat_routes.services.score_trajet import completer as completer_etat_route
 
@@ -50,6 +50,17 @@ VITESSE_MIN_CAP_KMH = 10
 # Vitesse inconnue (verifier_cap) : si l'itineraire sans cap est plus rapide
 # d'au moins ce delai, le cap a force un detour -- on le laisse tomber.
 GAIN_MIN_SANS_CAP_S = 120
+
+
+def parametres_de(utilisateur):
+    """Parametres du compte, crees au besoin : un compte cree par
+    createsuperuser (staff) n'en a pas -- seule l'inscription normale les
+    cree -- et le calcul d'itineraire repondait alors 500 (carte de test du
+    back-office, 28/10)."""
+    try:
+        return utilisateur.parametres
+    except Parametres.DoesNotExist:
+        return Parametres.objects.get_or_create(utilisateur=utilisateur)[0]
 
 
 def ajouter_reperes_sans_risque(candidat):
@@ -123,7 +134,7 @@ class ServiceItineraire:
         # reclassement par duree finale.
         trafic_en_direct = 'current' in options['costing_options'][costing]['speed_types']
         candidats = retards_signalements.appliquer(candidats, costing, trafic_en_direct)
-        if utilisateur.parametres.eviter_routes_degradees:
+        if parametres_de(utilisateur).eviter_routes_degradees:
             candidats = evitement.classer(candidats)
         return candidats
 
@@ -152,7 +163,7 @@ class ServiceItineraire:
 
     def _options_depuis_parametres(self, utilisateur, type_vehicule=None) -> dict:
         costing = COSTING_PAR_VEHICULE.get(type_vehicule or utilisateur.type_vehicule, COSTING_DEFAUT)
-        parametres = utilisateur.parametres
+        parametres = parametres_de(utilisateur)
 
         costing_options = {
             # 0.0 = evite completement, 1.0 = autorise sans penalite. use_tracks

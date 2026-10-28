@@ -402,11 +402,13 @@ class AvatarView(APIView):
     ),
 )
 class ParametresView(APIView):
+    # get_or_create : un compte cree par createsuperuser n'a pas de Parametres.
     def get(self, request):
-        return Response(ParametresSerializer(request.user.parametres).data)
+        return Response(ParametresSerializer(Parametres.objects.get_or_create(utilisateur=request.user)[0]).data)
 
     def patch(self, request):
-        serializer = ParametresSerializer(request.user.parametres, data=request.data, partial=True)
+        parametres = Parametres.objects.get_or_create(utilisateur=request.user)[0]
+        serializer = ParametresSerializer(parametres, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
         return Response(serializer.data)
