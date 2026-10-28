@@ -803,6 +803,33 @@ class IncidentRetraitStaffView(APIView):
 
 @extend_schema(
     tags=['Staff Incidents'],
+    summary='Valider un signalement',
+    description=(
+        "Reserve au staff (is_staff). Le signalement passe ACTIF (visible de tous) et compte comme "
+        "confirme : une route barree / inondation validee est evitee tout de suite par le calcul "
+        "d'itineraire, sans attendre les votes. Publie incident.updated en temps reel."
+    ),
+    request=None,
+    responses={200: IncidentModerationSerializer},
+)
+class IncidentValiderView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def post(self, request, id):
+        incident = get_object_or_404(Incident, id=id)
+        if incident.statut not in (StatutIncident.ACTIF, StatutIncident.EN_ATTENTE):
+            return Response(
+                {'detail': 'Only an active or pending report can be validated.'}, status=status.HTTP_400_BAD_REQUEST,
+            )
+        incident.valider_par_moderation()
+        invalider_cache_cellule(incident.cellule_h3_res8)
+        temps_reel.publier_incident(incident, temps_reel.MODIFIE)
+        journaliser(request.user, 'incidents.validate', incident, libelle=_libelle_incident(incident))
+        return Response(IncidentModerationSerializer(incident).data)
+
+
+@extend_schema(
+    tags=['Staff Incidents'],
     summary='Supprimer definitivement un signalement',
     description=(
         'Reserve au staff (is_staff). Suppression DB reelle (pas un retrait '

@@ -19,6 +19,7 @@ urlpatterns = [
 
     # Back-office (moderation, reserve au staff)
     path('staff/incidents/', views.IncidentModerationListView.as_view(), name='staff-incidents'),
+    path('staff/incidents/<uuid:id>/validate/', views.IncidentValiderView.as_view(), name='staff-incident-valider'),
     path(
         'staff/incidents/<uuid:id>/remove/',
         views.IncidentRetraitStaffView.as_view(),

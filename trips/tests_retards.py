@@ -145,3 +145,42 @@ class RetardsSignalementsTests(TestCase):
         trajet = Trajet.objects.get()
         self.assertEqual((prevision.trajet, prevision.itineraire_choisi), (trajet, routes[1]['route_id']))
         self.assertEqual(trajet.type_vehicule, 'VOITURE')
+
+
+class ValidationParLaModerationTests(RetardsSignalementsTests):
+    """Le back-office valide une route barree : evitee sans attendre les votes."""
+
+    def test_route_barree_validee_par_le_staff_exclue(self):
+        incident = self.signaler(T.VOIE_BLOQUEE, S.ROUTE_BARREE, confirmations=0, statut=StatutIncident.EN_ATTENTE)
+        self.calculer()
+        self.assertNotIn('exclude_locations', self.options)  # non confirmee : simple ralentissement
+
+        staff = creer_utilisateur(email='staff@test.cm', is_staff=True)
+        reponse = self.client.post(
+            reverse('community:staff-incident-valider', kwargs={'id': incident.id}),
+            **connecter(self.client, staff.telephone),
+        )
+        self.assertEqual(reponse.status_code, 200, reponse.content)
+        self.assertTrue(reponse.json()['staff_validated'])
+        incident.refresh_from_db()
+        self.assertEqual(incident.statut, StatutIncident.ACTIF)
+
+        cache.clear()
+        self.calculer()
+        self.assertEqual(self.options['exclude_locations'], [{'lat': 4.05, 'lon': 9.715}])
+
+    def test_validation_reservee_au_staff(self):
+        incident = self.signaler(T.VOIE_BLOQUEE, S.ROUTE_BARREE)
+        url = reverse('community:staff-incident-valider', kwargs={'id': incident.id})
+        self.assertEqual(self.client.post(url, **self.jetons).status_code, 403)
+
+    # Les tests herites de RetardsSignalementsTests ne sont pas rejoues ici.
+    test_sans_signalement_rien_ne_change = None
+    test_accident_sur_le_direct_fait_passer_le_detour_devant = None
+    test_autre_sens_de_circulation_sans_effet = None
+    test_police_et_radar_sans_effet = None
+    test_embouteillage_actif_deja_dans_le_trafic_en_direct_pour_la_voiture = None
+    test_moto = None
+    test_route_barree_confirmee_exclue_sinon_ralentissement = None
+    test_signalement_tout_neuf_compte_moins = None
+    test_prevision_enregistree_et_reliee_au_trajet = None

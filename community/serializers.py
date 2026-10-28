@@ -97,10 +97,13 @@ class IncidentModerationSerializer(IncidentSerializer):
     # IncidentModerationListView, absents (None) ailleurs.
     suspect = serializers.BooleanField(read_only=True, default=None)
     author_removed_7d = serializers.IntegerField(source='auteur_retraits_7j', read_only=True, default=None)
+    staff_validated = serializers.BooleanField(source='valide_par_staff', read_only=True)
+    validated_at = serializers.DateTimeField(source='valide_le', read_only=True, allow_null=True)
 
     class Meta(IncidentSerializer.Meta):
         fields = IncidentSerializer.Meta.fields + [
             'author_id', 'author_phone', 'author_name', 'member_since', 'reason', 'suspect', 'author_removed_7d',
+            'staff_validated', 'validated_at',
         ]
         read_only_fields = fields
 

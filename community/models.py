@@ -238,6 +238,12 @@ class Incident(models.Model):
         'trips.Trajet', on_delete=models.SET_NULL, null=True, blank=True, related_name='signalements'
     )
 
+    # Valide par la moderation (back-office) : vaut confirmation, sans attendre
+    # les votes -- une route barree validee est evitee tout de suite par le
+    # calcul d'itineraire (cf. trips/services/retards_signalements.py).
+    valide_par_staff = models.BooleanField(default=False)
+    valide_le = models.DateTimeField(null=True, blank=True)
+
     cree_le = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -340,6 +346,17 @@ class Incident(models.Model):
     def expirer(self):
         self.statut = StatutIncident.EXPIRE
         self.save(update_fields=['statut'])
+
+    def valider_par_moderation(self):
+        """Le staff confirme le signalement : visible de tous (ACTIF) et
+        traite comme confirme par le calcul d'itineraire."""
+        self.valide_par_staff = True
+        self.valide_le = timezone.now()
+        champs = ['valide_par_staff', 'valide_le']
+        if self.statut == StatutIncident.EN_ATTENTE:
+            self.statut = StatutIncident.ACTIF
+            champs.append('statut')
+        self.save(update_fields=champs)
 
     def retirer(self, motif: str):
         self.statut = StatutIncident.RETIRE

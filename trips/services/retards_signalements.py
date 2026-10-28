@@ -82,6 +82,8 @@ def confiance(incident):
     votes (3 = valide), pas une probabilite : ramenee a [0, 1] en comptant
     l'auteur pour 1 (un signalement tout neuf vaut 1/4, valide il vaut 1)."""
     votes = min(max((1 + float(incident.score_confiance)) / (1 + SEUIL_CONFIANCE), 0.0), 1.0)
+    if incident.valide_par_staff:
+        votes = 1.0  # valide par la moderation : plus de doute sur sa presence
     maintenant = timezone.now()
     if incident.expire_le <= maintenant:
         return 0.0
@@ -96,13 +98,13 @@ def confiance(incident):
 
 def fermeture_confirmee(incident, effet, costing):
     """Deux auteurs distincts (un doublon corrobore = une confirmation) ou un
-    auteur et une confirmation. Une inondation ferme la route d'une moto des
-    le premier signalement."""
+    auteur et une confirmation, ou une validation par la moderation (back-office).
+    Une inondation ferme la route d'une moto des le premier signalement."""
     if effet.mecanisme != FERMETURE:
         return False
     if effet.fermeture_moto_immediate and costing == 'motorcycle':
         return True
-    return incident.confirmations >= 1
+    return incident.confirmations >= 1 or incident.valide_par_staff
 
 
 def _incidents_actifs(rectangle):
