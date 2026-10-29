@@ -439,3 +439,34 @@ class PrevisionItineraire(models.Model):
     class Meta:
         db_table = 'prevision_itineraire'
         indexes = [models.Index(fields=['utilisateur', '-cree_le'])]
+
+
+class PropositionItineraire(models.Model):
+    """Chaque route proposee ou imposee par better-route (action PROPOSE ou
+    IMPOSE), et si le conducteur l'a prise (switch-route dans les
+    DELAI_ACCEPTATION_S suivantes). Sert a regler les seuils (gain minimal,
+    gravites, detour maximal) sur le taux d'acceptation reel."""
+
+    class Cause(models.TextChoices):
+        FERMETURE = 'ROAD_CLOSED', 'Route barree'
+        RAPIDE = 'FASTER', 'Plus rapide'
+        SURE = 'SAFER', 'Plus sure'
+
+    DELAI_ACCEPTATION_S = 10 * 60
+
+    id = models.BigAutoField(primary_key=True)
+    trajet = models.ForeignKey(Trajet, on_delete=models.CASCADE, related_name='propositions')
+    action = models.CharField(max_length=10)
+    cause = models.CharField(max_length=12, choices=Cause.choices)
+    identifiant_route = models.CharField(max_length=64)
+    gain_s = models.IntegerField(null=True, help_text='time_saved_s : negatif = plus long')
+    risque_avant = models.FloatField(null=True)
+    risque_apres = models.FloatField(null=True)
+    nb_dangers_evites = models.PositiveSmallIntegerField(default=0)
+    acceptee = models.BooleanField(default=False)
+    acceptee_le = models.DateTimeField(null=True, blank=True)
+    cree_le = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = 'proposition_itineraire'
+        indexes = [models.Index(fields=['trajet', '-cree_le'])]

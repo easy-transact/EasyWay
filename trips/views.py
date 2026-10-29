@@ -26,7 +26,7 @@ from .exceptions import TransitionInvalide
 from .geocodage import lancer_geocodage_trajet, libelle_generique
 from .services import derniere_position
 from .services.geo import distance_haversine_m
-from .models import Itineraire, Manoeuvre, PrevisionItineraire, StatutTrajet, Trajet, ZoneVitesse
+from .models import Itineraire, Manoeuvre, PrevisionItineraire, PropositionItineraire, StatutTrajet, Trajet, ZoneVitesse
 from .polyline import decoder_polyline6
 from .serializers import (
     CalculItineraireSerializer,
@@ -303,6 +303,13 @@ class MeilleurItineraireView(APIView):
             etapes_restantes=[(p['lat'], p['lon']) for p in donnees['remaining_waypoints']],
             eviter=[(p['lat'], p['lon']) for p in donnees['avoid']],
         )
+        if resultat['action'] in ('PROPOSE', 'IMPOSE') and resultat['better_route']:
+            PropositionItineraire.objects.create(
+                trajet=trajet, action=resultat['action'], cause=resultat['cause'],
+                identifiant_route=resultat['better_route']['identifiant'], gain_s=resultat['time_saved_s'],
+                risque_avant=resultat['current_risk_score'], risque_apres=resultat['better_route'].get('risque'),
+                nb_dangers_evites=len(resultat['avoided_hazards']),
+            )
         return Response(MeilleurItineraireReponseSerializer(resultat).data)
 
 
@@ -382,6 +389,11 @@ class ChangerItineraireView(APIView):
             trajet.itineraire_choisi = route['identifiant']
             trajet.geometrie = LineString(points, srid=4326) if len(points) >= 2 else trajet.geometrie
             trajet.save(update_fields=['itineraire_choisi', 'geometrie'])
+            # Route proposee par better-route peu avant : acceptee.
+            PropositionItineraire.objects.filter(
+                trajet=trajet, identifiant_route=route['identifiant'], acceptee=False,
+                cree_le__gte=timezone.now() - timedelta(seconds=PropositionItineraire.DELAI_ACCEPTATION_S),
+            ).update(acceptee=True, acceptee_le=timezone.now())
         return Response(TrajetSerializer(trajet).data)
 
 

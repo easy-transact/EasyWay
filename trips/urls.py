@@ -1,6 +1,6 @@
 from django.urls import path
 
-from . import views
+from . import views, vues_pilotage
 
 app_name = 'trips'
 
@@ -29,4 +29,11 @@ urlpatterns = [
     ),
     path('staff/trips/', views.TrajetModerationListView.as_view(), name='staff-trajets'),
     path('staff/trips/<uuid:id>/', views.TrajetModerationDetailView.as_view(), name='staff-trajet-detail'),
+
+    # Pilotage (back-office) : ce que disent les donnees deja recues.
+    path('staff/insights/eta/', vues_pilotage.FiabiliteTempsView.as_view(), name='pilotage-eta'),
+    path('staff/insights/moderation-queue/', vues_pilotage.FileModerationView.as_view(), name='pilotage-moderation'),
+    path('staff/insights/route-proposals/', vues_pilotage.PropositionsView.as_view(), name='pilotage-propositions'),
+    path('staff/insights/data-density/', vues_pilotage.DensiteDonneesView.as_view(), name='pilotage-densite'),
+    path('staff/insights/live-map/', vues_pilotage.CarteDirectView.as_view(), name='pilotage-direct'),
 ]
