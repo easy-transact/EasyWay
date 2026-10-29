@@ -136,7 +136,11 @@ class ConsommateurPositions:
             logger.info('Meili indisponible, %d positions laissees en pending: %s', len(ids), exc)
             return []
 
-        self._accumuler_vitesses(edges, matched_points, paires, self._extremites(paires[0][1]['trajet_id']))
+        extremites, moto = self._infos_trajet(paires[0][1]['trajet_id'])
+        # Une moto remonte les files : sa vitesse dans un bouchon ferait croire
+        # la route fluide aux voitures (traffic.tar est unique, cf. MOTO_TRAFIC_EN_DIRECT).
+        if not moto:
+            self._accumuler_vitesses(edges, matched_points, paires, extremites)
         # Etat des routes : passages par tranche de 100 m. Une erreur ici ne
         # doit jamais bloquer le trafic temps reel (messages acquittes quand meme).
         try:
@@ -146,19 +150,24 @@ class ConsommateurPositions:
         return ids
 
     @staticmethod
-    def _extremites(trajet_id):
-        """[(lat, lon)] du depart et de l'arrivee du trajet ([] si inconnu)."""
+    def _infos_trajet(trajet_id):
+        """([(lat, lon)] du depart et de l'arrivee, trajet a moto ?) --
+        ([], False) si le trajet est inconnu."""
+        from accounts.models import TypeVehicule
+
         from ..models import Trajet
 
         try:
             trajet = Trajet.objects.filter(id=uuid.UUID(str(trajet_id))).values(
-                'position_origine', 'position_destination',
+                'position_origine', 'position_destination', 'type_vehicule', 'utilisateur__type_vehicule',
             ).first()
         except ValueError:
-            return []
+            return [], False
         if trajet is None:
-            return []
-        return [(p.y, p.x) for p in trajet.values() if p is not None]
+            return [], False
+        extremites = [(p.y, p.x) for p in (trajet['position_origine'], trajet['position_destination']) if p is not None]
+        vehicule = trajet['type_vehicule'] or trajet['utilisateur__type_vehicule']
+        return extremites, vehicule == TypeVehicule.MOTO
 
     @staticmethod
     def _vitesse_max(arete):

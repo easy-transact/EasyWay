@@ -24,6 +24,7 @@ from accounts.serializers import MessageSerializer
 
 from .exceptions import TransitionInvalide
 from .geocodage import lancer_geocodage_trajet, libelle_generique
+from .services import derniere_position
 from .services.geo import distance_haversine_m
 from .models import Itineraire, Manoeuvre, PrevisionItineraire, StatutTrajet, Trajet, ZoneVitesse
 from .polyline import decoder_polyline6
@@ -274,14 +275,14 @@ def _trajet_actif(request, id):
         "A appeler toutes les 1-2 min pendant la navigation avec la position actuelle. Le "
         "serveur recalcule les itineraires depuis cette position avec le trafic temps reel "
         "(vitesses mesurees des conducteurs EasyWay et embouteillages signales), reconnait "
-        "celui deja suivi. reason : REROUTE_REQUIRED (route barree confirmee devant : "
-        "better_route a appliquer, meme plus long), BETTER_FOUND (plus rapide d'au moins 2 min "
-        "ET 10 %, sans plus de risque), SAFER_FOUND (evite un danger serieux devant -- "
-        "avoided_hazards -- pour un detour borne ; jamais deux fois pour le meme danger), "
-        "HAZARD_AHEAD (danger serieux devant sans contournement utile : alerter seulement, "
-        "hazards_ahead), NO_BETTER, NO_ALTERNATIVE, OFF_ROUTE (le conducteur a quitte sa route : "
-        "faire un recalcul classique avec routes/calculate), NO_ROUTE. Une valeur inconnue "
-        "doit etre traitee comme NO_BETTER. Pour accepter : POST /api/trips/{id}/switch-route/."
+        "celui deja suivi. action : IMPOSE (cause ROAD_CLOSED : route barree confirmee devant, "
+        "basculer sur better_route sans attendre), PROPOSE (cause FASTER : 2 min ET 10 % de gain "
+        "sans plus de risque ; cause SAFER : evite un danger serieux devant, time_saved_s negatif) "
+        "-- proposee seulement si elle sort meilleure a deux appels de suite (pending_confirmation "
+        "au premier), jamais reproposee avant 15 min ; ALERT (alert : danger serieux devant sans "
+        "contournement utile) ; NONE. reason (compatibilite) : BETTER_FOUND pour IMPOSE/PROPOSE, "
+        "NO_BETTER, NO_ALTERNATIVE, OFF_ROUTE (le conducteur a quitte sa route : refaire "
+        "routes/calculate), NO_ROUTE. Pour accepter : POST /api/trips/{id}/switch-route/."
     ),
     request=MeilleurItineraireSerializer,
     responses={200: MeilleurItineraireReponseSerializer, 400: MessageSerializer},
@@ -420,6 +421,8 @@ class TelemetriePositionsView(APIView):
             # regroupement cote consommateur (cf. cahier des charges, confidentialite)
 
         _cumuler_telemetrie(trajet, serializer.validated_data['positions'])
+        derniere = max(serializer.validated_data['positions'], key=lambda p: p['horodatage'])
+        derniere_position.memoriser(request.user.id, derniere['lat'], derniere['lon'])
         if trajet.vehicule_id:
             # Trajet avec un vehicule d'agence : position en direct + exces de vitesse.
             from organisations.flotte import traiter_telemetrie

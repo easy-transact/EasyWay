@@ -50,9 +50,12 @@ class MeilleurItineraireTests(TestCase):
 
     def test_route_plus_rapide_proposee(self):
         # Bouchon sur la route suivie : 20 min avec le trafic, la variante en fait 9.
-        reponse = self.demander([candidat(ROUTE_SUIVIE, 600, 'suivie', 1200), candidat(VARIANTE, 540, 'nord')])
-        donnees = reponse.json()
-        self.assertEqual(donnees['reason'], 'BETTER_FOUND')
+        candidats = [candidat(ROUTE_SUIVIE, 600, 'suivie', 1200), candidat(VARIANTE, 540, 'nord')]
+        # Stabilite : trouvee au premier appel, proposee au second si toujours meilleure.
+        premier = self.demander(candidats).json()
+        self.assertEqual((premier['reason'], premier['action'], premier['pending_confirmation']), ('NO_BETTER', 'NONE', True))
+        donnees = self.demander(candidats).json()
+        self.assertEqual((donnees['reason'], donnees['action'], donnees['cause']), ('BETTER_FOUND', 'PROPOSE', 'FASTER'))
         self.assertEqual(donnees['better_route']['route_id'], 'nord')
         self.assertEqual((donnees['current_duration_s'], donnees['time_saved_s']), (1200, 660))
 

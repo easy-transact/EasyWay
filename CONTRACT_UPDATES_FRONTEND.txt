@@ -442,3 +442,44 @@ signales, deja pris en compte par le calcul d'itineraire).
   Conseil : sur incident.created (WebSocket) d'un danger grave pres de la
   route suivie, appeler better-route tout de suite au lieu d'attendre le
   prochain appel periodique.
+
+
+19. REMPLACE la partie better-route de la section 18 — format action / cause (29/10/2026)
+  Les valeurs REROUTE_REQUIRED / SAFER_FOUND / HAZARD_AHEAD de la section 18
+  n'existent plus : l'appli les aurait ignorees. reason ne prend plus que les
+  valeurs deja connues ; deux champs disent quoi faire.
+
+  POST /api/trips/{id}/better-route/  (corps inchange)
+  -> {
+       "reason": "BETTER_FOUND" | "NO_BETTER" | "NO_ALTERNATIVE" | "OFF_ROUTE" | "NO_ROUTE",
+       "action": "IMPOSE" | "PROPOSE" | "ALERT" | "NONE",
+       "cause":  "ROAD_CLOSED" | "FASTER" | "SAFER" | null,
+       "better_route": <element de routes/calculate, avec risk_score> | null,
+       "current_duration_s": 1260, "new_duration_s": 1440,
+       "time_saved_s": -180,            (negatif : plus long)
+       "current_risk_score": 8.0,       (route suivie ; la proposee : better_route.risk_score)
+       "alert": { "incident_id", "type", "subtype", "distance_m", "severity" } | null,
+       "hazards_ahead": [...], "avoided_hazards": [...],
+       "pending_confirmation": false
+     }
+
+  Que faire :
+    IMPOSE + ROAD_CLOSED  basculer sur better_route sans attendre (switch-route)
+                          et annoncer "Route barree devant, nouvel itineraire".
+    PROPOSE + FASTER      bandeau 45 s "Itineraire plus rapide, -4 min", jamais automatique.
+    PROPOSE + SAFER       bandeau "Itineraire plus sur : evite un accident, +3 min".
+    ALERT                 annoncer alert ("Accident dans 800 m"), sans changement.
+                          alert peut aussi etre rempli avec PROPOSE/IMPOSE.
+    NONE                  rien (mettre a jour l'heure d'arrivee).
+  Une ancienne version de l'appli voit reason = BETTER_FOUND pour IMPOSE et
+  PROPOSE : elle affiche la proposition comme avant.
+
+  Stabilite (cote serveur, rien a faire dans l'appli) : une route n'est
+  proposee que si elle sort meilleure a deux appels de suite
+  (pending_confirmation = true au premier) ; une route proposee et pas prise
+  ne revient pas avant 15 min, sauf si le danger s'aggrave. IMPOSE : jamais
+  de delai. Garder l'appel toutes les 90 s.
+
+  POST /api/incidents/ : NOUVEAU 400 "Too far from your current position" si
+  le conducteur a un trajet en cours (positions envoyees depuis moins de
+  2 min) et signale a plus de 500 m de sa derniere position.

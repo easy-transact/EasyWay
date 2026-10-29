@@ -393,6 +393,23 @@ class IncidentCreationApiTests(TestCase):
         self.assertEqual(reponse.status_code, 400)
         self.assertEqual(Incident.objects.count(), 0)
 
+    def test_signalement_loin_du_conducteur_refuse(self):
+        from trips.services import derniere_position
+
+        # En trajet a ~1,1 km du point signale : refuse ; a cote : accepte.
+        derniere_position.memoriser(self.utilisateur.id, DOUALA_LAT + 0.01, DOUALA_LON)
+        loin = self.client.post(
+            reverse('community:incidents'), self._payload(), content_type='application/json',
+            HTTP_IDEMPOTENCY_KEY='cle-loin', **self.jetons,
+        )
+        self.assertEqual(loin.status_code, 400)
+        derniere_position.memoriser(self.utilisateur.id, DOUALA_LAT + 0.001, DOUALA_LON)
+        pres = self.client.post(
+            reverse('community:incidents'), self._payload(), content_type='application/json',
+            HTTP_IDEMPOTENCY_KEY='cle-pres', **self.jetons,
+        )
+        self.assertEqual(pres.status_code, 201)
+
 
 class IncidentsProchesApiTests(TestCase):
     def setUp(self):

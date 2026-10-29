@@ -151,37 +151,53 @@ class RisqueEnRouteTests(TestCase):
     def test_route_plus_sure_proposee_une_seule_fois(self):
         candidats = [self.avec_risque(candidat(ROUTE_SUIVIE, 600, 'suivie'), 8),
                      self.avec_risque(candidat(VARIANTE, 700, 'nord'))]
+        # 1er appel : trouvee, en attente ; alerte deja donnee.
+        premier = self.demander(candidats)
+        self.assertEqual((premier['action'], premier['pending_confirmation']), ('ALERT', True))
+        self.assertEqual(premier['alert']['distance_m'], 1500)
+        # 2e appel : toujours meilleure -> proposee (reason compatible avec l'ancienne appli).
         donnees = self.demander(candidats)
-        self.assertEqual(donnees['reason'], 'SAFER_FOUND')
+        self.assertEqual((donnees['reason'], donnees['action'], donnees['cause']), ('BETTER_FOUND', 'PROPOSE', 'SAFER'))
         self.assertEqual(donnees['better_route']['route_id'], 'nord')
-        self.assertEqual((donnees['time_saved_s'], donnees['risk_before'], donnees['risk_after']), (-100, 8, 0))
+        self.assertEqual((donnees['time_saved_s'], donnees['current_risk_score']), (-100, 8))
         self.assertEqual(donnees['avoided_hazards'][0]['subtype'], S.ACCIDENT)
-        # Ignoree par le conducteur : on ne repropose pas pour le meme danger.
-        self.assertEqual(self.demander(candidats)['reason'], 'HAZARD_AHEAD')
+        # Ignoree par le conducteur : pas reproposee avant 15 min.
+        for _ in range(2):
+            ensuite = self.demander(candidats)
+            self.assertEqual((ensuite['action'], ensuite['pending_confirmation']), ('ALERT', False))
+
+    def test_danger_aggrave_reproposee(self):
+        # Proposee au 2e appel ; le danger double -> de nouveau (apres 2 evaluations).
+        for points in (8, 8, 16, 16):
+            donnees = self.demander([self.avec_risque(candidat(ROUTE_SUIVIE, 600, 'suivie'), points),
+                                     self.avec_risque(candidat(VARIANTE, 700, 'nord'))])
+        self.assertEqual(donnees['action'], 'PROPOSE')
 
     def test_danger_trop_proche_alerte_seulement(self):
         candidats = [self.avec_risque(candidat(ROUTE_SUIVIE, 600, 'suivie'), 8, distance=150),
                      self.avec_risque(candidat(VARIANTE, 700, 'nord'))]
         donnees = self.demander(candidats)
-        self.assertEqual(donnees['reason'], 'HAZARD_AHEAD')
+        self.assertEqual((donnees['reason'], donnees['action'], donnees['cause']), ('NO_BETTER', 'ALERT', None))
         self.assertIsNone(donnees['better_route'])
         self.assertEqual(len(donnees['hazards_ahead']), 1)
 
     def test_plus_rapide_mais_plus_risquee_pas_proposee(self):
         candidats = [self.avec_risque(candidat(ROUTE_SUIVIE, 600, 'suivie', 1200)),
                      self.avec_risque(candidat(VARIANTE, 540, 'nord'), 8)]
-        self.assertEqual(self.demander(candidats)['reason'], 'NO_BETTER')
+        for _ in range(2):
+            donnees = self.demander(candidats)
+        self.assertEqual((donnees['reason'], donnees['action']), ('NO_BETTER', 'NONE'))
 
-    def test_route_barree_confirmee_devant(self):
+    def test_route_barree_confirmee_devant_imposee_tout_de_suite(self):
         auteur = creer_utilisateur(email='auteur@test.cm')
         signaler(auteur, T.VOIE_BLOQUEE, S.ROUTE_BARREE, lon=9.72, lat=4.05, confirmations=1)
         donnees = self.demander([candidat(VARIANTE, 900, 'nord'), candidat(ROUTE_SUIVIE, 600, 'suivie')])
-        self.assertEqual(donnees['reason'], 'REROUTE_REQUIRED')
+        self.assertEqual((donnees['reason'], donnees['action'], donnees['cause']), ('BETTER_FOUND', 'IMPOSE', 'ROAD_CLOSED'))
         self.assertEqual(donnees['better_route']['route_id'], 'nord')
-        self.assertEqual(donnees['hazards_ahead'][0]['subtype'], S.ROUTE_BARREE)
+        self.assertEqual(donnees['alert']['subtype'], S.ROUTE_BARREE)
 
     def test_route_barree_deja_passee_ignoree(self):
         auteur = creer_utilisateur(email='auteur@test.cm')
         signaler(auteur, T.VOIE_BLOQUEE, S.ROUTE_BARREE, lon=9.701, lat=4.05, confirmations=1)
         donnees = self.demander([candidat(ROUTE_SUIVIE, 600, 'suivie'), candidat(VARIANTE, 900, 'nord')])
-        self.assertEqual(donnees['reason'], 'NO_BETTER')
+        self.assertEqual((donnees['reason'], donnees['action']), ('NO_BETTER', 'NONE'))

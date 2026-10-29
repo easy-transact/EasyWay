@@ -99,6 +99,14 @@ class DangerSerializer(serializers.Serializer):
     points = serializers.FloatField()
 
 
+class AlerteSerializer(serializers.Serializer):
+    incident_id = serializers.UUIDField()
+    type = serializers.CharField()
+    subtype = serializers.CharField(allow_blank=True)
+    distance_m = serializers.IntegerField(help_text='Depuis la position envoyee.')
+    severity = serializers.IntegerField()
+
+
 class ManoeuvreCandidatSerializer(serializers.Serializer):
     type = serializers.CharField()
     instruction = serializers.CharField(allow_blank=True)
@@ -430,18 +438,24 @@ class AutresItinerairesReponseSerializer(serializers.Serializer):
 
 
 class MeilleurItineraireReponseSerializer(serializers.Serializer):
-    reason = serializers.ChoiceField(choices=[
-        'REROUTE_REQUIRED', 'BETTER_FOUND', 'SAFER_FOUND', 'HAZARD_AHEAD',
-        'NO_BETTER', 'NO_ALTERNATIVE', 'OFF_ROUTE', 'NO_ROUTE',
-    ])
+    reason = serializers.ChoiceField(choices=['BETTER_FOUND', 'NO_BETTER', 'NO_ALTERNATIVE', 'OFF_ROUTE', 'NO_ROUTE'])
+    action = serializers.ChoiceField(
+        choices=['IMPOSE', 'PROPOSE', 'ALERT', 'NONE'],
+        help_text='IMPOSE : basculer sans attendre (route barree) ; PROPOSE : bandeau, jamais automatique ; '
+                  'ALERT : annoncer le danger (alert), sans changement.',
+    )
+    cause = serializers.ChoiceField(choices=['ROAD_CLOSED', 'FASTER', 'SAFER'], allow_null=True)
     better_route = ItineraireCandidatSerializer(allow_null=True)
     current_duration_s = serializers.IntegerField(allow_null=True)
     new_duration_s = serializers.IntegerField(allow_null=True)
-    time_saved_s = serializers.IntegerField(allow_null=True, help_text='Negatif : la route proposee est plus longue (SAFER_FOUND, REROUTE_REQUIRED).')
-    risk_before = serializers.FloatField(allow_null=True, help_text='Risque restant sur la route suivie.')
-    risk_after = serializers.FloatField(allow_null=True, help_text='Risque de better_route.')
+    time_saved_s = serializers.IntegerField(allow_null=True, help_text='Negatif : la route proposee est plus longue (SAFER, ROAD_CLOSED).')
+    current_risk_score = serializers.FloatField(allow_null=True, help_text='Risque restant sur la route suivie (celui de better_route : better_route.risk_score).')
+    alert = AlerteSerializer(allow_null=True, help_text='Danger serieux le plus proche devant, ou null.')
     hazards_ahead = DangerSerializer(many=True, help_text='Dangers serieux (gravite >= 6) devant sur la route suivie.')
     avoided_hazards = DangerSerializer(many=True, help_text='Ceux que better_route evite.')
+    pending_confirmation = serializers.BooleanField(
+        help_text="Une meilleure route vient d'etre trouvee : proposee si elle l'est encore a l'appel suivant (stabilite).",
+    )
 
 
 class ChangerItineraireSerializer(serializers.Serializer):

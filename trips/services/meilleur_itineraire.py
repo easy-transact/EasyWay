@@ -39,9 +39,14 @@ BAISSE_MIN_COUT_S = 180
 BAISSE_MIN_RATIO = 0.15
 # Une route plus rapide n'est proposee que si elle n'ajoute pas plus d'1 point de risque.
 TOLERANCE_RISQUE = 1
-PAUSE_PROPOSITION_S = 180
-AGGRAVATION = 1.5             # un danger deja propose revient s'il vaut 50 % de points en plus
-DUREE_MEMOIRE_S = 3 * 3600
+# Stabilite : une route n'est proposee que si elle sort meilleure a deux
+# evaluations de suite (sinon deux routes de cout voisin alternent a chaque
+# appel), et une route deja proposee (donc refusee si le trajet ne l'a pas
+# prise) ne revient pas avant 15 min -- sauf danger aggrave entre-temps.
+# Jamais de delai pour une route barree.
+ATTENTE_MAX_S = 5 * 60        # au-dela, la premiere evaluation est perimee
+REFUS_S = 15 * 60
+AGGRAVATION = 1.5             # un danger revient s'il vaut 50 % de points en plus
 CLE_PROPOSITIONS = 'better-route:propositions:'
 
 REROUTE_REQUIRED = 'REROUTE_REQUIRED'
@@ -73,22 +78,40 @@ def _dangers_serieux(candidat):
     return [d for d in candidat.get('risques') or [] if d['severity'] >= risque.GRAVITE_SERIEUSE]
 
 
-def _deja_propose(trajet, evites):
-    """Anti-harcelement : pas deux propositions "plus sur" a moins de
-    PAUSE_PROPOSITION_S, ni deux fois pour le meme danger -- sauf s'il s'est
-    aggrave depuis (confirme par d'autres, valide par la moderation)."""
-    memoire = cache.get(f'{CLE_PROPOSITIONS}{trajet.id}') or {}
-    if time.time() - memoire.get('le', 0) < PAUSE_PROPOSITION_S:
-        return True
-    connus = memoire.get('dangers', {})
-    return all(d['id'] in connus and d['points'] < connus[d['id']] * AGGRAVATION for d in evites)
+def _echantillon(route):
+    points = decoder_polyline6(route['geometrie'])
+    if len(points) > NB_POINTS_ECHANTILLON:
+        pas = len(points) / NB_POINTS_ECHANTILLON
+        points = [points[int(i * pas)] for i in range(NB_POINTS_ECHANTILLON)]
+    return points
 
 
-def _memoriser_proposition(trajet, evites):
+def _meme_route(route, coords):
+    return len(coords) >= 2 and recouvrement(route, LineString(coords, srid=4326)) >= SEUIL_RECOUVREMENT
+
+
+def _stable(trajet, route, evites):
+    """(proposer maintenant, en attente d'une 2e evaluation). Memoire par
+    trajet dans le cache : {'attente': {coords, le}, 'proposees': [{coords, le, dangers}]}."""
     cle = f'{CLE_PROPOSITIONS}{trajet.id}'
     memoire = cache.get(cle) or {}
-    dangers = {**memoire.get('dangers', {}), **{d['id']: d['points'] for d in evites}}
-    cache.set(cle, {'le': time.time(), 'dangers': dangers}, timeout=DUREE_MEMOIRE_S)
+    maintenant = time.time()
+    proposees = [p for p in memoire.get('proposees', []) if maintenant - p['le'] < REFUS_S]
+    for deja in proposees:
+        aggrave = any(d['id'] not in deja['dangers'] or d['points'] >= deja['dangers'][d['id']] * AGGRAVATION
+                      for d in evites)
+        if _meme_route(route, deja['coords']) and not aggrave:
+            return False, False
+
+    attente = memoire.get('attente')
+    if attente and maintenant - attente['le'] <= ATTENTE_MAX_S and _meme_route(route, attente['coords']):
+        proposees.append({'coords': _echantillon(route), 'le': maintenant,
+                          'dangers': {d['id']: d['points'] for d in evites}})
+        cache.set(cle, {'proposees': proposees}, timeout=REFUS_S)
+        return True, False
+    cache.set(cle, {'proposees': proposees, 'attente': {'coords': _echantillon(route), 'le': maintenant}},
+              timeout=REFUS_S)
+    return False, True
 
 
 def troncon_restant(coords, position):
@@ -98,18 +121,44 @@ def troncon_restant(coords, position):
     return [(position[1], position[0]), *coords[len(parcouru):]] if coords else []
 
 
+# Forme publique (contrat mobile, section 19) : reason reste dans les valeurs
+# que les versions installees de l'appli connaissent ; action/cause disent quoi faire.
+PUBLIC = {
+    REROUTE_REQUIRED: (BETTER_FOUND, 'IMPOSE', 'ROAD_CLOSED'),
+    BETTER_FOUND: (BETTER_FOUND, 'PROPOSE', 'FASTER'),
+    SAFER_FOUND: (BETTER_FOUND, 'PROPOSE', 'SAFER'),
+    HAZARD_AHEAD: (NO_BETTER, 'ALERT', None),
+}
+
+
 def chercher_meilleur(trajet, position, utilisateur, cap=None, etapes_restantes=None, eviter=None):
     """position : (lat, lon). Retourne un dict :
-      reason : REROUTE_REQUIRED | BETTER_FOUND | SAFER_FOUND | HAZARD_AHEAD |
-               NO_BETTER | NO_ALTERNATIVE | OFF_ROUTE | NO_ROUTE
-      better_route : candidat (forme ServiceItineraire) si REROUTE_REQUIRED,
-               BETTER_FOUND ou SAFER_FOUND
+      reason : BETTER_FOUND | NO_BETTER | NO_ALTERNATIVE | OFF_ROUTE | NO_ROUTE
+      action : IMPOSE | PROPOSE | ALERT | NONE ; cause : ROAD_CLOSED | FASTER | SAFER | None
+      better_route : candidat (forme ServiceItineraire) si IMPOSE ou PROPOSE
+      alert : danger serieux le plus proche devant ({incident_id, type, subtype,
+               distance_m, severity}) ou None
       current_duration_s, new_duration_s, time_saved_s (negatif : plus long),
-      risk_before, risk_after, hazards_ahead (dangers serieux devant sur la
-      route suivie), avoided_hazards (ceux que better_route evite)."""
+      current_risk_score, hazards_ahead, avoided_hazards,
+      pending_confirmation (route meilleure trouvee, proposee si elle l'est
+      encore a l'appel suivant)."""
+    interne = _decider(trajet, position, utilisateur, cap, etapes_restantes, eviter)
+    raison, action, cause = PUBLIC.get(interne['reason'], (interne['reason'], 'NONE', None))
+    devant = interne['hazards_ahead']
+    alerte = devant[0] if devant else None
+    return {
+        **interne, 'reason': raison, 'action': action, 'cause': cause,
+        'alert': alerte and {
+            'incident_id': alerte['id'], 'type': alerte['type'], 'subtype': alerte['subtype'],
+            'distance_m': alerte['distance_from_start_m'], 'severity': alerte['severity'],
+        },
+    }
+
+
+def _decider(trajet, position, utilisateur, cap, etapes_restantes, eviter):
     resultat = {'reason': NO_BETTER, 'better_route': None, 'current_duration_s': None,
-                'new_duration_s': None, 'time_saved_s': None, 'risk_before': None, 'risk_after': None,
-                'hazards_ahead': [], 'avoided_hazards': []}
+                'new_duration_s': None, 'time_saved_s': None, 'current_risk_score': None,
+                'hazards_ahead': [], 'avoided_hazards': [], 'pending_confirmation': False}
     candidats = ServiceItineraire().calculer(
         depart=position,
         arrivee=(trajet.position_destination.y, trajet.position_destination.x),
@@ -129,8 +178,7 @@ def chercher_meilleur(trajet, position, utilisateur, cap=None, etapes_restantes=
         nouvelle = candidats[0]
         return {
             **resultat, 'reason': REROUTE_REQUIRED, 'better_route': nouvelle,
-            'new_duration_s': duree_effective(nouvelle), 'risk_after': nouvelle.get('risque'),
-            'hazards_ahead': fermetures, 'avoided_hazards': fermetures,
+            'new_duration_s': duree_effective(nouvelle), 'hazards_ahead': fermetures, 'avoided_hazards': fermetures,
         }
 
     reference = LineString(trajet.geometrie.coords, srid=4326)
@@ -143,23 +191,19 @@ def chercher_meilleur(trajet, position, utilisateur, cap=None, etapes_restantes=
 
     actuelle = duree_effective(actuel)
     devant = _dangers_serieux(actuel)
-    resultat.update(current_duration_s=actuelle, risk_before=actuel.get('risque', 0), hazards_ahead=devant)
+    resultat.update(current_duration_s=actuelle, current_risk_score=actuel.get('risque', 0), hazards_ahead=devant)
     autres = [c for c in candidats if c is not actuel]
     if not autres:
         return {**resultat, 'reason': HAZARD_AHEAD if devant else NO_ALTERNATIVE}
 
-    def proposer(raison, route, evites=()):
-        return {**resultat, 'reason': raison, 'better_route': route, 'new_duration_s': duree_effective(route),
-                'time_saved_s': actuelle - duree_effective(route), 'risk_after': route.get('risque', 0),
-                'avoided_hazards': list(evites)}
-
+    propositions = []
     # 1. Plus rapide, sans etre plus risquee.
     rapide = min(autres, key=duree_effective)
     gain = actuelle - duree_effective(rapide)
     if (gain >= GAIN_MIN_S and gain >= GAIN_MIN_RATIO * actuelle
             and rapide.get('risque', 0) <= actuel.get('risque', 0) + TOLERANCE_RISQUE):
         sur_rapide = {d['id'] for d in rapide.get('risques') or []}
-        return proposer(BETTER_FOUND, rapide, [d for d in devant if d['id'] not in sur_rapide])
+        propositions.append((BETTER_FOUND, rapide, [d for d in devant if d['id'] not in sur_rapide]))
 
     # 2. Plus sure : evite un danger serieux encore assez loin pour changer de
     # route, pour un cout (duree + risque) nettement plus bas, detour borne.
@@ -172,11 +216,18 @@ def chercher_meilleur(trajet, position, utilisateur, cap=None, etapes_restantes=
             evites = [d for d in contournables if d['id'] not in sur_sure]
             baisse = risque.cout(actuel) - risque.cout(sure)
             if evites and baisse >= BAISSE_MIN_COUT_S and baisse >= BAISSE_MIN_RATIO * risque.cout(actuel):
-                if not _deja_propose(trajet, evites):
-                    _memoriser_proposition(trajet, evites)
-                    return proposer(SAFER_FOUND, sure, evites)
+                propositions.append((SAFER_FOUND, sure, evites))
 
-    # 3. Rien de mieux : on previent quand meme du danger.
+    for raison, route, evites in propositions:
+        maintenant, en_attente = _stable(trajet, route, evites)
+        if maintenant:
+            return {**resultat, 'reason': raison, 'better_route': route, 'new_duration_s': duree_effective(route),
+                    'time_saved_s': actuelle - duree_effective(route), 'avoided_hazards': evites}
+        if en_attente:
+            resultat['pending_confirmation'] = True
+            break
+
+    # 3. Rien a proposer (maintenant) : on previent quand meme du danger.
     return {**resultat, 'reason': HAZARD_AHEAD} if devant else resultat
 
 

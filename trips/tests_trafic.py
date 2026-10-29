@@ -95,3 +95,12 @@ class FiltresVitessesTests(TestCase):
         arete = [{'id': 1, 'length': 0.5, 'road_class': 'primary'}]
         self.assertFalse(self.consommer(arete, str(trajet.id)))  # premiere position au point de depart
         self.assertTrue(self.consommer(arete, str(trajet.id), positions=((4.10, 9.80), (4.11, 9.81))))
+
+    def test_motos_exclues_des_vitesses(self):
+        trajet = Trajet.objects.create(
+            utilisateur=creer_utilisateur(), position_origine='POINT(9.70 4.05)', libelle_origine='A',
+            position_destination='POINT(9.90 4.20)', libelle_destination='B', itineraire_choisi='x',
+            distance_prevue=1000, duree_prevue=100, statut=StatutTrajet.ACTIF, type_vehicule='MOTO',
+        )
+        arete = [{'id': 1, 'length': 0.5, 'road_class': 'primary'}]
+        self.assertFalse(self.consommer(arete, str(trajet.id), positions=((4.10, 9.80), (4.11, 9.81))))

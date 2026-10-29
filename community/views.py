@@ -59,6 +59,9 @@ from .serializers import (
 from .services import PositionHorsRoute, QuotaDepasse, ServiceIncident, incidents_actifs_par_topologie
 
 DUREE_IDEMPOTENCE_S = 24 * 3600
+# Garde-fou : on signale ce qu'on voit, pas un point choisi sur la carte a distance.
+DISTANCE_MAX_AUTEUR_M = 500
+AGE_MAX_POSITION_S = 120
 
 # MAX_CELLULES (cf. cache_incidents.py) : meme plafond que l'abonnement temps
 # reel (consumers.py). Valeur pas mesuree sur donnees reelles.
@@ -589,6 +592,18 @@ class IncidentCreationView(APIView):
         serializer = IncidentCreationSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         donnees = serializer.validated_data
+
+        # Signalement loin du conducteur (position du trajet en cours, < 2 min) :
+        # refuse. Sans trajet en cours (ni position recente), rien a comparer.
+        from trips.services import derniere_position
+        from trips.services.geo import distance_haversine_m
+
+        position = None if request.user.is_staff else derniere_position.lire(request.user.id, AGE_MAX_POSITION_S)
+        if position and distance_haversine_m(position, (donnees['lat'], donnees['lon'])) > DISTANCE_MAX_AUTEUR_M:
+            return Response(
+                {'detail': f'Too far from your current position (more than {DISTANCE_MAX_AUTEUR_M} m).'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
             incident, est_doublon = ServiceIncident().signaler(
