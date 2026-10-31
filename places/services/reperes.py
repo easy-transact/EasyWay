@@ -38,6 +38,10 @@ PRIORITES = [
     ('AUTRE', ('banque', 'ecole', 'college', 'lycee', 'universite', 'hotel', 'supermarche', 'bank', 'school')),
 ]
 RANG = {nature: i for i, (nature, _) in enumerate(PRIORITES)}
+# Etablissements saisis par le staff : nature de repere selon leur type (pas les garages).
+NATURE_ETABLISSEMENT = {
+    TypeEtablissement.HOPITAL: 'SANTE', TypeEtablissement.PHARMACIE: 'SANTE', TypeEtablissement.STATION: 'STATION',
+}
 PREFIXES_CARREFOUR = ('carrefour', 'rond-point', 'rond point')
 
 
@@ -106,10 +110,10 @@ def _candidats(points):
         statut=StatutLieu.APPROUVE, position_approximative=False, position__dwithin=(zone, D(m=RAYON_M)),
     ).only('nom', 'categorie', 'position')
     resultat = [(nature(l.categorie, l.nom), l.nom.strip(), l.position.y, l.position.x) for l in lieux]
-    hopitaux = Etablissement.objects.filter(
-        type=TypeEtablissement.HOPITAL, visible_sur_carte=True, position__dwithin=(zone, D(m=RAYON_M)),
+    etablissements = Etablissement.objects.filter(
+        type__in=NATURE_ETABLISSEMENT, visible_sur_carte=True, position__dwithin=(zone, D(m=RAYON_M)),
     )
-    resultat += [('SANTE', e.nom.strip(), e.position.y, e.position.x) for e in hopitaux]
+    resultat += [(NATURE_ETABLISSEMENT[e.type], e.nom.strip(), e.position.y, e.position.x) for e in etablissements]
     return [c for c in resultat if c[0] and nom_lisible(c[1])]
 
 

@@ -526,6 +526,20 @@ class ListeAttenteTests(TestCase):
         reponse = self.client.get(reverse('accounts:staff-liste-attente') + '?contacted=false', **auth)
         self.assertEqual([r['full_name'] for r in reponse.json()['results']], ['Awa Ngono'])
 
+    def test_staff_ajoute_une_inscription(self):
+        staff = creer_utilisateur(email='staff@easyway.local', is_staff=True)
+        auth = connecter(self.client, staff.telephone)
+        url = reverse('accounts:staff-liste-attente')
+        corps = {'full_name': 'Garage Bonaberi', 'phone': '677001144', 'profile': 'FLOTTE', 'city': 'Douala'}
+        reponse = self.client.post(url, corps, content_type='application/json', **auth)
+        self.assertEqual(reponse.status_code, 201, reponse.content)
+        self.assertEqual((reponse.json()['phone'], reponse.json()['source']), ('+237677001144', 'back-office'))
+        # Meme numero : refuse, pas de doublon.
+        self.assertEqual(self.client.post(url, corps, content_type='application/json', **auth).status_code, 400)
+        normal = creer_utilisateur(email='normal@easyway.local')
+        jetons = connecter(self.client, normal.telephone)
+        self.assertEqual(self.client.post(url, corps, content_type='application/json', **jetons).status_code, 403)
+
 
 class VerificationExistenceLimiteTests(TestCase):
     """Audit securite du 07/10 : check-existence ne doit pas permettre de

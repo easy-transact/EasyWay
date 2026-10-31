@@ -32,9 +32,12 @@ TYPES = {
         'etablissement': TypeEtablissement.HOPITAL,
     },
     # "Station de taxi" n'est pas une station-service.
-    'station': {'mots': ['station-service', 'station service', 'carburant', 'fuel'], 'etablissement': None},
-    'pharmacie': {'mots': ['pharmacie', 'pharmacy'], 'etablissement': None},
+    'station': {
+        'mots': ['station-service', 'station service', 'carburant', 'fuel'], 'etablissement': TypeEtablissement.STATION,
+    },
+    'pharmacie': {'mots': ['pharmacie', 'pharmacy'], 'etablissement': TypeEtablissement.PHARMACIE},
 }
+TYPE_PAR_ETABLISSEMENT = {d['etablissement']: nom for nom, d in TYPES.items()}
 TYPES_AVEC_HORAIRES = ('station', 'pharmacie')
 
 RAYON_DEFAUT_M = 2000
@@ -151,7 +154,7 @@ def a_proximite(lat, lon, rayon_m, types, limite, maintenant):
     for etablissement in etablissements:
         resultats.append({
             'id': str(etablissement.id), 'kind': 'establishment',
-            'type': 'garage' if etablissement.type == TypeEtablissement.GARAGE else 'hopital',
+            'type': TYPE_PAR_ETABLISSEMENT[etablissement.type],
             'name': etablissement.nom, 'category': etablissement.get_type_display(), 'address': etablissement.adresse,
             'city': etablissement.ville, 'lat': etablissement.position.y, 'lon': etablissement.position.x,
             'distance_m': round(etablissement.distance.m), 'horaires': {},

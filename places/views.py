@@ -690,7 +690,7 @@ class LieuSupprimerView(APIView):
         summary='Lister les etablissements',
         description='Reserve au staff (is_staff). Filtre optionnel par `type`.',
         parameters=[
-            OpenApiParameter('type', OpenApiTypes.STR, description='HOPITAL/GARAGE.'),
+            OpenApiParameter('type', OpenApiTypes.STR, description='HOPITAL (clinique)/GARAGE/STATION/PHARMACIE.'),
             OpenApiParameter('page', OpenApiTypes.INT),
             OpenApiParameter('page_size', OpenApiTypes.INT),
         ],

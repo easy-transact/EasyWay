@@ -59,5 +59,5 @@ class LieuxCarteTests(TestCase):
 
     def test_categories(self):
         categories = self.client.get(reverse('places:carte-categories')).json()
-        self.assertIn({'category': 'HOPITAL', 'label': 'Hopital', 'count': 1, 'kind': 'establishment'}, categories)
+        self.assertIn({'category': 'HOPITAL', 'label': 'Clinique', 'count': 1, 'kind': 'establishment'}, categories)
         self.assertIn({'category': 'Station-service', 'label': 'Station-service', 'count': 2, 'kind': 'place'}, categories)

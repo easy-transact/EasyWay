@@ -52,6 +52,13 @@ class ProximiteTests(TestCase):
         resultats = self.chercher(types='pharmacie,station', radius_m=1000)
         self.assertEqual({r['type'] for r in resultats}, {'pharmacie', 'station'})
 
+    def test_station_et_pharmacie_saisies_par_le_staff(self):
+        Etablissement.objects.create(nom='Tradex Bonanjo', type=TypeEtablissement.STATION, position=Point(9.70, 4.0502, srid=4326))
+        Etablissement.objects.create(nom='Pharmacie Bonanjo', type=TypeEtablissement.PHARMACIE, position=Point(9.70, 4.0503, srid=4326))
+        resultats = [r for r in self.chercher(types='pharmacie,station', radius_m=1000) if r['kind'] == 'establishment']
+        self.assertEqual({(r['name'], r['type']) for r in resultats}, {('Tradex Bonanjo', 'station'), ('Pharmacie Bonanjo', 'pharmacie')})
+        self.assertIsNone(resultats[0]['opening_hours'])
+
     def test_type_inconnu_refuse(self):
         reponse = self.client.get(reverse('places:proximite'), {'lat': 4.05, 'lon': 9.7, 'types': 'boulangerie'})
         self.assertEqual(reponse.status_code, 400)

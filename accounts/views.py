@@ -896,6 +896,25 @@ class ListeAttenteModerationListView(APIView):
         page = paginateur.paginate_queryset(inscriptions.order_by('-cree_le'), request)
         return paginateur.get_paginated_response(ListeAttenteModerationSerializer(page, many=True).data)
 
+    @extend_schema(
+        tags=['Staff Waitlist'],
+        summary="Ajouter une personne a la liste d'attente",
+        description=(
+            "Reserve au staff : inscription saisie a la main (salon, appel, partenaire). Meme corps que "
+            "POST /api/waitlist/ ; source par defaut \"back-office\". 400 si le numero est deja inscrit."
+        ),
+        request=ListeAttenteSerializer,
+        responses={201: ListeAttenteModerationSerializer, 400: MessageSerializer},
+    )
+    def post(self, request):
+        serializer = ListeAttenteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        if InscriptionListeAttente.objects.filter(telephone=serializer.validated_data['telephone']).exists():
+            return Response({'detail': 'This phone number is already on the waitlist.'}, status=status.HTTP_400_BAD_REQUEST)
+        inscription = serializer.save(source=serializer.validated_data.get('source') or 'back-office')
+        journaliser(request.user, 'waitlist.created', inscription, libelle=inscription.nom_complet)
+        return Response(ListeAttenteModerationSerializer(inscription).data, status=status.HTTP_201_CREATED)
+
 
 @extend_schema(
     tags=['Staff Waitlist'],

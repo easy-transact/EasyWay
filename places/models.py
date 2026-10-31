@@ -45,8 +45,11 @@ class TypeEtablissement(models.TextChoices):
     """Etablissements "basiques" enregistres directement par le staff (back-office),
     distincts de Lieu -- liste volontairement restreinte au depart, extensible."""
 
-    HOPITAL = 'HOPITAL', 'Hopital'
+    # Valeur HOPITAL gardee (API, donnees existantes) ; affichee "Clinique".
+    HOPITAL = 'HOPITAL', 'Clinique'
     GARAGE = 'GARAGE', 'Garage'
+    STATION = 'STATION', 'Station-service'
+    PHARMACIE = 'PHARMACIE', 'Pharmacie'
 
 
 class Lieu(models.Model):
