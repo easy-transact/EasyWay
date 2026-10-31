@@ -24,7 +24,7 @@ from accounts.serializers import MessageSerializer
 
 from .exceptions import TransitionInvalide
 from .geocodage import lancer_geocodage_trajet, libelle_generique
-from .services import derniere_position
+from .services import derniere_position, positions_direct
 from .services.geo import distance_haversine_m
 from .models import Itineraire, Manoeuvre, PrevisionItineraire, PropositionItineraire, StatutTrajet, Trajet, ZoneVitesse
 from .polyline import decoder_polyline6
@@ -435,6 +435,7 @@ class TelemetriePositionsView(APIView):
         _cumuler_telemetrie(trajet, serializer.validated_data['positions'])
         derniere = max(serializer.validated_data['positions'], key=lambda p: p['horodatage'])
         derniere_position.memoriser(request.user.id, derniere['lat'], derniere['lon'])
+        positions_direct.memoriser(trajet, derniere, trajet.type_vehicule or request.user.type_vehicule)
         if trajet.vehicule_id:
             # Trajet avec un vehicule d'agence : position en direct + exces de vitesse.
             from organisations.flotte import traiter_telemetrie

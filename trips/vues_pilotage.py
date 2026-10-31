@@ -7,6 +7,7 @@ qualite du service. Lecture seule, rien n'est persiste ici.
   GET /api/staff/insights/route-proposals/    propositions better-route et acceptation
   GET /api/staff/insights/data-density/       volume de donnees (trajets, passages, tronçons)
   GET /api/staff/insights/live-map/           signalements actifs + vitesses des 15 dernieres min
+  GET /api/staff/insights/live-vehicles/      vehicules en direct, points anonymes (admins seulement)
 """
 
 import statistics
@@ -19,7 +20,7 @@ from django.contrib.gis.measure import D
 from django.db.models import Avg, Count
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema
-from rest_framework.permissions import IsAdminUser
+from rest_framework.permissions import BasePermission, IsAdminUser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -29,7 +30,7 @@ from etat_routes.services.reglages import reglages
 from etat_routes.services.troncons import classe_attendue
 
 from .models import FUSEAU_TRAFIC, PropositionItineraire, StatutTrajet, Trajet
-from .services import retards_signalements, risque_itineraire
+from .services import positions_direct, retards_signalements, risque_itineraire
 from .services.duree_ville import AGGLOMERATIONS
 from .services.geo import distance_haversine_m
 
@@ -268,6 +269,29 @@ class DensiteDonneesView(APIView):
                 'alert_drivers_min': reg['conducteurs_min_alerte'],
             },
         })
+
+
+class EstAdmin(BasePermission):
+    """Compte administrateur (is_superuser) : les positions individuelles,
+    meme anonymes, ne sont pas montrees aux moderateurs."""
+
+    def has_permission(self, request, view):
+        return bool(request.user and request.user.is_authenticated and request.user.is_superuser)
+
+
+class VehiculesDirectView(APIView):
+    """Vehicules en trajet vus depuis moins de 2 min : points anonymes
+    (identifiant du jour, type, vitesse, cap), bbox facultative. Admins seulement."""
+
+    permission_classes = [EstAdmin]
+
+    @extend_schema(tags=['Staff - Pilotage'], summary='Vehicules en direct (anonymes, admins)')
+    def get(self, request):
+        try:
+            bbox = [float(request.query_params[k]) for k in ('south', 'west', 'north', 'east')]
+        except (KeyError, ValueError):
+            bbox = None
+        return Response({'updated_at': timezone.now(), 'vehicles': positions_direct.lire(bbox)})
 
 
 class CarteDirectView(APIView):

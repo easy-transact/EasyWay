@@ -101,3 +101,40 @@ class PilotageTests(TestCase):
         direct = self.lire('pilotage-direct', south=4.0, west=9.6, north=4.1, east=9.8)
         self.assertEqual(direct['segments'][0]['ratio'], 0.5)  # 30 km/h sur 60 attendus en ville
         self.assertEqual(direct['zones'][0]['drivers'], 2)
+
+
+class VehiculesDirectTests(TestCase):
+    def setUp(self):
+        from .services.positions_direct import CLE_MAJ, CLE_POSITIONS
+        from .services.producteur_evenements import connexion_redis_telemetrie
+
+        connexion_redis_telemetrie().delete(CLE_MAJ, CLE_POSITIONS)
+        self.conducteur = creer_utilisateur(email='conducteur@test.cm')
+        self.trajet = _trajet_actif_pour(self.conducteur, type_vehicule='MOTO')
+        self.url = reverse('trips:pilotage-vehicules')
+
+    def envoyer_position(self):
+        jetons = connecter(self.client, self.conducteur.telephone)
+        with patch('trips.views.ProducteurRedisStreams'):
+            reponse = self.client.post(reverse('trips:telemetrie-positions'), {
+                'trip': str(self.trajet.id),
+                'positions': [{'lat': 4.0483, 'lon': 9.7043, 'speed_kmh': 32.5, 'heading': 180,
+                               'timestamp': timezone.now().isoformat()}],
+            }, content_type='application/json', **jetons)
+        self.assertEqual(reponse.status_code, 202)
+
+    def test_points_anonymes_reserves_aux_admins(self):
+        self.envoyer_position()
+        moderateur = creer_utilisateur(email='modo@easyway.local', is_staff=True)
+        self.assertEqual(self.client.get(self.url, **connecter(self.client, moderateur.telephone)).status_code, 403)
+
+        admin = creer_utilisateur(email='admin@easyway.local', is_staff=True, is_superuser=True)
+        vehicules = self.client.get(self.url, **connecter(self.client, admin.telephone)).json()['vehicles']
+        self.assertEqual(len(vehicules), 1)
+        v = vehicules[0]
+        self.assertEqual((v['lat'], v['speed_kmh'], v['heading'], v['vehicle_type']), (4.0483, 32.5, 180, 'MOTO'))
+        self.assertNotIn(str(self.trajet.id), str(v))  # aucun identifiant reel
+        # Hors de la zone demandee : rien.
+        hors_zone = self.client.get(self.url, {'south': 3.8, 'west': 11.4, 'north': 3.9, 'east': 11.6},
+                                    **connecter(self.client, admin.telephone)).json()['vehicles']
+        self.assertEqual(hors_zone, [])

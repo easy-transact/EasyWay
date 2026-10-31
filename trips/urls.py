@@ -36,4 +36,5 @@ urlpatterns = [
     path('staff/insights/route-proposals/', vues_pilotage.PropositionsView.as_view(), name='pilotage-propositions'),
     path('staff/insights/data-density/', vues_pilotage.DensiteDonneesView.as_view(), name='pilotage-densite'),
     path('staff/insights/live-map/', vues_pilotage.CarteDirectView.as_view(), name='pilotage-direct'),
+    path('staff/insights/live-vehicles/', vues_pilotage.VehiculesDirectView.as_view(), name='pilotage-vehicules'),
 ]
