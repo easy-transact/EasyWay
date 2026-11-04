@@ -1157,6 +1157,19 @@ class TelemetriePositionsApiTests(TestCase):
         self.assertEqual(reponse.status_code, 202)
         ClasseProducteur.return_value.publier.assert_not_called()
 
+    def test_flux_telemetrie_indisponible_renvoie_quand_meme_202(self):
+        # Redis-telemetrie en panne : on degrade (positions non publiees) mais
+        # l'appli ne doit pas recevoir 500 (sinon boucle de reessais, trajet "abandonne").
+        with patch('trips.views.ProducteurRedisStreams') as ClasseProducteur:
+            ClasseProducteur.return_value.publier.side_effect = ConnectionError('redis down')
+            reponse = self.client.post(
+                reverse('trips:telemetrie-positions'), self._lot(), content_type='application/json', **self.jetons
+            )
+        self.assertEqual(reponse.status_code, 202)
+        # L'agregat en base est quand meme ecrit (ne depend pas de Redis-telemetrie).
+        self.trajet.refresh_from_db()
+        self.assertEqual(self.trajet.telemetrie_positions, 2)
+
     def test_trajet_dun_autre_utilisateur_rejete(self):
         autre = creer_utilisateur('autre@easyway.local')
         trajet_autre = _trajet_actif_pour(autre)

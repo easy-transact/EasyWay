@@ -26,6 +26,11 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    # Persistance (AOF) : cf. docker-compose.prod.yml (broker Celery, telemetrie,
+    # WebSocket) -- meme comportement qu'en prod pour eviter les surprises.
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - redis_data:/data
     ports:
       - "6379:6379"
     healthcheck:
@@ -261,6 +266,7 @@ services:
 
 volumes:
   postgres_data:
+  redis_data:
   nominatim_data:
   photon_data:
   static_data:

@@ -1,3 +1,4 @@
+import logging
 from datetime import timedelta
 
 from django.contrib.gis.geos import LineString, Point
@@ -55,6 +56,8 @@ from .services.producteur_evenements import FLUX_POSITIONS, ProducteurRedisStrea
 from .services.meilleur_itineraire import chercher_autres, chercher_meilleur, troncon_parcouru
 from .services.service_itineraire import ServiceItineraire
 from .services.zones_vitesse import zones_sur_trajet
+
+logger = logging.getLogger(__name__)
 
 DUREE_PERIODE = {
     'week': timedelta(days=7),
@@ -423,17 +426,25 @@ class TelemetriePositionsView(APIView):
         serializer.is_valid(raise_exception=True)
         trajet = serializer.validated_data['trajet']
 
-        producteur = ProducteurRedisStreams()
-        for position in serializer.validated_data['positions']:
-            producteur.publier(FLUX_POSITIONS, {
-                'trajet_id': str(trajet.id),
-                'lat': position['lat'],
-                'lon': position['lon'],
-                'vitesse_kmh': position.get('vitesse_kmh'),
-                'cap': position.get('cap'),
-                'horodatage': position['horodatage'].isoformat(),
-            })  # jamais d'identifiant utilisateur publie -- trajet_id suffit au
-            # regroupement cote consommateur (cf. cahier des charges, confidentialite)
+        # Publication sur le flux de telemetrie (Redis /3) : jamais une
+        # dependance dure, comme le cache (IGNORE_EXCEPTIONS) et le WebSocket.
+        # Si Redis-telemetrie est injoignable, on degrade (trafic temps reel
+        # perdu) mais on renvoie quand meme 202 -- sinon l'appli recoit un 500
+        # et reessaie en boucle, et le trajet parait abandonne.
+        try:
+            producteur = ProducteurRedisStreams()
+            for position in serializer.validated_data['positions']:
+                producteur.publier(FLUX_POSITIONS, {
+                    'trajet_id': str(trajet.id),
+                    'lat': position['lat'],
+                    'lon': position['lon'],
+                    'vitesse_kmh': position.get('vitesse_kmh'),
+                    'cap': position.get('cap'),
+                    'horodatage': position['horodatage'].isoformat(),
+                })  # jamais d'identifiant utilisateur publie -- trajet_id suffit au
+                # regroupement cote consommateur (cf. cahier des charges, confidentialite)
+        except Exception:
+            logger.exception('Flux de telemetrie indisponible, positions non publiees (trajet %s)', trajet.id)
 
         _cumuler_telemetrie(trajet, serializer.validated_data['positions'])
         derniere = max(serializer.validated_data['positions'], key=lambda p: p['horodatage'])

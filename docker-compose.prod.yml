@@ -33,6 +33,12 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    # Persistance (AOF) : Redis porte le broker Celery (/2), les flux de
+    # telemetrie (/3) et l'etat WebSocket (/4) -- sans volume, un redemarrage
+    # du conteneur perdait les taches en file et les positions en cours.
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - redis_data:/data
     ports:
       - "127.0.0.1:6379:6379"
     healthcheck:
@@ -250,6 +256,7 @@ services:
 
 volumes:
   postgres_data:
+  redis_data:
   nominatim_data:
   photon_data:
   static_data:
