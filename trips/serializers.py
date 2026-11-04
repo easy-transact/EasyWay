@@ -399,6 +399,8 @@ class TrajetMiseAJourSerializer(serializers.ModelSerializer):
         if validated_data:
             for champ, valeur in validated_data.items():
                 setattr(instance, champ, valeur)
+            # Chronometre de l'appli reste ouvert des heures apres la derniere position.
+            instance.corriger_duree_reelle()
             instance.save(update_fields=list(validated_data.keys()))
         if nouveau_statut:
             instance.changer_statut(nouveau_statut)  # leve TransitionInvalide si illegal

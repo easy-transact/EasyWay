@@ -33,6 +33,12 @@ class StatutTrajet(models.TextChoices):
 # sur le fonctionnement du systeme (contrairement a score_reputation, qui
 # pese les votes).
 POINTS_PAR_TRAJET_TERMINE = 10
+# Duree envoyee par l'appli toleree au-dela de la duree suivie par les positions
+# (zone sans reseau en fin de trajet), cf. Trajet.corriger_duree_reelle.
+MARGE_DUREE_REELLE_S = 30 * 60
+# Trace reelle : un point garde tous les PAS_TRACE_REELLE_M, au plus NB_MAX_POINTS_TRACE.
+PAS_TRACE_REELLE_M = 15
+NB_MAX_POINTS_TRACE = 5000
 
 
 class NiveauTrafic(models.TextChoices):
@@ -116,6 +122,10 @@ class Trajet(models.Model):
     # direct de l'agence), jamais pour un trajet personnel ; effacee avec la
     # geometrie par purger_geometrie().
     derniere_position = gis_models.PointField(srid=4326, geography=True, null=True, blank=True)
+    # Chemin reellement parcouru (positions de telemetrie, un point tous les
+    # PAS_TRACE_REELLE_M au plus), pour la fiche du back-office ; efface avec
+    # la geometrie par purger_geometrie().
+    trace_reelle = gis_models.LineStringField(srid=4326, null=True, blank=True)
     derniere_vitesse_kmh = models.FloatField(null=True, blank=True)
     dernier_cap = models.PositiveSmallIntegerField(null=True, blank=True)
     derniere_position_le = models.DateTimeField(null=True, blank=True)
@@ -187,10 +197,28 @@ class Trajet(models.Model):
             return None
         return round((self.duree_reelle - self.duree_prevue) / self.duree_prevue * 100, 1)
 
+    def duree_suivie(self):
+        """Secondes entre le depart et la derniere position recue, ou None."""
+        if not self.demarre_le or not self.telemetrie_derniere_le:
+            return None
+        return max(int((self.telemetrie_derniere_le - self.demarre_le).total_seconds()), 0)
+
+    def corriger_duree_reelle(self):
+        """La duree envoyee par l'appli est un chronometre depuis le depart : si
+        l'appli n'a pas ete fermee proprement, il continue (vu le 03/11 : 10 h 31
+        annoncees pour 37 min de positions). Au-dela de la duree suivie + MARGE,
+        on retient la duree suivie. Retourne True si corrigee."""
+        suivie = self.duree_suivie()
+        if suivie is None or self.duree_reelle is None or self.duree_reelle <= suivie + MARGE_DUREE_REELLE_S:
+            return False
+        self.duree_reelle = suivie
+        return True
+
     def purger_geometrie(self):
         self.geometrie = None
         self.derniere_position = None
-        self.save(update_fields=['geometrie', 'derniere_position'])
+        self.trace_reelle = None
+        self.save(update_fields=['geometrie', 'derniere_position', 'trace_reelle'])
 
 
 class Itineraire(models.Model):

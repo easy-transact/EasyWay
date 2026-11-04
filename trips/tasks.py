@@ -168,6 +168,8 @@ def abandonner_trajets_inactifs():
         if trajet.demarre_le and trajet.duree_reelle is None:
             trajet.duree_reelle = int((trajet.derniere_activite - trajet.demarre_le).total_seconds())
             champs.append('duree_reelle')
+        elif trajet.corriger_duree_reelle():  # duree deja envoyee par l'appli, chronometre reste ouvert
+            champs.append('duree_reelle')
         trajet.save(update_fields=champs)
         nb += 1
     if nb:

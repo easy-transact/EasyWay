@@ -26,7 +26,10 @@ from .exceptions import TransitionInvalide
 from .geocodage import lancer_geocodage_trajet, libelle_generique
 from .services import derniere_position, positions_direct
 from .services.geo import distance_haversine_m
-from .models import Itineraire, Manoeuvre, PrevisionItineraire, PropositionItineraire, StatutTrajet, Trajet, ZoneVitesse
+from .models import (
+    NB_MAX_POINTS_TRACE, PAS_TRACE_REELLE_M, Itineraire, Manoeuvre, PrevisionItineraire, PropositionItineraire, StatutTrajet,
+    Trajet, ZoneVitesse,
+)
 from .polyline import decoder_polyline6
 from .serializers import (
     CalculItineraireSerializer,
@@ -465,6 +468,23 @@ def _cumuler_telemetrie(trajet, positions):
     if vitesses:
         maj['telemetrie_vitesse_max'] = Greatest('telemetrie_vitesse_max', Value(float(max(vitesses))))
     Trajet.objects.filter(pk=trajet.pk).update(**maj)
+    _etendre_trace_reelle(trajet, positions)
+
+
+def _etendre_trace_reelle(trajet, positions):
+    """Ajoute le lot (trie) au chemin reellement parcouru, un point tous les
+    PAS_TRACE_REELLE_M au plus. Verrou sur la ligne : deux lots concurrents
+    ne s'ecrasent pas. Un lot rejoue en retard (hors reseau) s'ajoute a la fin."""
+    with transaction.atomic():
+        actuel = Trajet.objects.select_for_update().only('trace_reelle').get(pk=trajet.pk)
+        points = [(lat, lon) for lon, lat in actuel.trace_reelle.coords] if actuel.trace_reelle else []
+        for p in positions:
+            if not points or distance_haversine_m(points[-1], (p['lat'], p['lon'])) >= PAS_TRACE_REELLE_M:
+                points.append((p['lat'], p['lon']))
+        if len(points) < 2 or len(points) > NB_MAX_POINTS_TRACE:
+            return
+        actuel.trace_reelle = LineString([(lon, lat) for lat, lon in points], srid=4326)
+        actuel.save(update_fields=['trace_reelle'])
 
 
 # Couloir etroit (30m) autour de ZoneVitesse.geometrie : cette geometrie est
@@ -810,6 +830,8 @@ class TrajetModerationDetailView(APIView):
             'origin': {'lat': trajet.position_origine.y, 'lon': trajet.position_origine.x},
             'destination': {'lat': trajet.position_destination.y, 'lon': trajet.position_destination.x},
             'geometry': _trace_leaflet(trajet.geometrie),
+            'actual_trace': _trace_leaflet(trajet.trace_reelle, max_points=2000),
+            'tracked_duration_s': trajet.duree_suivie(),
             'waypoints': [{'lat': e.position.y, 'lon': e.position.x} for e in trajet.etapes.all()],
             'routes': [
                 {

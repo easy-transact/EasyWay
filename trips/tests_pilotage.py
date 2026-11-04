@@ -13,7 +13,7 @@ from accounts.tests import connecter, creer_utilisateur
 from community.models import Incident, SousTypeIncident as S, StatutIncident, TypeIncident as T
 from etat_routes.models import PassageTroncon, Troncon
 
-from .models import PropositionItineraire, StatutTrajet
+from .models import PropositionItineraire, StatutTrajet, Trajet
 from .tests import _trajet_actif_pour
 from .tests_meilleur_itineraire import ROUTE_SUIVIE, VARIANTE, candidat
 
@@ -138,3 +138,44 @@ class VehiculesDirectTests(TestCase):
         hors_zone = self.client.get(self.url, {'south': 3.8, 'west': 11.4, 'north': 3.9, 'east': 11.6},
                                     **connecter(self.client, admin.telephone)).json()['vehicles']
         self.assertEqual(hors_zone, [])
+
+
+class TraceReelleTests(TestCase):
+    def setUp(self):
+        self.conducteur = creer_utilisateur(email='conducteur@test.cm')
+        self.jetons = connecter(self.client, self.conducteur.telephone)
+        self.trajet = _trajet_actif_pour(self.conducteur)
+
+    def envoyer(self, points, debut):
+        with patch('trips.views.ProducteurRedisStreams'):
+            reponse = self.client.post(reverse('trips:telemetrie-positions'), {
+                'trip': str(self.trajet.id),
+                'positions': [{'lat': lat, 'lon': lon, 'timestamp': (debut + timedelta(seconds=10 * i)).isoformat()}
+                              for i, (lat, lon) in enumerate(points)],
+            }, content_type='application/json', **self.jetons)
+        self.assertEqual(reponse.status_code, 202)
+
+    def test_chemin_reel_enregistre_et_affiche(self):
+        debut = timezone.now()
+        self.envoyer([(4.0500, 9.700), (4.0500, 9.70005), (4.0510, 9.701)], debut)  # le 2e a 5 m : ignore
+        self.envoyer([(4.0520, 9.702)], debut + timedelta(minutes=1))
+        self.trajet.refresh_from_db()
+        self.assertEqual(len(self.trajet.trace_reelle.coords), 3)
+
+        staff = creer_utilisateur(email='staff@easyway.local', is_staff=True)
+        fiche = self.client.get(reverse('trips:staff-trajet-detail', kwargs={'id': self.trajet.id}),
+                                **connecter(self.client, staff.telephone)).json()
+        self.assertEqual(fiche['actual_trace'][0], [4.05, 9.7])
+        self.trajet.purger_geometrie()
+        self.assertIsNone(Trajet.objects.get(pk=self.trajet.pk).trace_reelle)
+
+    def test_chronometre_reste_ouvert_corrige(self):
+        debut = self.trajet.demarre_le
+        self.envoyer([(4.05, 9.70), (4.06, 9.71)], debut + timedelta(minutes=37))  # positions jusqu'a ~37 min
+        reponse = self.client.patch(
+            reverse('trips:trajet-detail', kwargs={'id': self.trajet.id}),
+            {'actual_duration': 37860, 'status': 'TERMINE'}, content_type='application/json', **self.jetons,
+        )
+        self.assertEqual(reponse.status_code, 200, reponse.content)
+        self.trajet.refresh_from_db()
+        self.assertAlmostEqual(self.trajet.duree_reelle, 37 * 60 + 10, delta=5)
