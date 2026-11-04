@@ -492,12 +492,15 @@ signales, deja pris en compte par le calcul d'itineraire).
   officielle est evitee tout de suite par le calcul d'itineraire.
 
   Chaque incident (GET /api/incidents/nearby/, /along-route/, /city/, detail)
-  porte maintenant 3 champs en plus :
+  porte maintenant 4 champs en plus :
     "official": true | false,
     "official_source": { "name": "Mairie de Douala", "type": "MAIRIE" } | null,
     "starts_at": "2026-11-10T06:00:00Z" | null   (debut de periode ; null pour
-                 un signalement de conducteur)
+                 un signalement de conducteur),
+    "note": "Refection de la chaussee" | ""      (motif libre affiche au
+                 conducteur ; vide hors officiel)
   types d'autorite : "MAIRIE", "POLICE".
+  A afficher : le badge "Officiel" + official_source.name, et la note si presente.
 
   A faire cote appli :
   - quand official = true, afficher un badge "Officiel" et la source

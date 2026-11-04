@@ -29,13 +29,35 @@ class SignalementsOfficielsApiTests(OrganisationTestCase):
         return corps
 
     def test_poser_un_signalement_officiel(self):
-        reponse = self.envoyer('post', 'signalements-officiels', self.gestionnaire, corps=self._corps())
+        reponse = self.envoyer('post', 'signalements-officiels', self.gestionnaire,
+                               corps=self._corps(note='Réfection de la chaussée'))
         self.assertEqual(reponse.status_code, 201, reponse.content)
         self.assertTrue(reponse.json()['official'])
         self.assertEqual(reponse.json()['official_source']['type'], 'MAIRIE')
+        self.assertEqual(reponse.json()['note'], 'Réfection de la chaussée')
         incident = Incident.objects.get()
         self.assertEqual((incident.statut, incident.valide_par_staff), (StatutIncident.ACTIF, True))
         self.assertEqual(incident.organisation_id, self.mairie.id)
+
+    def test_prolonger_et_changer_le_motif(self):
+        self.envoyer('post', 'signalements-officiels', self.gestionnaire, corps=self._corps())
+        incident = Incident.objects.get()
+        nouvelle_fin = (timezone.now() + timedelta(days=7)).isoformat()
+        reponse = self.envoyer('patch', 'signalement-officiel-detail', self.gestionnaire, incident.id,
+                               corps={'ends_at': nouvelle_fin, 'note': 'Travaux prolongés'})
+        self.assertEqual(reponse.status_code, 200, reponse.content)
+        self.assertEqual(reponse.json()['note'], 'Travaux prolongés')
+        incident.refresh_from_db()
+        self.assertEqual(incident.note, 'Travaux prolongés')
+        self.assertGreater(incident.expire_le, timezone.now() + timedelta(days=6))
+
+    def test_prolonger_dans_le_passe_refuse(self):
+        self.envoyer('post', 'signalements-officiels', self.gestionnaire, corps=self._corps())
+        incident = Incident.objects.get()
+        passe = (timezone.now() - timedelta(hours=1)).isoformat()
+        reponse = self.envoyer('patch', 'signalement-officiel-detail', self.gestionnaire, incident.id,
+                               corps={'ends_at': passe})
+        self.assertEqual(reponse.status_code, 400)
 
     def test_programme_dans_le_futur(self):
         debut = (timezone.now() + timedelta(days=1)).isoformat()

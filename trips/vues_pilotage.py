@@ -353,9 +353,11 @@ class CarteDirectView(APIView):
                     'id': str(i.id), 'type': i.type, 'subtype': i.sous_type or '', 'lat': i.position.y,
                     'lon': i.position.x, 'severity': risque_itineraire.gravite_de(i),
                     'confidence': round(retards_signalements.confiance(i), 2), 'validated': i.valide_par_staff,
-                    'created_at': i.cree_le,
+                    'created_at': i.cree_le, 'official': i.est_officiel,
+                    'official_source': i.organisation.nom_commercial or i.organisation.raison_sociale if i.organisation_id else None,
+                    'note': i.note,
                 }
-                for i in incidents.order_by('-cree_le')[:1000]
+                for i in incidents.select_related('organisation').order_by('-cree_le')[:1000]
             ],
             'segments': segments,
             'zones': zones,

@@ -43,6 +43,7 @@ class IncidentSerializer(serializers.ModelSerializer):
     official = serializers.BooleanField(source='est_officiel', read_only=True)
     official_source = serializers.SerializerMethodField()
     starts_at = serializers.DateTimeField(source='debut_le', read_only=True, allow_null=True)
+    note = serializers.CharField(read_only=True, allow_blank=True)
     # Identifiant OSM de la voie + sens de circulation (cf. Incident.way_id_osm/
     # forward_osm) : cale au signalement via Valhalla /locate, utilise cote
     # serveur pour le matching par topologie sur /along-route/ (plutot qu'un
@@ -58,7 +59,7 @@ class IncidentSerializer(serializers.ModelSerializer):
             'id', 'type', 'subtype', 'lat', 'lon', 'heading', 'street_name', 'city',
             'confirmations', 'disputes', 'confidence_score', 'estimated_impact',
             'status', 'severity', 'expires_at', 'created_at', 'way_id', 'forward',
-            'reporter_name', 'reporter_id', 'validations_count', 'official', 'official_source', 'starts_at',
+            'reporter_name', 'reporter_id', 'validations_count', 'official', 'official_source', 'starts_at', 'note',
         ]
         read_only_fields = fields
 
@@ -193,6 +194,8 @@ class SignalementOfficielCreationSerializer(serializers.Serializer):
     heading = serializers.IntegerField(required=False, allow_null=True, min_value=0, max_value=359, default=None, source='cap')
     starts_at = serializers.DateTimeField(required=False, allow_null=True, default=None, source='debut_le')
     ends_at = serializers.DateTimeField(source='expire_le')
+    note = serializers.CharField(required=False, allow_blank=True, default='', max_length=255,
+                                 help_text='Motif affiche au conducteur.')
 
     def validate(self, data):
         sous_type = data.get('sous_type')
@@ -207,6 +210,21 @@ class SignalementOfficielCreationSerializer(serializers.Serializer):
         data['debut_le'] = debut
         if data['expire_le'] <= debut:
             raise serializers.ValidationError({'ends_at': 'The end must be after the start.'})
+        return data
+
+
+class SignalementOfficielModificationSerializer(serializers.Serializer):
+    """PATCH /api/org/official-reports/{id}/ : prolonger (ends_at) ou changer le motif."""
+
+    ends_at = serializers.DateTimeField(required=False, source='expire_le')
+    note = serializers.CharField(required=False, allow_blank=True, max_length=255)
+
+    def validate(self, data):
+        from django.utils import timezone
+        if 'expire_le' in data and data['expire_le'] <= timezone.now():
+            raise serializers.ValidationError({'ends_at': 'The end must be in the future.'})
+        if not data:
+            raise serializers.ValidationError('Nothing to update.')
         return data
 
 

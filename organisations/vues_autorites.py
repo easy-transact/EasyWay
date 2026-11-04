@@ -13,7 +13,9 @@ from rest_framework.generics import get_object_or_404
 from rest_framework.response import Response
 
 from community.models import StatutIncident
-from community.serializers import IncidentSerializer, SignalementOfficielCreationSerializer
+from community.serializers import (
+    IncidentSerializer, SignalementOfficielCreationSerializer, SignalementOfficielModificationSerializer,
+)
 from community.services import ServiceIncident
 from community import temps_reel
 
@@ -60,7 +62,7 @@ class SignalementsOfficielsView(_VueAutorite):
         incident = ServiceIncident().signaler_officiel(
             membre=request.user, organisation=self.organisation, type_incident=d['type'],
             position=Point(d['lon'], d['lat'], srid=4326), debut_le=d['debut_le'], fin_le=d['expire_le'],
-            cap=d.get('cap'), sous_type=d.get('sous_type', ''),
+            cap=d.get('cap'), sous_type=d.get('sous_type', ''), note=d.get('note', ''),
         )
         services.journaliser(self.organisation, request.user, 'signalement_officiel.cree', incident,
                              type=incident.type, sous_type=incident.sous_type or '')
@@ -68,10 +70,28 @@ class SignalementsOfficielsView(_VueAutorite):
 
 
 @extend_schema_view(
+    patch=extend_schema(tags=['Organisation Authority'], summary='Prolonger / modifier un signalement officiel (gestionnaire)',
+                        request=SignalementOfficielModificationSerializer, responses={200: IncidentSerializer}),
     delete=extend_schema(tags=['Organisation Authority'], summary='Lever un signalement officiel (gestionnaire)',
                          responses={204: None}),
 )
 class SignalementOfficielDetailView(_VueAutorite):
+    def patch(self, request, id):
+        incident = get_object_or_404(
+            self.organisation.signalements_officiels.filter(statut__in=STATUTS_VISIBLES), id=id,
+        )
+        serializer = SignalementOfficielModificationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        for champ, valeur in serializer.validated_data.items():
+            setattr(incident, champ, valeur)
+        incident.save(update_fields=list(serializer.validated_data.keys()))
+        from community.cache_incidents import invalider_cache_cellule
+        invalider_cache_cellule(incident.cellule_h3_res8)
+        if incident.statut == StatutIncident.ACTIF:
+            temps_reel.publier_incident(incident, temps_reel.MODIFIE)
+        services.journaliser(self.organisation, request.user, 'signalement_officiel.modifie', incident)
+        return Response(IncidentSerializer(incident).data)
+
     def delete(self, request, id):
         incident = get_object_or_404(
             self.organisation.signalements_officiels.filter(statut__in=STATUTS_VISIBLES), id=id,

@@ -129,7 +129,7 @@ class ServiceIncident:
         return incident, est_doublon
 
     def signaler_officiel(self, membre, organisation, type_incident, position, debut_le, fin_le,
-                          cap=None, sous_type=''):
+                          cap=None, sous_type='', note=''):
         """Signalement pose par une autorite (mairie, police) depuis le BO.
         Contrairement a signaler() : pas de quota ni de dedoublonnage (il fait
         autorite), marque valide_par_staff (traite comme confirme : une
@@ -161,6 +161,7 @@ class ServiceIncident:
                 valide_par_staff=True,
                 valide_le=maintenant,
                 debut_le=debut_le,
+                note=note,
                 statut=StatutIncident.ACTIF if debut_le <= maintenant else StatutIncident.PROGRAMME,
                 expire_le=fin_le,
             )

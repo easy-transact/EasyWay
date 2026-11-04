@@ -258,6 +258,9 @@ class Incident(models.Model):
         related_name='signalements_officiels',
     )
     debut_le = models.DateTimeField(null=True, blank=True, help_text='Debut de la periode (officiel) ; sinon cree_le')
+    # Motif libre affiche au conducteur (officiel) : "Refection de la chaussee",
+    # "Cortege officiel"... Vide pour un signalement de conducteur.
+    note = models.CharField(max_length=255, blank=True, default='')
 
     cree_le = models.DateTimeField(auto_now_add=True)
 
