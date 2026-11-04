@@ -398,6 +398,10 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'community.tasks.expirer_incidents',
         'schedule': 60.0,
     },
+    'activer-signalements-programmes': {
+        'task': 'community.tasks.activer_programmes',
+        'schedule': 60.0,
+    },
     'abandonner-trajets-inactifs': {
         'task': 'trips.tasks.abandonner_trajets_inactifs',
         'schedule': 15 * 60.0,

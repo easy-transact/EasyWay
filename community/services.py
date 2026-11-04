@@ -128,6 +128,48 @@ class ServiceIncident:
         temps_reel.publier_incident(incident, temps_reel.MODIFIE if est_doublon else temps_reel.CREE)
         return incident, est_doublon
 
+    def signaler_officiel(self, membre, organisation, type_incident, position, debut_le, fin_le,
+                          cap=None, sous_type=''):
+        """Signalement pose par une autorite (mairie, police) depuis le BO.
+        Contrairement a signaler() : pas de quota ni de dedoublonnage (il fait
+        autorite), marque valide_par_staff (traite comme confirme : une
+        fermeture officielle est evitee tout de suite), et porte une periode
+        debut_le -> fin_le. Programme si debut_le est dans le futur (hors des
+        listes actives jusqu'a activer_programmes, community.tasks)."""
+        resultat_routier = self._verifier_position_routiere(position, cap)
+        if resultat_routier is not None:
+            position, way_id_osm, forward_osm = resultat_routier
+        else:
+            way_id_osm, forward_osm = None, None
+
+        maintenant = timezone.now()
+        with transaction.atomic():
+            geocodage = self._geocoder_inverse(position)
+            incident = Incident.objects.create(
+                auteur=membre,
+                organisation=organisation,
+                type=type_incident,
+                sous_type=sous_type,
+                position=position,
+                cap=cap,
+                way_id_osm=way_id_osm,
+                forward_osm=forward_osm,
+                nom_voie=geocodage['label'] if geocodage else '',
+                ville=geocodage['city'] if geocodage else '',
+                ville_normalisee=normaliser(geocodage['city']) if geocodage and geocodage['city'] else '',
+                en_agglomeration=geocodage.get('urban') if geocodage else None,
+                valide_par_staff=True,
+                valide_le=maintenant,
+                debut_le=debut_le,
+                statut=StatutIncident.ACTIF if debut_le <= maintenant else StatutIncident.PROGRAMME,
+                expire_le=fin_le,
+            )
+
+        invalider_cache_cellule(incident.cellule_h3_res8)
+        if incident.statut == StatutIncident.ACTIF:
+            temps_reel.publier_incident(incident, temps_reel.CREE)
+        return incident
+
     def _verifier_quota(self, utilisateur):
         # Desactivable via QUOTA_SIGNALEMENTS_ACTIF (settings.py) -- coupe
         # pour le moment pour ne pas bloquer les tests manuels repetes.

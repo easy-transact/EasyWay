@@ -106,6 +106,10 @@ class StatutIncident(models.TextChoices):
     EXPIRE = 'EXPIRE', 'Expire'
     RETIRE = 'RETIRE', 'Retire'
     FUSIONNE = 'FUSIONNE', 'Fusionne'
+    # Signalement officiel (mairie, police) programme : date de debut dans le
+    # futur -- hors des listes actives jusqu'a ce que activer_programmes
+    # (community.tasks) le passe ACTIF a debut_le.
+    PROGRAMME = 'PROGRAMME', 'Programme'
 
 
 class SensVote(models.TextChoices):
@@ -244,6 +248,17 @@ class Incident(models.Model):
     valide_par_staff = models.BooleanField(default=False)
     valide_le = models.DateTimeField(null=True, blank=True)
 
+    # Signalement officiel pose par une autorite (mairie, police) depuis le
+    # back-office. Vide pour un signalement de conducteur. Un signalement
+    # officiel est marque valide_par_staff=True (donc traite comme confirme :
+    # une fermeture officielle est evitee tout de suite), et porte une periode
+    # d'affichage debut_le -> expire_le ("travaux du 10 au 20").
+    organisation = models.ForeignKey(
+        'organisations.Organisation', on_delete=models.CASCADE, null=True, blank=True,
+        related_name='signalements_officiels',
+    )
+    debut_le = models.DateTimeField(null=True, blank=True, help_text='Debut de la periode (officiel) ; sinon cree_le')
+
     cree_le = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -258,6 +273,10 @@ class Incident(models.Model):
 
     def __str__(self):
         return f"{self.type} - {self.nom_voie}"
+
+    @property
+    def est_officiel(self):
+        return self.organisation_id is not None
 
     def save(self, *args, **kwargs):
         # H3 calcule en Python (pas h3-pg) : evite de compiler l'extension

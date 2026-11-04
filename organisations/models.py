@@ -21,6 +21,10 @@ from accounts.models import InscriptionListeAttente, TypeVehicule
 class TypeOrganisation(models.TextChoices):
     VOYAGE = 'VOYAGE', 'Agence de voyage interurbaine'
     FLOTTE = 'FLOTTE', 'Gestionnaire de flotte'
+    # Autorites (signalements officiels affiches sur la carte) -- cf. plan
+    # "Comptes autorites". Memes organisations/roles/membres que VOYAGE/FLOTTE.
+    MAIRIE = 'MAIRIE', 'Mairie'
+    POLICE = 'POLICE', 'Police'
 
 
 class StatutOrganisation(models.TextChoices):

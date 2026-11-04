@@ -25,6 +25,25 @@ def expirer_incidents():
     return nb
 
 
+@shared_task
+def activer_programmes():
+    """Celery Beat, cadence 60s (meme que expirer_incidents). Passe ACTIF les
+    signalements officiels PROGRAMME dont debut_le est atteint (travaux dont la
+    periode commence), et les diffuse en temps reel."""
+    from . import temps_reel
+
+    a_activer = list(
+        Incident.objects.filter(statut=StatutIncident.PROGRAMME, debut_le__lte=timezone.now())
+        .filter(expire_le__gt=timezone.now())
+    )
+    for incident in a_activer:
+        incident.statut = StatutIncident.ACTIF
+        incident.save(update_fields=['statut'])
+        invalider_cache_cellule(incident.cellule_h3_res8)
+        temps_reel.publier_incident(incident, temps_reel.CREE)
+    return len(a_activer)
+
+
 # Les signalements termines restent en base (votes compris) pour l'etat des
 # routes, qui les exploite sur cette fenetre -- au-dela, simple purge pour que
 # la table ne grossisse pas indefiniment.
