@@ -1,6 +1,6 @@
 from django.urls import path
 
-from . import views, vues_flotte
+from . import views, vues_autorites, vues_flotte
 
 app_name = 'organisations'
 
@@ -30,6 +30,9 @@ urlpatterns = [
     path('org/trips/<uuid:id>/', vues_flotte.TrajetFlotteDetailView.as_view(), name='trajet-detail'),
     path('org/reports/', vues_flotte.SignalementsFlotteView.as_view(), name='signalements'),
     path('org/speeding/', vues_flotte.ExcesVitesseView.as_view(), name='exces-vitesse'),
+    # Autorites (mairie / police) : signalements officiels.
+    path('org/official-reports/', vues_autorites.SignalementsOfficielsView.as_view(), name='signalements-officiels'),
+    path('org/official-reports/<uuid:id>/', vues_autorites.SignalementOfficielDetailView.as_view(), name='signalement-officiel-detail'),
     path('org/badges/', vues_flotte.BadgesOrganisationView.as_view(), name='badges'),
     path('org/notifications/', vues_flotte.NotificationsOrganisationView.as_view(), name='notifications'),
     path(

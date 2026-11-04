@@ -38,6 +38,10 @@ class IncidentSerializer(serializers.ModelSerializer):
     # valeur que `confirmations`, nommee comme le front l'utilise dans le
     # detail d'un signalement (cf. reunion du 29/09).
     validations_count = serializers.IntegerField(source='confirmations', read_only=True)
+    # Signalement officiel (autorite) : l'appli affiche un badge "officiel" et
+    # la source. `official_source` = {name, type} ou null.
+    official = serializers.BooleanField(source='est_officiel', read_only=True)
+    official_source = serializers.SerializerMethodField()
     # Identifiant OSM de la voie + sens de circulation (cf. Incident.way_id_osm/
     # forward_osm) : cale au signalement via Valhalla /locate, utilise cote
     # serveur pour le matching par topologie sur /along-route/ (plutot qu'un
@@ -53,7 +57,7 @@ class IncidentSerializer(serializers.ModelSerializer):
             'id', 'type', 'subtype', 'lat', 'lon', 'heading', 'street_name', 'city',
             'confirmations', 'disputes', 'confidence_score', 'estimated_impact',
             'status', 'severity', 'expires_at', 'created_at', 'way_id', 'forward',
-            'reporter_name', 'reporter_id', 'validations_count',
+            'reporter_name', 'reporter_id', 'validations_count', 'official', 'official_source',
         ]
         read_only_fields = fields
 
@@ -80,6 +84,13 @@ class IncidentSerializer(serializers.ModelSerializer):
         if incident.auteur.mode_invisible:
             return None
         return str(incident.auteur_id)
+
+    @extend_schema_field(serializers.DictField(allow_null=True))
+    def get_official_source(self, incident):
+        if not incident.organisation_id:
+            return None
+        organisation = incident.organisation
+        return {'name': organisation.nom_commercial or organisation.raison_sociale, 'type': organisation.type}
 
 
 class IncidentModerationSerializer(IncidentSerializer):
@@ -167,6 +178,34 @@ class IncidentCreationSerializer(serializers.Serializer):
                 raise serializers.ValidationError(
                     {'subtype': f"Invalid subtype for {incident_type}. Allowed: {', '.join(allowed_subtypes) if allowed_subtypes else 'none'}"}
                 )
+        return data
+
+
+class SignalementOfficielCreationSerializer(serializers.Serializer):
+    """POST /api/org/official-reports/ : signalement pose par une autorite
+    (mairie, police). starts_at optionnel (defaut maintenant), ends_at requis."""
+
+    type = serializers.ChoiceField(choices=TypeIncident.choices)
+    subtype = serializers.CharField(max_length=100, required=False, allow_blank=True, default='', source='sous_type')
+    lat = serializers.FloatField(min_value=-90, max_value=90)
+    lon = serializers.FloatField(min_value=-180, max_value=180)
+    heading = serializers.IntegerField(required=False, allow_null=True, min_value=0, max_value=359, default=None, source='cap')
+    starts_at = serializers.DateTimeField(required=False, allow_null=True, default=None, source='debut_le')
+    ends_at = serializers.DateTimeField(source='expire_le')
+
+    def validate(self, data):
+        sous_type = data.get('sous_type')
+        if sous_type:
+            autorises = SOUS_TYPES_PAR_TYPE.get(data['type'], [])
+            if sous_type not in autorises:
+                raise serializers.ValidationError(
+                    {'subtype': f"Invalid subtype for {data['type']}. Allowed: {', '.join(autorises) or 'none'}"}
+                )
+        from django.utils import timezone
+        debut = data.get('debut_le') or timezone.now()
+        data['debut_le'] = debut
+        if data['expire_le'] <= debut:
+            raise serializers.ValidationError({'ends_at': 'The end must be after the start.'})
         return data
 
 
