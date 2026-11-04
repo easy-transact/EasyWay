@@ -42,6 +42,7 @@ class IncidentSerializer(serializers.ModelSerializer):
     # la source. `official_source` = {name, type} ou null.
     official = serializers.BooleanField(source='est_officiel', read_only=True)
     official_source = serializers.SerializerMethodField()
+    starts_at = serializers.DateTimeField(source='debut_le', read_only=True, allow_null=True)
     # Identifiant OSM de la voie + sens de circulation (cf. Incident.way_id_osm/
     # forward_osm) : cale au signalement via Valhalla /locate, utilise cote
     # serveur pour le matching par topologie sur /along-route/ (plutot qu'un
@@ -57,7 +58,7 @@ class IncidentSerializer(serializers.ModelSerializer):
             'id', 'type', 'subtype', 'lat', 'lon', 'heading', 'street_name', 'city',
             'confirmations', 'disputes', 'confidence_score', 'estimated_impact',
             'status', 'severity', 'expires_at', 'created_at', 'way_id', 'forward',
-            'reporter_name', 'reporter_id', 'validations_count', 'official', 'official_source',
+            'reporter_name', 'reporter_id', 'validations_count', 'official', 'official_source', 'starts_at',
         ]
         read_only_fields = fields
 

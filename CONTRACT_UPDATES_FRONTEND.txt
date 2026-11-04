@@ -483,3 +483,27 @@ signales, deja pris en compte par le calcul d'itineraire).
   POST /api/incidents/ : NOUVEAU 400 "Too far from your current position" si
   le conducteur a un trajet en cours (positions envoyees depuis moins de
   2 min) et signale a plus de 500 m de sa derniere position.
+
+
+20. NOUVEAU — signalements officiels des autorites (04/11/2026)
+  Les mairies et la police peuvent poser des signalements "officiels" depuis le
+  back-office (travaux, route barree, danger...). Ils s'affichent sur la carte
+  comme les autres signalements, mais font autorite : une route barree
+  officielle est evitee tout de suite par le calcul d'itineraire.
+
+  Chaque incident (GET /api/incidents/nearby/, /along-route/, /city/, detail)
+  porte maintenant 3 champs en plus :
+    "official": true | false,
+    "official_source": { "name": "Mairie de Douala", "type": "MAIRIE" } | null,
+    "starts_at": "2026-11-10T06:00:00Z" | null   (debut de periode ; null pour
+                 un signalement de conducteur)
+  types d'autorite : "MAIRIE", "POLICE".
+
+  A faire cote appli :
+  - quand official = true, afficher un badge "Officiel" et la source
+    (official_source.name), pour distinguer d'un signalement de conducteur ;
+  - rien d'autre a changer : ces incidents arrivent par les memes endpoints et
+    le meme WebSocket (incident.created / updated / removed) que les autres.
+  Un signalement officiel programme (travaux a venir) n'apparait qu'a partir de
+  sa date de debut -- cote appli, rien de special, il arrive via incident.created
+  au moment ou il devient actif.
