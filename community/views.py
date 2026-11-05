@@ -806,6 +806,10 @@ class IncidentRetraitStaffView(APIView):
 
         incident = get_object_or_404(Incident, id=id)
         incident.retirer(motif=serializer.validated_data['reason'])
+        # Signalement juge faux par la moderation : l'auteur perd de la
+        # reputation (cf. Incident.penaliser_auteur). Un signalement officiel
+        # n'est pas penalise (garde dans la methode).
+        incident.penaliser_auteur()
         invalider_cache_cellule(incident.cellule_h3_res8)
         temps_reel.publier_retrait(incident.id, incident.cellule_h3_res8, temps_reel.RAISON_MODERE)
         journaliser(

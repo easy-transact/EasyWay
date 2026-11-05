@@ -49,8 +49,10 @@ def connecter(client, identifiant, mot_de_passe=MOT_DE_PASSE):
 
 
 class EtoilesReputationTests(TestCase):
-    def test_conversion_score_0_100_en_1_a_5_etoiles(self):
-        attendu = {'0': 1, '10': 1.5, '50': 3, '87': 4.5, '100': 5, '250': 5, '-3': 1}
+    def test_conversion_score_en_1_a_5_etoiles(self):
+        # Echelle alignee sur la realite : +0,5 par signalement valide, 5 etoiles
+        # vers une reputation de 8 (~16 signalements), la ou le vote pese deja au max.
+        attendu = {'0': 1, '2': 2, '4': 3, '6': 4, '7': 4.5, '8': 5, '50': 5, '-3': 1}
         for score, etoiles in attendu.items():
             utilisateur = Utilisateur(score_reputation=Decimal(score))
             self.assertEqual(utilisateur.etoiles_reputation(), Decimal(str(etoiles)), score)

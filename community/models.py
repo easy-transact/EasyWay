@@ -182,6 +182,13 @@ POINTS_REPUTATION_PAR_VALIDATION = Decimal('0.5')
 # signalement d'un autre (vote ou re-signalement d'un doublon).
 POINTS_PAR_SIGNALEMENT_VALIDE = Decimal('1')
 POINTS_PAR_VALIDATION_TIERCE = Decimal('0.25')
+# Malus de reputation quand un signalement est juge faux (retire par la
+# moderation) : la fiabilite peut enfin redescendre. Plancher 0 (jamais
+# negative) : le poids de vote reste au pire neutre (1,0). 1,0 = annule
+# l'equivalent de DEUX signalements valides (gain +0,5 chacun), pour que les
+# faux coutent nettement plus cher que les bons ne rapportent. Multiple de
+# 0,1 (score_reputation a une seule decimale).
+MALUS_REPUTATION_SIGNALEMENT_FAUX = Decimal('1.0')
 
 
 class Incident(models.Model):
@@ -384,6 +391,16 @@ class Incident(models.Model):
         self.statut = StatutIncident.RETIRE
         self.motif_retrait = motif
         self.save(update_fields=['statut', 'motif_retrait'])
+
+    def penaliser_auteur(self):
+        """Signalement juge faux : l'auteur perd de la reputation (plancher 0).
+        Idempotent par l'appelant (appele une fois, au retrait). Un signalement
+        officiel (autorite) n'est jamais penalise."""
+        if self.organisation_id is not None:
+            return
+        auteur = self.auteur
+        auteur.score_reputation = max(Decimal('0'), auteur.score_reputation - MALUS_REPUTATION_SIGNALEMENT_FAUX)
+        auteur.save(update_fields=['score_reputation'])
 
     def fusionner_dans(self, incident: 'Incident'):
         self.statut = StatutIncident.FUSIONNE

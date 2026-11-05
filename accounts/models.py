@@ -33,7 +33,12 @@ class Unite(models.TextChoices):
 
 # Echelle interne de score_reputation convertie en etoiles (cf.
 # Utilisateur.etoiles_reputation) -- au-dela, toujours 5 etoiles.
-SCORE_REPUTATION_MAX = Decimal('100')
+# Alignee sur l'echelle REELLE de la reputation : on gagne +0,5 par signalement
+# valide (community.POINTS_REPUTATION_PAR_VALIDATION) et le poids de vote atteint
+# son maximum vers une reputation de ~7. 5 etoiles = ~16 signalements valides,
+# la ou le vote pese deja au maximum. (Etait 100 = ~200 signalements : tout le
+# monde restait a 1 etoile alors que son vote pesait deja le maximum.)
+SCORE_REPUTATION_MAX = Decimal('8')
 
 
 class UtilisateurManager(BaseUserManager):
@@ -140,8 +145,8 @@ class Utilisateur(AbstractBaseUser, PermissionsMixin):
         return max(Decimal('0.2'), min(Decimal('2.0'), poids))
 
     def etoiles_reputation(self) -> Decimal:
-        """Affichage de score_reputation (echelle interne 0-100, plafonnee)
-        en 1 a 5 etoiles, arrondi a la demi-etoile : 0 -> 1, 50 -> 3, 100+ -> 5."""
+        """Affichage de score_reputation en 1 a 5 etoiles, arrondi a la
+        demi-etoile : 0 -> 1, SCORE_REPUTATION_MAX/2 -> 3, >= SCORE_REPUTATION_MAX -> 5."""
         score = max(Decimal('0'), min(SCORE_REPUTATION_MAX, self.score_reputation))
         etoiles = 1 + 4 * score / SCORE_REPUTATION_MAX
         return (etoiles * 2).quantize(Decimal('1'), rounding=ROUND_HALF_UP) / 2

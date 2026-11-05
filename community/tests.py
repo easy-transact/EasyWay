@@ -1154,6 +1154,26 @@ class IncidentModerationApiTests(TestCase):
         self.assertEqual(fiche['history'][0]['details'], {'motif': 'Doublon'})
         self.assertIsNone(fiche['trip'])
 
+    def test_retrait_staff_penalise_la_reputation_de_lauteur(self):
+        self.auteur.score_reputation = Decimal('2')
+        self.auteur.save(update_fields=['score_reputation'])
+        self.client.post(
+            reverse('community:staff-incident-retirer', kwargs={'id': self.incident.id}),
+            {'reason': 'Faux signalement'}, content_type='application/json', **self.jetons_staff,
+        )
+        self.auteur.refresh_from_db()
+        self.assertEqual(self.auteur.score_reputation, Decimal('1.0'))  # 2 - 1,0
+
+    def test_malus_reputation_plancher_a_zero(self):
+        self.auteur.score_reputation = Decimal('0.5')
+        self.auteur.save(update_fields=['score_reputation'])
+        self.client.post(
+            reverse('community:staff-incident-retirer', kwargs={'id': self.incident.id}),
+            {'reason': 'Faux'}, content_type='application/json', **self.jetons_staff,
+        )
+        self.auteur.refresh_from_db()
+        self.assertEqual(self.auteur.score_reputation, Decimal('0'))  # jamais negative
+
     def test_retirer_change_statut_et_motif(self):
         url = reverse('community:staff-incident-retirer', kwargs={'id': self.incident.id})
         reponse = self.client.post(
