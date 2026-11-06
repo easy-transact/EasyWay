@@ -4,6 +4,7 @@ from decimal import Decimal
 import h3
 from django.conf import settings
 from django.contrib.gis.db import models as gis_models
+from django.contrib.gis.geos import Point
 from django.db import models
 from django.db.models import F
 from django.utils import timezone
@@ -300,6 +301,16 @@ class Incident(models.Model):
                 h3.latlng_to_cell(self.position.y, self.position.x, RESOLUTION_H3_LARGE)
             )
         super().save(*args, **kwargs)
+
+    def deplacer(self, lat, lon):
+        """Repositionne l'incident (back-office) : recalcule les cellules H3.
+        Retourne l'ancienne cellule res8 (a invalider en plus de la nouvelle)."""
+        ancienne_cellule = self.cellule_h3_res8
+        self.position = Point(lon, lat, srid=4326)
+        self.cellule_h3_res8 = h3.str_to_int(h3.latlng_to_cell(lat, lon, RESOLUTION_H3_FIN))
+        self.cellule_h3_res7 = h3.str_to_int(h3.latlng_to_cell(lat, lon, RESOLUTION_H3_LARGE))
+        self.save(update_fields=['position', 'cellule_h3_res8', 'cellule_h3_res7'])
+        return ancienne_cellule
 
     def duree_de_base(self):
         return duree_de_vie_base(self.type, self.sous_type, self.en_agglomeration)

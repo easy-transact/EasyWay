@@ -181,6 +181,24 @@ def _cap_du_trace(points, position):
     return _cap(*meilleur) if meilleur else None
 
 
+# Vitesse de reference pour un retard INDICATIF (affichage back-office) : le
+# retard reel depend de la vitesse normale du troncon, inconnue hors calcul.
+# 30 km/h ~ vitesse urbaine moyenne a Douala (cf. duree_ville).
+VITESSE_REF_INDICATIVE_KMH = 30
+
+
+def retard_indicatif(type_incident, sous_type):
+    """(retard en secondes, ferme_la_route) indicatifs pour un type/sous-type,
+    a VITESSE_REF_INDICATIVE_KMH. ferme_la_route=True : une fois confirme, la
+    route est evitee (pas un simple retard) ; le retard donne est celui du cas
+    non confirme. Retard 0 et False pour un type sans effet (police, radar...)."""
+    effet = EFFETS.get((type_incident, sous_type)) or EFFETS_SANS_SOUS_TYPE.get(type_incident)
+    if effet is None:
+        return 0, False
+    retard = _retard_s(effet, VITESSE_REF_INDICATIVE_KMH / 3.6)
+    return round(retard), effet.mecanisme == FERMETURE
+
+
 def _retard_s(effet, vitesse_normale_ms):
     longueur = effet.longueur_m
     if effet.mecanisme == FACTEUR:

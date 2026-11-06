@@ -50,6 +50,7 @@ from .serializers import (
     IncidentAvecDoublonSerializer,
     IncidentCreationSerializer,
     IncidentModerationSerializer,
+    DeplacerIncidentSerializer,
     IncidentRetraitSerializer,
     IncidentsSurTrajetSerializer,
     IncidentSerializer,
@@ -520,6 +521,13 @@ class IncidentsParVilleView(APIView):
     ),
     responses={200: TypeIncidentSerializer(many=True)},
 )
+def _retard_indicatif(type_incident, sous_type):
+    from trips.services.retards_signalements import retard_indicatif
+
+    retard, ferme = retard_indicatif(type_incident, sous_type)
+    return {'estimated_delay_s': retard, 'blocks_route': ferme}
+
+
 class TypesIncidentView(APIView):
     permission_classes = [AllowAny]
 
@@ -533,6 +541,7 @@ class TypesIncidentView(APIView):
                         'value': sous_type,
                         'label': sous_type.label,
                         'base_duration_minutes': duree_de_vie_base(type_incident, sous_type),
+                        **_retard_indicatif(type_incident, sous_type),
                     }
                     for sous_type in SOUS_TYPES_PAR_TYPE.get(type_incident, [])
                 ],
@@ -797,6 +806,31 @@ class IncidentModerationListView(APIView):
     request=IncidentRetraitSerializer,
     responses={200: IncidentModerationSerializer},
 )
+@extend_schema(
+    tags=['Staff Incidents'],
+    summary='Deplacer un signalement',
+    description='Reserve au staff. Repositionne un signalement mal place (lat/lon), recalcule sa cellule et rediffuse.',
+    request=DeplacerIncidentSerializer,
+    responses={200: IncidentModerationSerializer},
+)
+class IncidentDeplacerStaffView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def post(self, request, id):
+        serializer = DeplacerIncidentSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        incident = get_object_or_404(Incident, id=id)
+        ancienne_cellule = incident.deplacer(serializer.validated_data['lat'], serializer.validated_data['lon'])
+        invalider_cache_cellule(ancienne_cellule)
+        invalider_cache_cellule(incident.cellule_h3_res8)
+        if incident.statut in (StatutIncident.ACTIF, StatutIncident.EN_ATTENTE):
+            if ancienne_cellule != incident.cellule_h3_res8:
+                temps_reel.publier_retrait(incident.id, ancienne_cellule, temps_reel.RAISON_MODERE)
+            temps_reel.publier_incident(incident, temps_reel.MODIFIE)
+        journaliser(request.user, 'incidents.move', incident, libelle=_libelle_incident(incident))
+        return Response(IncidentModerationSerializer(incident).data)
+
+
 class IncidentRetraitStaffView(APIView):
     permission_classes = [IsAdminUser]
 

@@ -130,6 +130,10 @@ class SousTypeIncidentSerializer(serializers.Serializer):
     label = serializers.CharField()
     # Peut differer de celle du type (ex. CARAMBOLAGE 6h vs ACCIDENT 4h).
     base_duration_minutes = serializers.IntegerField()
+    # Retard INDICATIF en secondes (a ~30 km/h ; le reel depend du troncon) et
+    # si le signalement, confirme, fait eviter la route (cf. retard_indicatif).
+    estimated_delay_s = serializers.IntegerField()
+    blocks_route = serializers.BooleanField()
 
 
 class TypeIncidentSerializer(serializers.Serializer):
@@ -143,6 +147,13 @@ class TypeIncidentSerializer(serializers.Serializer):
     # Hors agglomeration (ex. EMBOUTEILLAGE 45 min vs 30 en ville) ; egale a
     # base_duration_minutes pour les types qui ne dependent pas du lieu.
     base_duration_outside_city_minutes = serializers.IntegerField()
+
+
+class DeplacerIncidentSerializer(serializers.Serializer):
+    """POST /api/staff/incidents/{id}/move/ : nouvelle position (back-office)."""
+
+    lat = serializers.FloatField(min_value=-90, max_value=90)
+    lon = serializers.FloatField(min_value=-180, max_value=180)
 
 
 class IncidentRetraitSerializer(serializers.Serializer):

@@ -343,6 +343,18 @@ class DureeDeVieSignalementTests(TestCase):
         self.assertEqual(sous_types['CARAMBOLAGE'], 360)
         self.assertEqual(sous_types['ACCIDENT'], 240)
 
+    def test_types_exposent_le_retard_indicatif(self):
+        types = {t['type']: t for t in self.client.get(reverse('community:incidents-types')).json()}
+        par_sous_type = {s['value']: s for s in types['ACCIDENT']['subtypes']}
+        # Accident : ralentit (retard > 0), ne ferme pas la route.
+        self.assertGreater(par_sous_type['ACCIDENT']['estimated_delay_s'], 0)
+        self.assertFalse(par_sous_type['ACCIDENT']['blocks_route'])
+        # Police : aucun effet.
+        self.assertEqual({s['value']: s['estimated_delay_s'] for s in types['POLICE']['subtypes']}['POLICE'], 0)
+        # Route barree : fait eviter la route.
+        barree = {s['value']: s for s in types['VOIE_BLOQUEE']['subtypes']}['ROUTE_BARREE']
+        self.assertTrue(barree['blocks_route'])
+
 
 class IncidentCreationApiTests(TestCase):
     def setUp(self):
@@ -1163,6 +1175,17 @@ class IncidentModerationApiTests(TestCase):
         )
         self.auteur.refresh_from_db()
         self.assertEqual(self.auteur.score_reputation, Decimal('1.0'))  # 2 - 1,0
+
+    def test_deplacer_un_signalement_recalcule_la_cellule(self):
+        ancienne = self.incident.cellule_h3_res8
+        reponse = self.client.post(
+            reverse('community:staff-incident-deplacer', kwargs={'id': self.incident.id}),
+            {'lat': 4.10, 'lon': 9.80}, content_type='application/json', **self.jetons_staff,
+        )
+        self.assertEqual(reponse.status_code, 200, reponse.content)
+        self.incident.refresh_from_db()
+        self.assertAlmostEqual(self.incident.position.y, 4.10, places=4)
+        self.assertNotEqual(self.incident.cellule_h3_res8, ancienne)
 
     def test_malus_reputation_plancher_a_zero(self):
         self.auteur.score_reputation = Decimal('0.5')
