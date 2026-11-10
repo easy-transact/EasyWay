@@ -36,6 +36,10 @@ TYPES = {
         'mots': ['station-service', 'station service', 'carburant', 'fuel'], 'etablissement': TypeEtablissement.STATION,
     },
     'pharmacie': {'mots': ['pharmacie', 'pharmacy'], 'etablissement': TypeEtablissement.PHARMACIE},
+    'recharge': {
+        'mots': ['borne de recharge', 'recharge', 'charging_station', 'charging station', 'ev charger'],
+        'etablissement': TypeEtablissement.RECHARGE,
+    },
 }
 TYPE_PAR_ETABLISSEMENT = {d['etablissement']: nom for nom, d in TYPES.items()}
 TYPES_AVEC_HORAIRES = ('station', 'pharmacie')

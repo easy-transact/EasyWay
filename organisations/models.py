@@ -25,6 +25,7 @@ class TypeOrganisation(models.TextChoices):
     # "Comptes autorites". Memes organisations/roles/membres que VOYAGE/FLOTTE.
     MAIRIE = 'MAIRIE', 'Mairie'
     POLICE = 'POLICE', 'Police'
+    POMPIERS = 'POMPIERS', 'Pompiers'
 
 
 class StatutOrganisation(models.TextChoices):

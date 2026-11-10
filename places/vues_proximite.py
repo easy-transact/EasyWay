@@ -36,7 +36,7 @@ class ProximiteParametresSerializer(serializers.Serializer):
     summary='Garages, hopitaux, stations et pharmacies a proximite',
     description=(
         f'Du plus proche au plus loin, dans radius_m (defaut {proximite.RAYON_DEFAUT_M}, '
-        f'100 a {proximite.RAYON_MAX_M}). types = garage,hopital,station,pharmacie (defaut : tous). '
+        f'100 a {proximite.RAYON_MAX_M}). types = garage,hopital,station,pharmacie,recharge (defaut : tous). '
         "Stations et pharmacies : opening_hours (null si inconnus) et is_open_now (null si inconnu) ; "
         'open_now=true ecarte celles fermees maintenant (horaires inconnus gardes). Garages : rating_average, '
         'rating_count, stars (etoiles ponderees par le nombre d\'avis). hopital couvre aussi '

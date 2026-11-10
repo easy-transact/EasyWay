@@ -169,6 +169,23 @@ class TraceReelleTests(TestCase):
         self.trajet.purger_geometrie()
         self.assertIsNone(Trajet.objects.get(pk=self.trajet.pk).trace_reelle)
 
+    def test_signalements_reellement_evites_vs_declares(self):
+        from unittest.mock import MagicMock
+
+        from django.contrib.gis.geos import LineString, Point
+        self.trajet.geometrie = LineString([(9.70, 4.05), (9.71, 4.05)], srid=4326)
+        self.trajet.trace_reelle = LineString([(9.70, 4.06), (9.71, 4.06)], srid=4326)  # ~1,1 km au nord
+        self.trajet.incidents_evites = 3  # declare par le conducteur
+        self.trajet.save(update_fields=['geometrie', 'trace_reelle', 'incidents_evites'])
+        incident = MagicMock(position=Point(9.705, 4.05, srid=4326))  # sur le prevu, loin du reel
+        staff = creer_utilisateur(email='staff@easyway.local', is_staff=True)
+        with patch('trips.serializers.incidents_actifs_par_topologie', return_value=[incident]):
+            fiche = self.client.get(reverse('trips:staff-trajet-detail', kwargs={'id': self.trajet.id}),
+                                    **connecter(self.client, staff.telephone)).json()
+        self.assertEqual(fiche['incidents_on_route'], 1)
+        self.assertEqual(fiche['incidents_avoided_real'], 1)  # le trajet reel l'a contourne
+        self.assertEqual(fiche['declared_incidents_avoided'], 3)  # ce que le conducteur a declare
+
     def test_chronometre_reste_ouvert_corrige(self):
         debut = self.trajet.demarre_le
         self.envoyer([(4.05, 9.70), (4.06, 9.71)], debut + timedelta(minutes=37))  # positions jusqu'a ~37 min

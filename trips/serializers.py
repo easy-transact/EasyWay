@@ -666,6 +666,7 @@ class TrajetModerationSerializer(serializers.ModelSerializer):
     rating = serializers.IntegerField(source='note', read_only=True)
     telemetry = serializers.SerializerMethodField()
     incidents_on_route = serializers.SerializerMethodField()
+    incidents_avoided_real = serializers.SerializerMethodField()
 
     class Meta:
         model = Trajet
@@ -673,6 +674,7 @@ class TrajetModerationSerializer(serializers.ModelSerializer):
             'id', 'traveler_id', 'traveler_name', 'traveler_phone', 'origin_label', 'destination_label',
             'status', 'started_at', 'ended_at', 'planned_distance_m', 'planned_duration_s',
             'actual_distance_m', 'actual_duration_s', 'rating', 'telemetry', 'incidents_on_route',
+            'incidents_avoided_real',
         ]
         read_only_fields = fields
 
@@ -696,12 +698,37 @@ class TrajetModerationSerializer(serializers.ModelSerializer):
             'duration_s': duree_s,
         }
 
+    def _incidents_sur_route(self, trajet):
+        # Memoise par instance : incidents_actifs_par_topologie fait un appel
+        # Valhalla, appele par incidents_on_route ET incidents_avoided_real.
+        if not hasattr(self, '_cache_incidents'):
+            self._cache_incidents = {}
+        if trajet.id not in self._cache_incidents:
+            self._cache_incidents[trajet.id] = (
+                incidents_actifs_par_topologie(list(trajet.geometrie.coords)) if trajet.geometrie else None
+            )
+        return self._cache_incidents[trajet.id]
+
     @extend_schema_field(serializers.IntegerField(allow_null=True))
     def get_incidents_on_route(self, trajet):
         # None (pas 0) si la geometrie est absente -- trajet jamais demarre,
         # ou purgee par purger_geometrie() (retention) : "inconnu", pas "zero".
-        if not trajet.geometrie:
-            return None
-        points = list(trajet.geometrie.coords)  # deja (lon, lat), forme attendue
-        incidents = incidents_actifs_par_topologie(points)
+        incidents = self._incidents_sur_route(trajet)
         return len(incidents) if incidents is not None else None
+
+    @extend_schema_field(serializers.IntegerField(allow_null=True))
+    def get_incidents_avoided_real(self, trajet):
+        """Incidents de l'itineraire PREVU que le trajet GPS reel a reellement
+        contournes : ceux dont la position est a plus de ECART_CONTOURNEMENT_M
+        du chemin reellement parcouru. Distinct du compteur declare par le
+        conducteur (declared_incidents_avoided). None sans trace reelle ou si
+        les incidents ne sont pas calculables."""
+        incidents = self._incidents_sur_route(trajet)
+        if incidents is None or not trajet.trace_reelle:
+            return None
+        trace = trajet.trace_reelle
+        ECART_CONTOURNEMENT_M = 60
+        return sum(
+            1 for i in incidents
+            if trace.distance(i.position) * 111_320 > ECART_CONTOURNEMENT_M
+        )

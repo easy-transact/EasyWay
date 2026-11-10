@@ -50,6 +50,7 @@ class TypeEtablissement(models.TextChoices):
     GARAGE = 'GARAGE', 'Garage'
     STATION = 'STATION', 'Station-service'
     PHARMACIE = 'PHARMACIE', 'Pharmacie'
+    RECHARGE = 'RECHARGE', 'Borne de recharge électrique'
 
 
 class Lieu(models.Model):

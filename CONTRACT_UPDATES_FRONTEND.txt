@@ -499,7 +499,7 @@ signales, deja pris en compte par le calcul d'itineraire).
                  un signalement de conducteur),
     "note": "Refection de la chaussee" | ""      (motif libre affiche au
                  conducteur ; vide hors officiel)
-  types d'autorite : "MAIRIE", "POLICE".
+  types d'autorite : "MAIRIE", "POLICE", "POMPIERS".
   A afficher : le badge "Officiel" + official_source.name, et la note si presente.
 
   A faire cote appli :
@@ -510,3 +510,14 @@ signales, deja pris en compte par le calcul d'itineraire).
   Un signalement officiel programme (travaux a venir) n'apparait qu'a partir de
   sa date de debut -- cote appli, rien de special, il arrive via incident.created
   au moment ou il devient actif.
+
+
+21. NOUVEAU — bornes de recharge electrique + pompiers (10/11/2026)
+  - GET /api/nearby/ accepte un type de plus : types=...,recharge
+    (bornes de recharge pour voiture/moto electrique). Meme forme de reponse
+    que station/pharmacie (etablissements saisis par le staff + lieux OSM dont
+    la categorie contient "borne de recharge"/"charging station"). Pensez a
+    ajouter une icone "recharge" sur la carte.
+  - Nouveau type d'autorite "POMPIERS" (comme MAIRIE/POLICE) : leurs
+    signalements officiels arrivent par les memes endpoints (official = true,
+    official_source.type = "POMPIERS").

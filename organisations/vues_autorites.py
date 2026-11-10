@@ -24,7 +24,7 @@ from .models import RoleOrganisation, TypeOrganisation
 from .views import VueOrganisation
 
 # Types d'organisation autorises a poser des signalements officiels.
-TYPES_AUTORITE = {TypeOrganisation.MAIRIE, TypeOrganisation.POLICE}
+TYPES_AUTORITE = {TypeOrganisation.MAIRIE, TypeOrganisation.POLICE, TypeOrganisation.POMPIERS}
 # Statuts visibles dans le portail : en cours + programmes a venir.
 STATUTS_VISIBLES = [StatutIncident.ACTIF, StatutIncident.EN_ATTENTE, StatutIncident.PROGRAMME]
 
