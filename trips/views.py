@@ -86,6 +86,9 @@ class CalculItineraireView(APIView):
     """POST /api/routes/calculate/ : view -> ServiceItineraire -> ClientValhalla.
     Ne persiste rien -- le client renvoie l'itineraire choisi a POST /api/trips/."""
 
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'calcul-itineraire'
+
     def post(self, request):
         serializer = CalculItineraireSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)

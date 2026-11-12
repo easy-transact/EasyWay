@@ -102,12 +102,14 @@ def _flusher_un_bucket(connexion, cle, identifiant_arete, bucket_epoch) -> bool:
     opposition a une cle vide simplement nettoyee)."""
     champs = connexion.hgetall(cle)
     nombre = int(champs.get('nombre', 0))
-    if nombre <= 0:
+    duree_s = float(champs.get('duree', 0))
+    if nombre <= 0 or duree_s <= 0:
         connexion.delete(cle)
         connexion.srem(ENSEMBLE_BUCKETS_ACTIFS, cle)
         return False
 
-    somme = float(champs['somme_vitesse'])
+    # Vitesse = distance totale / duree totale (pas une moyenne de vitesses).
+    distance_km = float(champs['distance'])
     debut_intervalle = datetime.fromtimestamp(bucket_epoch, tz=dt_timezone.utc)
     debut_local = debut_intervalle.astimezone(FUSEAU_TRAFIC)
 
@@ -115,11 +117,10 @@ def _flusher_un_bucket(connexion, cle, identifiant_arete, bucket_epoch) -> bool:
         identifiant_arete=identifiant_arete,
         debut_intervalle=debut_intervalle,
         defaults={
-            # Decimal(str(...)) plutot que Decimal(somme / nombre) directement --
-            # convertir un float en Decimal via le constructeur binaire reproduit
-            # son imprecision (ex. Decimal(0.1) != Decimal('0.1')) ; le passage
-            # par str l'evite. Cf. le bug deja rencontre sur ce meme genre de champ.
-            'vitesse_moyenne': Decimal(str(round(somme / nombre, 2))),
+            # Decimal(str(...)) plutot que Decimal(x) directement -- convertir un
+            # float via le constructeur binaire reproduit son imprecision (ex.
+            # Decimal(0.1) != Decimal('0.1')) ; le passage par str l'evite.
+            'vitesse_moyenne': Decimal(str(round(distance_km / (duree_s / 3600), 2))),
             'nombre_echantillons': nombre,
             'jour_semaine': debut_local.weekday(),
             'heure_jour': debut_local.hour,

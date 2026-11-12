@@ -17,8 +17,16 @@ from .polyline import decoder_polyline6
 
 
 class PointEvitementSerializer(serializers.Serializer):
-    lat = serializers.FloatField()
-    lon = serializers.FloatField()
+    lat = serializers.FloatField(min_value=-90, max_value=90)
+    lon = serializers.FloatField(min_value=-180, max_value=180)
+
+
+# Nombre maximal de points exclus (avoid) : un conducteur n'evite pas des
+# dizaines d'incidents a la fois, et ServiceItineraire ajoute ses propres
+# points (fermetures, dangers) a ceux-ci -- marge sous la limite Valhalla
+# (service_limits.max_exclude_locations, 50 par defaut).
+MAX_POINTS_AVOID = 20
+MAX_ETAPES = 25
 
 
 class CalculItineraireSerializer(serializers.Serializer):
@@ -44,11 +52,11 @@ class CalculItineraireSerializer(serializers.Serializer):
     destination_lat = serializers.FloatField()
     destination_lon = serializers.FloatField()
     avoid = PointEvitementSerializer(
-        many=True, required=False, default=list, source='eviter',
+        many=True, required=False, default=list, source='eviter', max_length=MAX_POINTS_AVOID,
         help_text="Points a exclure du graphe de routage (ex. position d'un incident).",
     )
     waypoints = PointEvitementSerializer(
-        many=True, required=False, default=list, source='etapes',
+        many=True, required=False, default=list, source='etapes', max_length=MAX_ETAPES,
         help_text="Arrets intermediaires, dans l'ordre de passage entre origine et destination.",
     )
     alternatives = serializers.BooleanField(
@@ -296,7 +304,7 @@ class TrajetCreationSerializer(serializers.Serializer):
         source='lieu_destination', queryset=Lieu.objects.all(), required=False, allow_null=True
     )
     waypoints = PointEvitementSerializer(
-        many=True, required=False, default=list, source='etapes',
+        many=True, required=False, default=list, source='etapes', max_length=MAX_ETAPES,
         help_text="Arrets intermediaires du trajet, dans l'ordre de passage.",
     )
     route = ItineraireCandidatSerializer(source='itineraire')
@@ -417,11 +425,11 @@ class MeilleurItineraireSerializer(serializers.Serializer):
         help_text='Cap actuel : evite un demi-tour en tete du nouvel itineraire.',
     )
     remaining_waypoints = PointEvitementSerializer(
-        many=True, required=False, default=list,
+        many=True, required=False, default=list, max_length=MAX_ETAPES,
         help_text='Etapes pas encore atteintes, dans l\'ordre (vide si aucune).',
     )
     avoid = PointEvitementSerializer(
-        many=True, required=False, default=list,
+        many=True, required=False, default=list, max_length=MAX_POINTS_AVOID,
         help_text='Points a eviter (memes que routes/calculate) : le recalcul en cours de route les contourne aussi.',
     )
 

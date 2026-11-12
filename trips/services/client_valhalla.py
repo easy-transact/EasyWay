@@ -14,13 +14,20 @@ from django.conf import settings
 from trips.polyline import decoder_polyline6
 
 from . import disjoncteur
-from .client_routage import ClientRoutage, ErreurRoutage
+from .client_routage import ClientRoutage, ErreurRoutage, RoutageSansChemin
 from .disjoncteur import DisjoncteurOuvert
 from .geo import distance_haversine_m
 
 VITESSE_REPLI_KMH = 25  # vitesse urbaine moyenne prudente, pour l'estimation degradee
 
 NOMBRE_MAX_ITINERAIRES = 3
+# Candidats presentes a l'EVALUATION (service_itineraire._evaluer, qui calcule
+# duree_avec_trafic puis classe par cout reel). Plus large que le nombre final
+# (3) : une route secondaire que Valhalla croit lente avec ses vitesses
+# theoriques doit survivre jusqu'a l'evaluation, ou le trafic mesure peut
+# montrer qu'elle est en fait plus rapide. Le classement final (risque.classer)
+# et le troncage a NOMBRE_MAX_ITINERAIRES se font ensuite, sur la duree reelle.
+NB_CANDIDATS_A_EVALUER = 5
 # Au-dela, carres de detour de taille fixe (~900 m). En dessous, en ville, les
 # alternates de Valhalla ne suffisent PAS (verifie le 28/10 : Akwa Palace ->
 # Total Bonateki, une seule route) : carres plus petits, a l'echelle du
@@ -38,12 +45,14 @@ FRACTIONS_DETOUR = (0.15, 0.3, 0.5, 0.7, 0.85)
 DEMI_COTE_DETOUR_DEG = 0.004  # ~450 m : carre de ~900 m, perimetre bien sous max_exclude_polygons_length (10 km)
 # Un carre trop pres d'une etape la rendrait inaccessible.
 DISTANCE_MIN_DETOUR_ETAPE_M = 2000
-# Filtres d'une variante vs les routes deja retenues -- ordre de grandeur de
-# ce que Google propose, pas mesure sur donnees reelles.
-RATIO_TEMPS_MAX_VARIANTE = 1.3
-# En ville, 1,3 x 3 min ecarterait toute vraie alternative : on accepte aussi
-# jusqu'a ECART_MAX_VARIANTE_S de plus que la meilleure.
-ECART_MAX_VARIANTE_S = 5 * 60
+# Garde-fou de temps A LA PRESELECTION seulement : ce temps est celui de
+# Valhalla (vitesses theoriques), AVANT le trafic mesure, les retards des
+# signalements et la correction ville. On le garde large (une route 2x plus
+# longue en theorie n'est vraiment pas une option) pour ne pas eliminer une
+# secondaire avant que l'evaluation trafic puisse la departager -- le vrai
+# filtre de duree est le classement par cout reel (risque.classer).
+RATIO_TEMPS_MAX_VARIANTE = 2.0
+ECART_MAX_VARIANTE_S = 10 * 60
 PARTAGE_MAX_VARIANTE = 0.8
 TAILLE_CELLULE_DEG = 0.001  # ~110 m : deux routes paralleles distinctes tombent dans des cellules differentes
 
@@ -74,17 +83,19 @@ def _cellules(trip):
 
 
 def selectionner_variantes(retenus, candidats):
-    """Complete `retenus` (le premier est la route recommandee, reference
-    pour le temps) avec les candidats les plus rapides qui restent a au
-    plus RATIO_TEMPS_MAX_VARIANTE fois son temps et partagent au plus
-    PARTAGE_MAX_VARIANTE de leur trace avec chaque route deja retenue --
-    une variante qui ne differe que de quelques centaines de metres n'est
-    pas une vraie option. Partage aussi par ClientCorridorReference."""
+    """Preselection (pas le choix final) : complete `retenus` (le premier est
+    la route recommandee, reference pour le temps) avec jusqu'a
+    NB_CANDIDATS_A_EVALUER candidats qui partagent au plus PARTAGE_MAX_VARIANTE
+    de leur trace avec une route deja retenue (une variante a quelques
+    centaines de metres pres n'en est pas une) et restent sous un garde-fou de
+    temps LARGE. Le vrai classement par duree reelle + risque se fait ensuite
+    (service_itineraire -> risque.classer), puis le troncage a 3. Partage aussi
+    par ClientCorridorReference."""
     reference = retenus[0]['summary']['time']
     temps_max = max(reference * RATIO_TEMPS_MAX_VARIANTE, reference + ECART_MAX_VARIANTE_S)
     selection = [(trip, _cellules(trip)) for trip in retenus]
     for candidat in sorted(candidats, key=lambda t: t['summary']['time']):
-        if len(selection) >= NOMBRE_MAX_ITINERAIRES:
+        if len(selection) >= NB_CANDIDATS_A_EVALUER:
             break
         if candidat['summary']['time'] > temps_max:
             continue
@@ -142,6 +153,10 @@ class ClientValhalla(ClientRoutage):
                 trips = self._appeler_avec_retry(
                     depart, arrivee, options, alternates=0, cap_origine=cap_origine, etapes=etapes
                 )
+        except RoutageSansChemin:
+            # Requete legitimement sans solution (ex. point a eviter qui coupe
+            # le seul passage) : aucun itineraire, jamais une ligne droite.
+            return []
         except (DisjoncteurOuvert, ErreurRoutage):
             return self.replier(depart, arrivee, etapes)
         disjoncteur.reinitialiser_echecs()
@@ -165,8 +180,8 @@ class ClientValhalla(ClientRoutage):
         trips = self._appeler_avec_retry(
             depart, arrivee, options, alternates=2, cap_origine=cap_origine, etapes=etapes
         )
-        if len(trips) >= NOMBRE_MAX_ITINERAIRES:
-            return trips[:NOMBRE_MAX_ITINERAIRES]
+        if len(trips) >= NB_CANDIDATS_A_EVALUER:
+            return trips[:NB_CANDIDATS_A_EVALUER]
 
         longueur_km = trips[0]['summary']['length']
         if longueur_km >= DISTANCE_MIN_DETOUR_KM:
@@ -245,8 +260,15 @@ class ClientValhalla(ClientRoutage):
         for _ in range(self.TENTATIVES):
             try:
                 return self._appeler(depart, arrivee, options, alternates, cap_origine, etapes)
+            except requests.HTTPError as exc:
+                # 4xx = requete refusee (pas de chemin, point a eviter sur la
+                # route...) : cas normal, pas une panne. Pas de retry (meme
+                # requete = meme reponse), pas de disjoncteur.
+                if exc.response is not None and 400 <= exc.response.status_code < 500:
+                    raise RoutageSansChemin(str(exc)) from exc
+                derniere_erreur = exc  # 5xx : vraie panne
             except requests.RequestException as exc:
-                derniere_erreur = exc
+                derniere_erreur = exc  # reseau / timeout : vraie panne
         disjoncteur.enregistrer_echec()
         raise ErreurRoutage(str(derniere_erreur))
 

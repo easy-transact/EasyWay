@@ -70,16 +70,18 @@ def vitesses_mesurees(connexion, maintenant: int) -> dict:
                 continue
             trajet, _, mesure = champ[len(PREFIXE_CHAMP_TRAJET):].rpartition(':')
             cumul = par_arete[graph_id][trajet]
-            if mesure == 'somme':
-                cumul[0] += float(valeur)
-            elif mesure == 'nombre':
-                cumul[1] += int(valeur)
+            if mesure == 'distance':
+                cumul[0] += float(valeur)  # km
+            elif mesure == 'duree':
+                cumul[1] += float(valeur)  # s
 
     vitesses = {}
     for graph_id, par_trajet in par_arete.items():
-        moyennes = [somme / nombre for somme, nombre in par_trajet.values() if nombre > 0]
-        if len(moyennes) >= NB_MIN_CONDUCTEURS:
-            vitesses[graph_id] = statistics.median(moyennes)
+        # Une vitesse par conducteur = sa distance totale / sa duree totale sur
+        # l'arete (pas une moyenne de vitesses), puis mediane entre conducteurs.
+        par_conducteur = [distance / (duree / 3600) for distance, duree in par_trajet.values() if duree > 0]
+        if len(par_conducteur) >= NB_MIN_CONDUCTEURS:
+            vitesses[graph_id] = statistics.median(par_conducteur)
     return vitesses
 
 

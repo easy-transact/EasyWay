@@ -21,6 +21,14 @@ SECRET_KEY = env('DJANGO_SECRET_KEY', default='django-insecure-42v-p@slr%1$b&nm#
 
 DEBUG = env('DEBUG')
 
+# Cette cle signe les JWT, les sessions et l'identifiant anonyme des positions
+# en direct : en production, une variable oubliee la laisserait a la valeur de
+# repli publique du depot, rendant les jetons falsifiables sans erreur visible.
+if not DEBUG and SECRET_KEY.startswith('django-insecure-'):
+    raise ImproperlyConfigured(
+        'DJANGO_SECRET_KEY doit etre definie (hors DEBUG) : la cle de repli du depot est publique.'
+    )
+
 ALLOWED_HOSTS = env.list('DJANGO_ALLOWED_HOSTS', default=['localhost', '127.0.0.1'])
 
 # Requis par Django >= 4 pour accepter les POST (admin, login) recus via un
@@ -169,6 +177,11 @@ REST_FRAMEWORK = {
         'liste-attente': '10/hour',
         # Meilleur itineraire en cours de route : un appel toutes les 1-2 min pendant la navigation.
         'meilleur-itineraire': '120/hour',
+        # Calcul d'itineraire : l'appel le plus couteux (jusqu'a 7 appels Valhalla
+        # + un trace_attributes par candidat). Large (recalculs en cours de route,
+        # essais de l'utilisateur), mais borne pour qu'un seul compte ne sature
+        # pas Valhalla. A ajuster avec l'usage reel.
+        'calcul-itineraire': '300/hour',
         # Repond existe / n'existe pas : bloque l'enumeration de comptes en masse.
         'verification-existence': '20/hour',
         # Invitations de membres d'agence : chaque appel envoie un email.

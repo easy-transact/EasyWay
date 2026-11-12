@@ -91,13 +91,18 @@ class ServiceIncident:
         else:
             way_id_osm, forward_osm = None, None
 
+        # Geocodage inverse (appel HTTP Nominatim) AVANT la transaction : sinon
+        # le verrou select_for_update sur les signalements voisins est tenu
+        # pendant tout l'appel reseau, et les votes/signalements de la meme zone
+        # attendent. Parfois inutile (si doublon), mais jamais de verrou tenu.
+        geocodage = self._geocoder_inverse(position)
+
         with transaction.atomic():
             doublon = self._chercher_doublon(type_incident, position, cap)
             if doublon is not None:
                 self._corroborer(doublon, utilisateur)
                 incident, est_doublon = doublon, True
             else:
-                geocodage = self._geocoder_inverse(position)
                 en_agglomeration = geocodage.get('urban') if geocodage else None
                 incident = Incident.objects.create(
                     auteur=utilisateur,
@@ -257,6 +262,12 @@ class ServiceIncident:
         return None
 
     def _corroborer(self, incident, utilisateur):
+        # L'auteur ne confirme pas son propre signalement : sinon un seul compte
+        # qui re-signale au meme endroit fait passer confirmations a 1, ce qui
+        # suffit a fermeture_confirmee (retards_signalements) -- route exclue
+        # pour tous. Meme regle que la vue de vote (IncidentDetailView).
+        if incident.auteur_id == utilisateur.id:
+            return
         if Vote.objects.filter(incident=incident, votant=utilisateur).exists():
             return  # deja signale/vote sur cet incident -- ne compte pas deux fois
         vote = Vote.objects.create(

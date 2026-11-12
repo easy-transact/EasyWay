@@ -76,6 +76,15 @@ class MeilleurItineraireTests(TestCase):
     def test_une_seule_route(self):
         self.assertEqual(self.demander([candidat(ROUTE_SUIVIE, 600, 'suivie')]).json()['reason'], 'NO_ALTERNATIVE')
 
+    def test_valhalla_en_panne_candidat_degrade_jamais_impose(self):
+        # Ligne droite "degradee" (Valhalla en panne) : on garde la route, on
+        # ne propose ni n'impose rien. Jamais OFF_ROUTE ni IMPOSE.
+        degrade = {**candidat(VARIANTE, 600, 'degrade'), 'degrade': True}
+        donnees = self.demander([degrade]).json()
+        self.assertIn(donnees['reason'], ('NO_BETTER', 'HAZARD_AHEAD'))
+        self.assertEqual(donnees['action'], 'NONE' if donnees['reason'] == 'NO_BETTER' else 'ALERT')
+        self.assertIsNone(donnees['better_route'])
+
     def test_trajet_d_un_autre_ou_termine(self):
         autre = creer_utilisateur(email='autre@test.cm')
         trajet_autre = _trajet_actif_pour(autre)

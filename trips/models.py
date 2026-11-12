@@ -337,6 +337,8 @@ class EchantillonVitesse(models.Model):
         ]
         indexes = [
             models.Index(fields=['identifiant_arete', '-debut_intervalle']),
+            # vitesses_typiques filtre sur (arete, jour, heure) (service_trafic).
+            models.Index(fields=['identifiant_arete', 'jour_semaine', 'heure_jour']),
         ]
 
     def __str__(self):

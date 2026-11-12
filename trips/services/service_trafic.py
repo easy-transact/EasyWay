@@ -72,6 +72,44 @@ def vitesse_recente(identifiant_arete):
     return plus_recent.vitesse_moyenne if plus_recent else None
 
 
+def vitesses_recentes(identifiants):
+    """{arete: derniere vitesse recente} pour un lot d'aretes -- une seule
+    requete au lieu d'une par arete (cf. vitesse_recente)."""
+    if not identifiants:
+        return {}
+    plus_recent = {}
+    lignes = (
+        EchantillonVitesse.objects.filter(
+            identifiant_arete__in=identifiants,
+            debut_intervalle__gte=timezone.now() - FENETRE_RECENTE,
+        )
+        .order_by('identifiant_arete', '-debut_intervalle')
+        .values_list('identifiant_arete', 'debut_intervalle', 'vitesse_moyenne')
+    )
+    for arete, _debut, vitesse in lignes:
+        plus_recent.setdefault(arete, vitesse)  # premiere vue = la plus recente (tri desc)
+    return plus_recent
+
+
+def vitesses_typiques(identifiants, jour_semaine, heure_jour):
+    """{arete: moyenne ponderee} pour un lot d'aretes a ce jour/heure -- une
+    seule requete groupee au lieu d'une par arete (cf. vitesse_typique)."""
+    if not identifiants:
+        return {}
+    agregats = (
+        EchantillonVitesse.objects.filter(
+            identifiant_arete__in=identifiants, jour_semaine=jour_semaine, heure_jour=heure_jour,
+            debut_intervalle__gte=timezone.now() - FENETRE_HISTORIQUE,
+        )
+        .values('identifiant_arete')
+        .annotate(somme_ponderee=Sum(F('vitesse_moyenne') * F('nombre_echantillons')), poids=Sum('nombre_echantillons'))
+    )
+    return {
+        a['identifiant_arete']: a['somme_ponderee'] / a['poids']
+        for a in agregats if a['poids']
+    }
+
+
 def niveau_relatif(vitesse_recente_kmh, vitesse_typique_kmh) -> str:
     if not vitesse_recente_kmh or not vitesse_typique_kmh:
         return NiveauTrafic.NORMAL  # pas assez d'historique pour cette arete -- honnete plutot que de deviner
@@ -140,14 +178,20 @@ def _evaluer_sans_cache(geometrie_encodee: str) -> dict:
     duree_mesuree_s = duree_valhalla_s = 0.0
     a_mesure_une_arete = False
 
+    # Deux requetes groupees pour tout le trace, au lieu de deux par arete
+    # (un trajet long traverse des milliers d'aretes, pour chaque candidat).
+    identifiants = [e['id'] for e in edges if (e.get('length') or 0) > 0]
+    recentes = vitesses_recentes(identifiants)
+    typiques = vitesses_typiques(identifiants, jour_semaine, heure_jour)
+
     for edge in edges:
         longueur_km = edge.get('length') or 0
         if longueur_km <= 0:
             continue
         identifiant_arete = edge['id']
 
-        recente = vitesse_recente(identifiant_arete)
-        typique = vitesse_typique(identifiant_arete, jour_semaine, heure_jour)
+        recente = recentes.get(identifiant_arete)
+        typique = typiques.get(identifiant_arete)
         niveau_arete = niveau_relatif(recente, typique)
         if _SEVERITE[niveau_arete] > _SEVERITE[niveau_pire]:
             niveau_pire = niveau_arete

@@ -366,6 +366,19 @@ class DisjoncteurValhallaTests(TestCase):
             post_simule.assert_not_called()
             self.assertTrue(resultat[0]['degrade'])
 
+    def test_reponse_400_ne_bascule_pas_ni_nouvre_le_disjoncteur(self):
+        # 400 Valhalla = requete sans chemin (cas normal) : aucun itineraire,
+        # jamais une ligne droite, et le disjoncteur reste ferme.
+        client = ClientValhalla()
+        reponse_400 = Mock(status_code=400)
+        reponse_400.raise_for_status.side_effect = requests.exceptions.HTTPError(response=reponse_400)
+        with patch('trips.services.client_valhalla.requests.post', return_value=reponse_400) as post_simule:
+            for _ in range(SEUIL_ECHECS + 1):
+                resultat = client.calculer_itineraires((4.0, 9.7), (4.01, 9.71), {'costing': 'auto'})
+                self.assertEqual(resultat, [])  # pas de ligne droite
+        self.assertEqual(post_simule.call_count, SEUIL_ECHECS + 1)  # pas de retry du 4xx
+        self.assertIsNone(cache.get(CLE_OUVERT_JUSQU_A))  # disjoncteur ferme
+
     def test_succes_reinitialise_le_compteur_dechecs(self):
         client = ClientValhalla()
         cache.set(CLE_ECHECS, SEUIL_ECHECS - 1, timeout=60)
@@ -449,8 +462,10 @@ class VariantesParDetourTests(SimpleTestCase):
         self.assertTrue(all(appel['alternates'] == 0 for appel in appels_detour))
 
     def test_ecarte_les_variantes_trop_lentes_ou_quasi_identiques(self):
+        # Garde-fou de preselection elargi a 2x (le vrai tri est fait apres, sur
+        # la duree reelle) : une route 2,5x plus longue en theorie reste ecartee.
         trips, _ = self._calculer([
-            _trip_long(TRACE_EST, 2000),  # 2x la meilleure
+            _trip_long(TRACE_EST, 2500),  # 2,5x la meilleure : au-dela du garde-fou
             _trip_long(TRACE_QUASI_DIRECT, 1010),
             _trip_long(TRACE_DIRECT, 1000),
             _trip_long(TRACE_DIRECT, 1000),
@@ -669,11 +684,12 @@ class RedisTraficFactice:
 
 
 def _bucket(graph_id, bucket_epoch, **par_trajet):
-    """par_trajet : trajet_id=(somme, nombre)."""
+    """par_trajet : trajet_id=(distance_km, duree_s). La vitesse d'un conducteur
+    est sa distance / sa duree (duree 3600 s -> la distance vaut la vitesse)."""
     champs = {}
-    for trajet, (somme, nombre) in par_trajet.items():
-        champs[f't:{trajet}:somme'] = str(somme)
-        champs[f't:{trajet}:nombre'] = str(nombre)
+    for trajet, (distance_km, duree_s) in par_trajet.items():
+        champs[f't:{trajet}:distance'] = str(distance_km)
+        champs[f't:{trajet}:duree'] = str(duree_s)
     return {f'trafic:accumulateur:{graph_id}:{bucket_epoch}': champs}
 
 
@@ -683,9 +699,10 @@ class TraficTempsReelTests(SimpleTestCase):
 
     def test_mediane_par_conducteur_a_partir_de_deux(self):
         connexion = RedisTraficFactice({
-            # Un conducteur a beaucoup de points : il ne compte qu'une fois.
-            **_bucket(_graph_id(1), self.BUCKET_COURANT, a=(100, 10), b=(40, 1), c=(60, 2)),
-            **_bucket(_graph_id(2), self.BUCKET_COURANT, a=(20, 1)),  # un seul conducteur
+            # Un conducteur a beaucoup de points : sa distance/duree ne compte qu'une fois.
+            # Vitesses par conducteur : 10, 40, 30 km/h -> mediane 30.
+            **_bucket(_graph_id(1), self.BUCKET_COURANT, a=(10, 3600), b=(40, 3600), c=(30, 3600)),
+            **_bucket(_graph_id(2), self.BUCKET_COURANT, a=(20, 3600)),  # un seul conducteur
         })
         vitesses = trafic_temps_reel.vitesses_mesurees(connexion, self.MAINTENANT)
         self.assertEqual(vitesses, {_graph_id(1): 30})
@@ -694,9 +711,9 @@ class TraficTempsReelTests(SimpleTestCase):
         precedent = self.BUCKET_COURANT - 300
         ancien = self.BUCKET_COURANT - 900
         connexion = RedisTraficFactice({
-            **_bucket(_graph_id(1), self.BUCKET_COURANT, a=(20, 1)),
-            **_bucket(_graph_id(1), precedent, b=(40, 1)),
-            **_bucket(_graph_id(2), ancien, a=(20, 1), b=(40, 1)),
+            **_bucket(_graph_id(1), self.BUCKET_COURANT, a=(20, 3600)),
+            **_bucket(_graph_id(1), precedent, b=(40, 3600)),
+            **_bucket(_graph_id(2), ancien, a=(20, 3600), b=(40, 3600)),
         })
         vitesses = trafic_temps_reel.vitesses_mesurees(connexion, self.MAINTENANT)
         self.assertEqual(vitesses, {_graph_id(1): 30})
@@ -707,7 +724,7 @@ class TraficTempsReelTests(SimpleTestCase):
         with tempfile.TemporaryDirectory() as dossier:
             chemin = _creer_traffic_tar(dossier)
             connexion = RedisTraficFactice(
-                _bucket(_graph_id(1), self.BUCKET_COURANT, a=(40, 1), b=(40, 1))
+                _bucket(_graph_id(1), self.BUCKET_COURANT, a=(40, 3600), b=(40, 3600))
             )
             # Arete 5 publiee il y a 20 min, jamais rafraichie depuis.
             tuiles_trafic.ecrire_vitesses(chemin, {_graph_id(5): 30})
@@ -892,6 +909,26 @@ class TrajetApiTests(TestCase):
         self.assertEqual(reponse.status_code, 200)
         options_recues = calculer_simule.call_args.kwargs.get('options') or calculer_simule.call_args.args[2]
         self.assertEqual(options_recues['exclude_locations'], [{'lat': 4.05, 'lon': 9.70}])
+
+    def test_avoid_borne_en_nombre_et_coordonnees(self):
+        # Trop de points, ou coordonnees hors bornes : 400 du serializer, sans
+        # appel Valhalla (sinon un compte ordinaire peut couper le routage).
+        with patch('trips.services.client_valhalla.ClientValhalla.calculer_itineraires') as calculer_simule:
+            trop = self.client.post(
+                reverse('trips:calculer-itineraire'),
+                {'origin_lat': 4.0483, 'origin_lon': 9.7043, 'destination_lat': 4.0469, 'destination_lon': 9.6970,
+                 'avoid': [{'lat': 4.05, 'lon': 9.70}] * 21},
+                content_type='application/json', **self.jetons,
+            )
+            hors_bornes = self.client.post(
+                reverse('trips:calculer-itineraire'),
+                {'origin_lat': 4.0483, 'origin_lon': 9.7043, 'destination_lat': 4.0469, 'destination_lon': 9.6970,
+                 'avoid': [{'lat': 999, 'lon': 9.70}]},
+                content_type='application/json', **self.jetons,
+            )
+        self.assertEqual(trop.status_code, 400)
+        self.assertEqual(hors_bornes.status_code, 400)
+        calculer_simule.assert_not_called()
 
     def test_calcul_itineraire_avec_origin_heading_atteint_valhalla(self):
         with patch(
@@ -1277,11 +1314,13 @@ class ConsommateurPositionsTests(TestCase):
         bucket = ConsommateurPositions._bucket_5min(ConsommateurPositions._parser_horodatage('2026-01-01T10:00:00+00:00'))
         pipe = connexion.pipeline.return_value.__enter__.return_value
         cle = f'trafic:accumulateur:42:{bucket}'
-        # Tous trajets confondus + par trajet (mediane par conducteur, cf. _accumuler).
+        # Distance/duree, tous trajets confondus + par trajet (cf. _accumuler) :
+        # 0,5 km parcourus en 60 s.
         self.assertEqual(pipe.hincrbyfloat.call_args_list, [
-            call(cle, 'somme_vitesse', 30.0), call(cle, 't:t1:somme', 30.0),
+            call(cle, 'distance', 0.5), call(cle, 'duree', 60.0),
+            call(cle, 't:t1:distance', 0.5), call(cle, 't:t1:duree', 60.0),
         ])
-        self.assertEqual(pipe.hincrby.call_args_list, [call(cle, 'nombre', 1), call(cle, 't:t1:nombre', 1)])
+        self.assertEqual(pipe.hincrby.call_args_list, [call(cle, 'nombre', 1)])
         connexion.xack.assert_called_once_with(FLUX_POSITIONS, 'consommateurs-trafic', '1-1', '1-2')
 
     def test_correspondance_vide_acquitte_sans_accumuler(self):
@@ -1392,6 +1431,22 @@ class ServiceTraficTests(TestCase):
         typique = service_trafic.vitesse_typique(self.ARETE, jour_semaine=2, heure_jour=8)
         self.assertAlmostEqual(float(typique), 140 / 3, places=2)  # (40*2 + 60*1) / 3
 
+    def test_versions_groupees_coherentes_avec_les_unitaires(self):
+        EchantillonVitesse.objects.create(
+            identifiant_arete=self.ARETE, debut_intervalle=timezone.now() - timezone.timedelta(days=7),
+            jour_semaine=2, heure_jour=8, vitesse_moyenne=Decimal('40.00'), nombre_echantillons=2,
+        )
+        EchantillonVitesse.objects.create(
+            identifiant_arete=self.ARETE, debut_intervalle=timezone.now() - timezone.timedelta(minutes=5),
+            jour_semaine=2, heure_jour=8, vitesse_moyenne=Decimal('12.00'), nombre_echantillons=1,
+        )
+        typiques = service_trafic.vitesses_typiques([self.ARETE, 123], jour_semaine=2, heure_jour=8)
+        recentes = service_trafic.vitesses_recentes([self.ARETE, 123])
+        self.assertAlmostEqual(float(typiques[self.ARETE]), float(service_trafic.vitesse_typique(self.ARETE, 2, 8)))
+        self.assertEqual(recentes[self.ARETE], service_trafic.vitesse_recente(self.ARETE))
+        self.assertNotIn(123, typiques)
+        self.assertNotIn(123, recentes)
+
     def test_vitesse_typique_sans_historique_est_none(self):
         self.assertIsNone(service_trafic.vitesse_typique(123456, jour_semaine=1, heure_jour=1))
 
@@ -1496,16 +1551,18 @@ class ServiceTraficTests(TestCase):
 
 
 class FlusherEchantillonsVitesseTests(TestCase):
-    def _connexion_avec_bucket(self, identifiant_arete, bucket_epoch, somme, nombre):
+    def _connexion_avec_bucket(self, identifiant_arete, bucket_epoch, distance_km, duree_s, nombre):
         connexion = MagicMock()
         cle = f'trafic:accumulateur:{identifiant_arete}:{bucket_epoch}'
         connexion.smembers.return_value = {cle}
-        connexion.hgetall.return_value = {'somme_vitesse': str(somme), 'nombre': str(nombre)}
+        connexion.hgetall.return_value = {
+            'distance': str(distance_km), 'duree': str(duree_s), 'nombre': str(nombre),
+        }
         return connexion, cle
 
     def test_ignore_un_bucket_encore_ouvert(self):
         bucket_epoch = int(timezone.now().timestamp())  # vient tout juste de s'ouvrir
-        connexion, cle = self._connexion_avec_bucket(111, bucket_epoch, 100, 4)
+        connexion, cle = self._connexion_avec_bucket(111, bucket_epoch, 1.0, 120, 4)
 
         with patch('trips.tasks.connexion_redis_telemetrie', return_value=connexion):
             nb = flusher_echantillons_vitesse()
@@ -1517,7 +1574,7 @@ class FlusherEchantillonsVitesseTests(TestCase):
 
     def test_flush_un_bucket_ferme_et_nettoie_redis(self):
         bucket_epoch = int(timezone.now().timestamp()) - TAILLE_BUCKET_S - int(MARGE_FLUSH_S) - 10
-        connexion, cle = self._connexion_avec_bucket(222, bucket_epoch, 120, 4)  # moyenne 30 km/h
+        connexion, cle = self._connexion_avec_bucket(222, bucket_epoch, 1.0, 120, 4)  # 1 km en 120 s = 30 km/h
 
         with patch('trips.tasks.connexion_redis_telemetrie', return_value=connexion):
             nb = flusher_echantillons_vitesse()
@@ -1534,7 +1591,7 @@ class FlusherEchantillonsVitesseTests(TestCase):
         debut_intervalle = datetime(2026, 1, 5, 23, 30, tzinfo=dt_timezone.utc)
         bucket_epoch = int(debut_intervalle.timestamp())
         bucket_epoch -= bucket_epoch % TAILLE_BUCKET_S
-        connexion, cle = self._connexion_avec_bucket(333, bucket_epoch, 50, 2)
+        connexion, cle = self._connexion_avec_bucket(333, bucket_epoch, 1.0, 120, 2)
 
         with patch('trips.tasks.connexion_redis_telemetrie', return_value=connexion):
             flusher_echantillons_vitesse()
@@ -1546,7 +1603,7 @@ class FlusherEchantillonsVitesseTests(TestCase):
 
     def test_flush_est_idempotent_sur_nouvelle_tentative(self):
         bucket_epoch = int(timezone.now().timestamp()) - TAILLE_BUCKET_S - int(MARGE_FLUSH_S) - 10
-        connexion, cle = self._connexion_avec_bucket(444, bucket_epoch, 100, 2)  # 50 km/h
+        connexion, cle = self._connexion_avec_bucket(444, bucket_epoch, 1.0, 72, 2)  # 50 km/h
 
         with patch('trips.tasks.connexion_redis_telemetrie', return_value=connexion):
             flusher_echantillons_vitesse()
@@ -1559,7 +1616,7 @@ class FlusherEchantillonsVitesseTests(TestCase):
 
     def test_bucket_sans_echantillons_est_nettoye_sans_ecrire(self):
         bucket_epoch = int(timezone.now().timestamp()) - TAILLE_BUCKET_S - int(MARGE_FLUSH_S) - 10
-        connexion, cle = self._connexion_avec_bucket(555, bucket_epoch, 0, 0)
+        connexion, cle = self._connexion_avec_bucket(555, bucket_epoch, 0, 0, 0)
 
         with patch('trips.tasks.connexion_redis_telemetrie', return_value=connexion):
             nb = flusher_echantillons_vitesse()

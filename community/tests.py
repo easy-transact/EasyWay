@@ -175,6 +175,20 @@ class ServiceIncidentSignalerTests(TestCase):
         self.assertEqual(Incident.objects.count(), 1)
         self.assertTrue(Vote.objects.filter(incident=existant, votant=auteur2).exists())
 
+    def test_auteur_ne_confirme_pas_son_propre_signalement(self):
+        # Re-signaler au meme endroit ne doit pas s'auto-confirmer : sinon un
+        # seul compte ferait exclure une route pour tous (fermeture_confirmee).
+        auteur = creer_utilisateur('auteur@easyway.local')
+        existant = creer_incident(auteur, type_incident=TypeIncident.VOIE_BLOQUEE)
+        incident, doublon = ServiceIncident().signaler(
+            auteur, TypeIncident.VOIE_BLOQUEE, self._point(0.0005, 0.0005)
+        )
+        self.assertTrue(doublon)
+        self.assertEqual(incident.id, existant.id)
+        existant.refresh_from_db()
+        self.assertEqual(existant.confirmations, 0)
+        self.assertFalse(Vote.objects.filter(incident=existant, votant=auteur).exists())
+
     def test_candidat_statut_actif_mais_deja_expire_ne_dedoublonne_pas(self):
         # Reproduit un cas trouve en verification live : statut='ACTIF' en
         # base ne veut rien dire si expire_le est deja passe -- la tache

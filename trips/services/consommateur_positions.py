@@ -50,6 +50,9 @@ VITESSE_CLASSE_DEFAUT_KMH = 60
 FACTEUR_VITESSE_ABERRANTE = 1.5
 # Depart et stationnement : on y roule au pas quelle que soit la circulation.
 MARGE_DEPART_ARRIVEE_M = 200
+# Arret plus long que ca (sans avancer) : pause (livraison, panne), pas un
+# bouchon -- l'intervalle est ignore plutot que de compter 0 km/h a tort.
+DUREE_ARRET_MAX_S = 3 * 60
 PREFIXE_ACCUMULATEUR = 'trafic:accumulateur'
 ENSEMBLE_BUCKETS_ACTIFS = 'trafic:buckets:actifs'
 TAILLE_BUCKET_S = 5 * 60
@@ -192,12 +195,15 @@ class ConsommateurPositions:
 
             longueur_km = edges[index_arete]['length']
             distance_km = (suivant['distance_along_edge'] - actuel['distance_along_edge']) * longueur_km
-            if distance_km <= 0:
-                continue  # vehicule a l'arret ou artefact de bruit GPS -- pas un signal de vitesse exploitable
-
-            vitesse_kmh = distance_km / (duree_s / 3600)
-            if vitesse_kmh > self._vitesse_max(edges[index_arete]):
-                continue  # saut GPS improbable -- ne pollue pas la moyenne plutot que de le capper arbitrairement
+            if distance_km < 0:
+                continue  # recul (bruit GPS / demi-tour) -- pas un signal de vitesse exploitable
+            # Vehicule a l'arret (distance ~0) : on ne jette PAS l'intervalle,
+            # sa duree compte et tire la vitesse vers le bas (vrai bouchon). Mais
+            # un arret long est une pause (livraison, panne), pas un bouchon.
+            if distance_km == 0 and duree_s > DUREE_ARRET_MAX_S:
+                continue
+            if distance_km > 0 and distance_km / (duree_s / 3600) > self._vitesse_max(edges[index_arete]):
+                continue  # saut GPS improbable -- ne pollue pas la mesure plutot que de le capper arbitrairement
 
             position = (paires[i][1]['lat'], paires[i][1]['lon'])
             if any(distance_haversine_m(position, e) < MARGE_DEPART_ARRIVEE_M for e in extremites):
@@ -205,21 +211,24 @@ class ConsommateurPositions:
 
             identifiant_arete = edges[index_arete]['id']
             bucket = self._bucket_5min(self._parser_horodatage(paires[i][1]['horodatage']))
-            self._accumuler(identifiant_arete, bucket, vitesse_kmh, paires[i][1].get('trajet_id'))
+            self._accumuler(identifiant_arete, bucket, distance_km, duree_s, paires[i][1].get('trajet_id'))
 
-    def _accumuler(self, identifiant_arete, bucket_epoch, vitesse_kmh, trajet_id=None):
-        """somme_vitesse/nombre : tous trajets confondus, lus par le flush vers
-        EchantillonVitesse. Champs PREFIXE_CHAMP_TRAJET{trajet_id}:somme/:nombre
-        en plus, dans le meme hash : la publication temps reel (cf.
-        vitesses_temps_reel) en tire une vitesse par conducteur, pour une
-        mediane qui ne compte qu'une fois un vehicule a nombreux points."""
+    def _accumuler(self, identifiant_arete, bucket_epoch, distance_km, duree_s, trajet_id=None):
+        """Accumule DISTANCE et DUREE (pas une moyenne de vitesses) : la vitesse
+        d'une arete sur un bucket est Sigma distance / Sigma duree -- un vehicule
+        qui roule 10 s vite puis 60 s au pas donne sa vraie vitesse, pas la
+        moyenne des deux. Les intervalles a l'arret (distance 0) gardent leur
+        duree. `nombre` sert de poids a l'agregation historique. Champs
+        PREFIXE_CHAMP_TRAJET{trajet_id}:distance/:duree en plus (meme hash) :
+        la publication temps reel en tire une vitesse par conducteur (mediane)."""
         cle = f'{PREFIXE_ACCUMULATEUR}:{identifiant_arete}:{bucket_epoch}'
         with self.connexion.pipeline() as pipe:
-            pipe.hincrbyfloat(cle, 'somme_vitesse', vitesse_kmh)
+            pipe.hincrbyfloat(cle, 'distance', distance_km)
+            pipe.hincrbyfloat(cle, 'duree', duree_s)
             pipe.hincrby(cle, 'nombre', 1)
             if trajet_id is not None:
-                pipe.hincrbyfloat(cle, f'{PREFIXE_CHAMP_TRAJET}{trajet_id}:somme', vitesse_kmh)
-                pipe.hincrby(cle, f'{PREFIXE_CHAMP_TRAJET}{trajet_id}:nombre', 1)
+                pipe.hincrbyfloat(cle, f'{PREFIXE_CHAMP_TRAJET}{trajet_id}:distance', distance_km)
+                pipe.hincrbyfloat(cle, f'{PREFIXE_CHAMP_TRAJET}{trajet_id}:duree', duree_s)
             pipe.expire(cle, DUREE_ACCUMULATEUR_S)
             pipe.sadd(ENSEMBLE_BUCKETS_ACTIFS, cle)
             pipe.execute()

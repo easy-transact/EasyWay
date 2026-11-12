@@ -167,12 +167,21 @@ def _decider(trajet, position, utilisateur, cap, etapes_restantes, eviter):
     )
     if not candidats:
         return {**resultat, 'reason': NO_ROUTE}
+    costing = COSTING_PAR_VEHICULE.get(trajet.type_vehicule or utilisateur.type_vehicule, COSTING_DEFAUT)
+    # Valhalla en panne : calculer() renvoie un seul candidat "degrade" (ligne
+    # droite). On ne le propose ni ne l'impose jamais -- le conducteur garde sa
+    # route et on reessaie. On peut encore ALERTER d'une fermeture devant
+    # (calculee sur le trace connu du trajet, sans routage).
+    if candidats[0].get('degrade'):
+        if trajet.geometrie is None:
+            return {**resultat, 'reason': NO_BETTER}
+        fermetures = risque.fermetures_devant(troncon_restant(list(trajet.geometrie.coords), position), costing)
+        return {**resultat, 'reason': HAZARD_AHEAD if fermetures else NO_BETTER, 'hazards_ahead': fermetures}
     if trajet.geometrie is None:
         return {**resultat, 'reason': NO_ALTERNATIVE}
 
     # Route barree confirmee devant sur la route suivie : les candidats la
     # contournent deja (exclue du calcul) -- changement necessaire, meme plus long.
-    costing = COSTING_PAR_VEHICULE.get(trajet.type_vehicule or utilisateur.type_vehicule, COSTING_DEFAUT)
     fermetures = risque.fermetures_devant(troncon_restant(list(trajet.geometrie.coords), position), costing)
     if fermetures:
         nouvelle = candidats[0]

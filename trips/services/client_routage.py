@@ -2,7 +2,16 @@ from abc import ABC, abstractmethod
 
 
 class ErreurRoutage(Exception):
-    """Le moteur de routage (Valhalla ou autre) est indisponible ou a echoue."""
+    """Le moteur de routage (Valhalla ou autre) est indisponible ou a echoue
+    (reseau, timeout, 5xx) -- une VRAIE panne : compte pour le disjoncteur et
+    declenche la reponse degradee (ligne droite)."""
+
+
+class RoutageSansChemin(Exception):
+    """Valhalla a repondu 4xx : requete refusee (aucun chemin, point trop loin
+    d'une route, point a eviter sur le trajet...). Cas NORMAL, pas une panne :
+    ne touche pas le disjoncteur, ne declenche pas la ligne droite -- l'appelant
+    renvoie "aucun itineraire"."""
 
 
 class ClientRoutage(ABC):
