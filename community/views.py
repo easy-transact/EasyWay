@@ -730,7 +730,11 @@ class VoterIncidentView(APIView):
                 return Response(
                     {'detail': 'You cannot vote on your own report.'}, status=400
                 )
-            if Vote.objects.filter(incident=incident, votant=request.user).exists():
+            precedent = Vote.objects.filter(incident=incident, votant=request.user).first()
+            if precedent is not None and precedent.passif:
+                # Vote deduit de la telemetrie : le vote explicite le remplace.
+                incident.annuler_vote_passif(precedent)
+            elif precedent is not None:
                 return Response({'detail': 'You have already voted on this report.'}, status=400)
 
             vote = Vote.objects.create(

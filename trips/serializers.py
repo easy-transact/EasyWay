@@ -62,6 +62,13 @@ class CalculItineraireSerializer(serializers.Serializer):
         many=True, required=False, default=list, source='etapes', max_length=MAX_ETAPES,
         help_text="Arrets intermediaires, dans l'ordre de passage entre origine et destination.",
     )
+    depart_at = serializers.DateTimeField(
+        required=False, allow_null=True, default=None, source='depart_le',
+        help_text="Heure de depart prevue (ISO 8601). Absente ou dans moins de 15 min : depart "
+                  "immediat, avec le trafic du moment. Plus tard : trafic PREVU a cette heure "
+                  "(historique des conducteurs EasyWay), signalements encore valables a cette heure "
+                  "seulement. Au plus 7 jours a l'avance.",
+    )
     alternatives = serializers.BooleanField(
         required=False, default=True,
         help_text=(
@@ -90,6 +97,14 @@ class CalculItineraireSerializer(serializers.Serializer):
                 raise serializers.ValidationError({'vehicle_id': str(exc)}) from exc
             donnees['vehicle_type'] = vehicule.type
         return donnees
+
+    def validate_depart_at(self, valeur):
+        if valeur is None:
+            return valeur
+        maintenant = timezone.now()
+        if valeur < maintenant - timedelta(minutes=5) or valeur > maintenant + timedelta(days=7):
+            raise serializers.ValidationError('depart_at must be between now and 7 days ahead.')
+        return valeur
 
 
 class SignalementApplique(serializers.Serializer):

@@ -46,6 +46,7 @@ CLE_ARETES_PUBLIEES = 'trafic:publie'  # ZSET {graph_id: horodatage de derniere 
 CLE_INCIDENTS_PUBLIES = 'trafic:incidents_publies'
 CLE_ARETES_SIGNALEMENTS = 'trafic:aretes_signalements'  # cache : aretes ecrites depuis un signalement au tour precedent
 CLE_DERNIERE_PUBLICATION = 'trafic:derniere_publication'  # cache : sante (cf. sante_trafic)
+CLE_GENERATION_TUILES = 'trafic:generation'  # cache : identifiant du traffic.tar en place
 # Un peu plus de 2 passes de la tache (90 s) : si la publication s'arrete, la
 # cle expire et les embouteillages repassent en retard dans le calcul.
 DUREE_INCIDENTS_PUBLIES_S = 3 * 60
@@ -201,6 +202,43 @@ def _vitesses_et_incidents_signalements():
     return vitesses, publies
 
 
+def _fermetures_signalees():
+    """({graph_ids fermes}, {ids des fermetures ecrites}) : routes barrees et
+    inondations CONFIRMEES (meme regle que retards_signalements.fermeture_confirmee),
+    marquees fermees dans traffic.tar sur l'arete exacte du signalement, dans
+    son sens (heading). Sans cap, le sens serait devine : non publiee, elle
+    reste exclue du calcul comme un point (exclude_locations)."""
+    from .retards_signalements import FERMETURE, effet_de, fermeture_confirmee
+
+    fermees, publiees = set(), set()
+    incidents = Incident.objects.filter(
+        statut__in=[StatutIncident.ACTIF, StatutIncident.EN_ATTENTE], expire_le__gt=timezone.now(),
+        cap__isnull=False,
+    ).exclude(Q_CONTESTE).select_related('auteur')
+    for incident in incidents:
+        effet = effet_de(incident)
+        if effet is None or effet.mecanisme != FERMETURE or not fermeture_confirmee(incident, effet, 'auto'):
+            continue
+        cle = f'trafic:incident:fermeture:{incident.id}'
+        graph_id = cache.get(cle)
+        if graph_id is None:
+            try:
+                arete = client_locate.localiser(incident.position.y, incident.position.x, incident.cap)
+            except DisjoncteurOuvert as exc:
+                logger.info('Aretes des fermetures signalees indisponibles: %s', exc)
+                break
+            except client_locate.ErreurLocate as exc:
+                logger.info('Arete de la fermeture %s indisponible: %s', incident.id, exc)
+                continue
+            graph_id = arete.get('graph_id') if arete else None
+            if graph_id is None:
+                continue
+            cache.set(cle, graph_id, timeout=DUREE_CACHE_ARETE_INCIDENT_S)
+        fermees.add(graph_id)
+        publiees.add(str(incident.id))
+    return fermees, publiees
+
+
 def _vitesse_ponderee(incident) -> float:
     """Vitesse imposee, ramenee vers la vitesse normale selon la confiance
     (meme confiance que pour les retards : votes x usure dans le temps) : un
@@ -227,19 +265,28 @@ def publier(chemin_trafic, connexion, maintenant: int) -> dict:
     # en vitesse theorique (REVUE_ROUTAGE_ET_SERVICES, point 1.2).
     from .service_trafic import vitesses_typiques_creneau
 
+    _suivre_generation(chemin_trafic, connexion)
     signalements, publies = _vitesses_et_incidents_signalements()
+    fermees, fermetures_publiees = _fermetures_signalees()
     mesurees = vitesses_mesurees(connexion, maintenant)
     vitesses = vitesses_typiques_creneau()
     vitesses.update(signalements)
+    # Fermeture confirmee : l'emporte sur l'historique et les embouteillages,
+    # mais pas sur une mesure GPS (des voitures y roulent : elle n'est pas
+    # fermee -- la validation passive l'infirmera).
+    fermees -= set(mesurees)
+    for graph_id in fermees:
+        vitesses.pop(graph_id, None)
     vitesses.update(mesurees)  # une mesure reelle l'emporte
-    aretes_signalements = set(signalements) - set(mesurees)
+    aretes_signalements = (set(signalements) | fermees) - set(mesurees)
+    publies |= fermetures_publiees
 
-    ecrites = tuiles_trafic.ecrire_vitesses(chemin_trafic, vitesses)
+    ecrites = tuiles_trafic.ecrire_vitesses(chemin_trafic, vitesses, fermees)
     # Ecrit APRES l'ecriture reussie (ecrire_vitesses leve si le fichier est
-    # absent/illisible) : retards_signalements ne saute que ces embouteillages-la.
+    # absent/illisible) : retards_signalements ne saute que ces signalements-la.
     cache.set(CLE_INCIDENTS_PUBLIES, sorted(publies), timeout=DUREE_INCIDENTS_PUBLIES_S)
-    if vitesses:
-        connexion.zadd(CLE_ARETES_PUBLIEES, {str(graph_id): maintenant for graph_id in vitesses})
+    if vitesses or fermees:
+        connexion.zadd(CLE_ARETES_PUBLIEES, {str(graph_id): maintenant for graph_id in [*vitesses, *fermees]})
 
     # Aretes ecrites depuis un signalement au tour precedent et plus produites
     # maintenant (signalement retire, expire, conteste) : effacees tout de
@@ -257,6 +304,32 @@ def publier(chemin_trafic, connexion, maintenant: int) -> dict:
     compteurs = {'ecrites': ecrites, 'effacees': effacees}
     cache.set(CLE_DERNIERE_PUBLICATION, {'le': maintenant, **compteurs}, timeout=None)
     return compteurs
+
+
+def _suivre_generation(chemin_trafic, connexion):
+    """traffic.tar remplace (tuiles reconstruites) : les GraphId ont change.
+    On oublie les correspondances GraphId -> voie (reapprises par le
+    consommateur), les aretes publiees et les vitesses typiques en cache, et
+    on note le debut de la nouvelle generation (cf. vitesses_typiques_creneau).
+    L'historique par voie OSM (EchantillonVitesse.way_id) est conserve."""
+    from ..models import CorrespondanceArete
+    from .service_trafic import CLE_DEBUT_GENERATION_TUILES
+
+    actuelle = tuiles_trafic.generation(chemin_trafic)
+    precedente = cache.get(CLE_GENERATION_TUILES)
+    if precedente == actuelle:
+        return
+    if precedente is not None:
+        logger.warning('traffic.tar remplace (tuiles reconstruites) : correspondances d\'aretes reinitialisees')
+        CorrespondanceArete.objects.all().delete()
+        cache.delete_many([CLE_ARETES_SIGNALEMENTS, CLE_INCIDENTS_PUBLIES])
+        if hasattr(cache, 'delete_pattern'):  # django-redis
+            cache.delete_pattern('trafic:typiques:*')
+        # Anciens GraphId : ne surtout pas les "effacer" dans le nouveau fichier,
+        # ils y designent d'autres aretes.
+        connexion.delete(CLE_ARETES_PUBLIEES)
+        cache.set(CLE_DEBUT_GENERATION_TUILES, timezone.now(), timeout=None)
+    cache.set(CLE_GENERATION_TUILES, actuelle, timeout=None)
 
 
 def sante_trafic(connexion, maintenant: int) -> dict:

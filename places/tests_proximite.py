@@ -22,6 +22,10 @@ LUNDI_22H = LUNDI_10H.replace(hour=22)
 
 class ProximiteTests(TestCase):
     def setUp(self):
+        # Matrice Valhalla absente par defaut : tri par distance (cf. test du tri par temps).
+        patcheur = patch('trips.services.client_matrice.durees_depuis', return_value=None)
+        self.matrice = patcheur.start()
+        self.addCleanup(patcheur.stop)
         self.pharmacie = creer_lieu('Pharmacie du Port', 4.055, 9.70, categorie='Pharmacie', horaires=SEMAINE)
         self.station = creer_lieu('Total Akwa', 4.051, 9.70, categorie='Station-service')
         self.garage = creer_lieu('Garage Ndokoti', 4.052, 9.70, categorie='Garage / mécanique')
@@ -47,6 +51,27 @@ class ProximiteTests(TestCase):
         self.assertEqual([r['type'] for r in resultats], ['station', 'garage', 'hopital', 'hopital', 'pharmacie'])
         # Rayon plus grand : la pharmacie lointaine (~3,3 km) apparait.
         self.assertIn('Pharmacie lointaine', [r['name'] for r in self.chercher(radius_m=5000)])
+
+    def test_tries_par_temps_de_trajet_par_la_route(self):
+        # La station (la plus proche a vol d'oiseau) est de l'autre cote d'un
+        # canal : 15 min par la route. Le garage est a 2 min.
+        from django.core.cache import cache
+
+        cache.clear()
+
+        def durees(_origine, cibles):
+            par_position = {(4.051, 9.70): (900, 6000), (4.052, 9.70): (120, 300)}
+            return [par_position.get(c, (300, 1000)) for c in cibles]
+
+        self.matrice.side_effect = durees
+        resultats = self.chercher(radius_m=1000, types='station,garage')
+        self.assertEqual([r['name'] for r in resultats], ['Garage Ndokoti', 'Total Akwa'])
+        self.assertEqual((resultats[0]['drive_duration_s'], resultats[0]['drive_distance_m']), (120, 300))
+        # sort=distance : a vol d'oiseau, sans appel a Valhalla.
+        self.matrice.reset_mock()
+        resultats = self.chercher(radius_m=1000, types='station,garage', sort='distance')
+        self.assertEqual([r['name'] for r in resultats], ['Total Akwa', 'Garage Ndokoti'])
+        self.matrice.assert_not_called()
 
     def test_filtre_par_type(self):
         resultats = self.chercher(types='pharmacie,station', radius_m=1000)

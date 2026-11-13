@@ -185,6 +185,9 @@ def _flusher_un_bucket(connexion, cle, identifiant_arete, bucket_epoch) -> bool:
             # Decimal(0.1) != Decimal('0.1')) ; le passage par str l'evite.
             'vitesse_moyenne': Decimal(str(round(distance_km / (duree_s / 3600), 2))),
             'nombre_echantillons': nombre,
+            # Cle stable (voie OSM + sens) si le consommateur l'a recue de Valhalla.
+            'way_id': int(champs['way']) if champs.get('way') else None,
+            'sens_avant': bool(int(champs['avant'])) if champs.get('avant') not in (None, '') else None,
             'jour_semaine': debut_local.weekday(),
             'heure_jour': debut_local.hour,
         },
@@ -193,6 +196,16 @@ def _flusher_un_bucket(connexion, cle, identifiant_arete, bucket_epoch) -> bool:
     connexion.delete(cle)
     connexion.srem(ENSEMBLE_BUCKETS_ACTIFS, cle)
     return True
+
+
+@shared_task
+def alerter_conducteurs_concernes(incident_id):
+    """Signalement nouveau ou modifie : previent tout de suite, par WebSocket,
+    les conducteurs dont la route restante passe dessus (cf.
+    services/alertes_itineraire.py)."""
+    from .services.alertes_itineraire import alerter_conducteurs
+
+    return alerter_conducteurs(incident_id)
 
 
 @shared_task

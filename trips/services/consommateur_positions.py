@@ -58,6 +58,39 @@ PREFIXE_ACCUMULATEUR = 'trafic:accumulateur'
 ENSEMBLE_BUCKETS_ACTIFS = 'trafic:buckets:actifs'
 TAILLE_BUCKET_S = 5 * 60
 PREFIXE_CHAMP_TRAJET = 't:'
+# Sens de parcours de l'arete sur la voie OSM : avec edge.way_id (deja dans
+# ATTRIBUTS_TRONCON), cle stable d'une generation de tuiles a l'autre.
+ATTRIBUTS_CLE_STABLE = ['edge.forward']
+
+
+def cle_stable(arete):
+    """(way_id, sens_avant) de l'arete, ou None si Valhalla ne les fournit pas."""
+    way_id, avant = arete.get('way_id'), arete.get('forward')
+    if way_id is None or avant is None:
+        return None
+    return int(way_id), bool(avant)
+
+
+def apprendre_correspondances(edges):
+    """Memorise GraphId -> (voie, sens) pour les aretes de ce lot (cf.
+    trips.models.CorrespondanceArete) : une seule requete, upsert."""
+    from django.utils import timezone
+
+    from ..models import CorrespondanceArete
+
+    maintenant = timezone.now()
+    lignes = {}
+    for arete in edges:
+        cle = cle_stable(arete)
+        if cle is not None and arete.get('id') is not None:
+            lignes[arete['id']] = CorrespondanceArete(
+                graph_id=arete['id'], way_id=cle[0], sens_avant=cle[1], vu_le=maintenant,
+            )
+    if lignes:
+        CorrespondanceArete.objects.bulk_create(
+            lignes.values(), update_conflicts=True, unique_fields=['graph_id'],
+            update_fields=['way_id', 'sens_avant', 'vu_le'],
+        )
 
 
 class ConsommateurPositions:
@@ -135,7 +168,7 @@ class ConsommateurPositions:
         ]
 
         try:
-            edges, matched_points = tracer(points, attributs=ATTRIBUTS_TRONCON)
+            edges, matched_points = tracer(points, attributs=ATTRIBUTS_TRONCON, attributs_optionnels=ATTRIBUTS_CLE_STABLE)
         except (ErreurMeili, DisjoncteurOuvert) as exc:
             logger.info('Meili indisponible, %d positions laissees en pending: %s', len(ids), exc)
             return []
@@ -145,6 +178,18 @@ class ConsommateurPositions:
         # d'une voiture (traffic.tar est unique, cf. MOTO_TRAFIC_EN_DIRECT).
         if not exclu:
             self._accumuler_vitesses(edges, matched_points, paires, extremites)
+        try:
+            apprendre_correspondances(edges)
+        except Exception:
+            logger.exception('Correspondance GraphId -> voie OSM impossible a enregistrer')
+        # Validation passive des signalements (route barree franchie, bouchon
+        # traverse au pas...) : jamais bloquante pour le trafic.
+        try:
+            from community.validation_passive import observer_passages
+
+            observer_passages(paires[0][1]['trajet_id'], [evt for _id, evt in paires])
+        except Exception:
+            logger.exception('Validation passive des signalements impossible')
         # Etat des routes : passages par tranche de 100 m. Une erreur ici ne
         # doit jamais bloquer le trafic temps reel (messages acquittes quand meme).
         try:
@@ -214,9 +259,12 @@ class ConsommateurPositions:
 
             identifiant_arete = edges[index_arete]['id']
             bucket = self._bucket_5min(self._parser_horodatage(paires[i][1]['horodatage']))
-            self._accumuler(identifiant_arete, bucket, distance_km, duree_s, paires[i][1].get('trajet_id'))
+            self._accumuler(
+                identifiant_arete, bucket, distance_km, duree_s, paires[i][1].get('trajet_id'),
+                cle_stable=cle_stable(edges[index_arete]),
+            )
 
-    def _accumuler(self, identifiant_arete, bucket_epoch, distance_km, duree_s, trajet_id=None):
+    def _accumuler(self, identifiant_arete, bucket_epoch, distance_km, duree_s, trajet_id=None, cle_stable=None):
         """Accumule DISTANCE et DUREE (pas une moyenne de vitesses) : la vitesse
         d'une arete sur un bucket est Sigma distance / Sigma duree -- un vehicule
         qui roule 10 s vite puis 60 s au pas donne sa vraie vitesse, pas la
@@ -229,6 +277,9 @@ class ConsommateurPositions:
             pipe.hincrbyfloat(cle, 'distance', distance_km)
             pipe.hincrbyfloat(cle, 'duree', duree_s)
             pipe.hincrby(cle, 'nombre', 1)
+            if cle_stable is not None:
+                # Voie OSM + sens : recopies dans EchantillonVitesse au flush.
+                pipe.hset(cle, mapping={'way': cle_stable[0], 'avant': int(cle_stable[1])})
             if trajet_id is not None:
                 pipe.hincrbyfloat(cle, f'{PREFIXE_CHAMP_TRAJET}{trajet_id}:distance', distance_km)
                 pipe.hincrbyfloat(cle, f'{PREFIXE_CHAMP_TRAJET}{trajet_id}:duree', duree_s)

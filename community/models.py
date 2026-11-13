@@ -365,9 +365,12 @@ class Incident(models.Model):
     def confirmer(self, vote: 'Vote'):
         # F() plutot qu'un += sur vote.votant : l'instance de l'appelant
         # (request.user) n'a pas a etre verrouillee pour ce simple compteur.
-        Utilisateur.objects.filter(pk=vote.votant_id).update(
-            points=F('points') + POINTS_PAR_VALIDATION_TIERCE
-        )
+        # Vote passif (deduit de la telemetrie) : jamais de points, sinon
+        # rouler devant des signalements deviendrait une source de bons carburant.
+        if not vote.passif:
+            Utilisateur.objects.filter(pk=vote.votant_id).update(
+                points=F('points') + POINTS_PAR_VALIDATION_TIERCE
+            )
         self.confirmations += 1
         self.score_confiance += vote.poids
         # Prolongation plafonnee au triple de la duree de base (section 4.5).
@@ -403,6 +406,22 @@ class Incident(models.Model):
         reduction_min = base / REDUCTION_PAR_INFIRMATION_LONGUE if base >= SEUIL_DUREE_LONGUE_MIN else 10
         self.expire_le = self.expire_le - timezone.timedelta(minutes=reduction_min)
         self.save(update_fields=['infirmations', 'score_confiance', 'expire_le'])
+
+    def annuler_vote_passif(self, vote: 'Vote'):
+        """Le conducteur vote a la main apres un vote passif (deduit de sa
+        telemetrie) : son avis explicite remplace la deduction. On retire
+        l'effet du vote passif sur les compteurs et le score (pas sur
+        l'expiration, deja recalculee depuis) puis on le supprime."""
+        if not vote.passif:
+            return
+        if vote.sens == SensVote.CONFIRMATION:
+            self.confirmations = max(0, self.confirmations - 1)
+            self.score_confiance -= vote.poids
+        else:
+            self.infirmations = max(0, self.infirmations - 1)
+            self.score_confiance += vote.poids
+        self.save(update_fields=['confirmations', 'infirmations', 'score_confiance'])
+        vote.delete()
 
     def prolonger(self, duree: timezone.timedelta):
         self.expire_le = self.expire_le + duree
@@ -474,6 +493,10 @@ class Vote(models.Model):
 
     sens = models.CharField(max_length=20, choices=SensVote.choices)
     poids = models.DecimalField(max_digits=4, decimal_places=2)
+    # Vote PASSIF : deduit de la telemetrie (le conducteur est passe sur
+    # l'incident a telle vitesse, cf. community.validation_passive), sans
+    # action de sa part. Poids reduit, jamais de points de recompense.
+    passif = models.BooleanField(default=False)
     cree_le = models.DateTimeField(auto_now_add=True)
 
     class Meta:

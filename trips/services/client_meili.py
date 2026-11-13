@@ -27,7 +27,8 @@ class ErreurMeili(Exception):
 ATTRIBUTS_DEFAUT = ['edge.id', 'edge.length', 'edge.speed']
 
 
-def tracer(points: list[dict], shape_match: str = 'map_snap', attributs=None) -> tuple[list[dict], list[dict]]:
+def tracer(points: list[dict], shape_match: str = 'map_snap', attributs=None,
+           attributs_optionnels=None) -> tuple[list[dict], list[dict]]:
     """points : [{'lat':, 'lon':, 'time': <secondes ecoulees depuis le premier
     point du lot>}, ...], au moins 2 points.
 
@@ -39,6 +40,8 @@ def tracer(points: list[dict], shape_match: str = 'map_snap', attributs=None) ->
 
     attributs : attributs d'arete/noeud demandes (defaut ATTRIBUTS_DEFAUT) --
     etat_routes demande aussi way_id, road_class, noms, rond-point, feux.
+    attributs_optionnels : ajoutes a `attributs` si cette version de
+    Valhalla les accepte, abandonnes sinon.
 
     Retourne (edges, matched_points) tels que renvoyes par Valhalla -- edges
     peut etre vide et des matched_points peuvent avoir edge_index=None : ce
@@ -58,7 +61,16 @@ def tracer(points: list[dict], shape_match: str = 'map_snap', attributs=None) ->
         )
 
     try:
-        reponse = appeler(attributs or ATTRIBUTS_DEFAUT)
+        reponse = None
+        if attributs_optionnels:
+            # Attributs utiles mais pas indispensables (ex. edge.forward pour la
+            # cle stable des aretes) : refuses par cette version de Valhalla ->
+            # on retente sans eux, jamais au prix des attributs requis.
+            reponse = appeler(list(attributs or ATTRIBUTS_DEFAUT) + list(attributs_optionnels))
+            if reponse.status_code == 400:
+                reponse = None
+        if reponse is None:
+            reponse = appeler(attributs or ATTRIBUTS_DEFAUT)
         if reponse.status_code == 400 and attributs and attributs != ATTRIBUTS_DEFAUT:
             # Un attribut supplementaire (etat_routes) refuse par cette version
             # de Valhalla ne doit jamais couper le trafic : nouvel essai avec

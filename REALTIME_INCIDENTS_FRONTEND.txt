@@ -110,6 +110,21 @@ it goes in the first message, see 3.
         withdrawn  removed by its author
         moderated  removed by a moderator
 
+  {"type": "route.recheck", "trip_id": "<uuid>", "incident_id": "<uuid>",
+   "incident_type": "VOIE_BLOQUEE", "incident_subtype": "ROUTE_BARREE",
+   "cause": "ROAD_CLOSED" | "NEW_REPORT"}                      (13/11/2026)
+      Personal message (no subscription needed, sent to every connection of
+      the authenticated user): a report that affects routes appeared or
+      changed on the part of your ACTIVE trip that is still ahead. Call
+      POST /api/trips/{trip_id}/better-route/ right away with your current
+      position, heading and speed_kmh, and apply its answer as usual.
+      ROAD_CLOSED: a confirmed closure -- better-route will usually answer
+      IMPOSE. The route itself is NOT in the message (the server doesn't know
+      your heading, speed, remaining stops or avoided points).
+      With this, the periodic better-route call can slow down (e.g. every
+      3-5 min instead of 90 s) while the socket is connected; keep it as the
+      safety net, and go back to 90 s when the socket is down.
+
   {"type": "subscribed", "cells": 37}
       The subscription is in place (number of cells). Only after this may
       the fallback polling slow down to 3 min.

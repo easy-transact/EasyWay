@@ -621,6 +621,18 @@ def _creer_traffic_tar(dossier):
     return chemin
 
 
+def _lire_brut(chemin, index_arete):
+    """TrafficSpeed brut (entier 64 bits) de l'arete."""
+    import struct
+    import tarfile
+
+    with tarfile.open(chemin) as archive:
+        membre = archive.getmember('1/034/029.gph')
+    with open(chemin, 'rb') as fichier:
+        fichier.seek(membre.offset_data + 32 + 8 * index_arete)
+        return struct.unpack('<Q', fichier.read(8))[0]
+
+
 def _lire_vitesse(chemin, index_arete):
     """(speed_valid, vitesse globale km/h) de l'arete, decodes comme Valhalla."""
     import struct
@@ -765,6 +777,10 @@ class TraficTempsReelTests(SimpleTestCase):
         patcheur = patch.object(service_trafic, 'vitesses_typiques_creneau', return_value={_graph_id(3): 22})
         patcheur.start()
         self.addCleanup(patcheur.stop)
+        # Route barree confirmee sur l'arete 4 : marquee fermee.
+        patcheur = patch.object(trafic_temps_reel, '_fermetures_signalees', return_value=({_graph_id(4)}, {'fermeture-a'}))
+        patcheur.start()
+        self.addCleanup(patcheur.stop)
 
         with tempfile.TemporaryDirectory() as dossier:
             chemin = _creer_traffic_tar(dossier)
@@ -781,13 +797,14 @@ class TraficTempsReelTests(SimpleTestCase):
             }, {'incident-a'})):
                 compteurs = trafic_temps_reel.publier(chemin, connexion, self.MAINTENANT)
 
-            self.assertEqual(compteurs, {'ecrites': 3, 'effacees': 1})
+            self.assertEqual(compteurs, {'ecrites': 4, 'effacees': 1})
+            self.assertEqual(_lire_brut(chemin, 4), tuiles_trafic.VITESSE_FERMEE)  # fermee pour Valhalla
             self.assertEqual(_lire_vitesse(chemin, 1), (True, 40))
             self.assertEqual(_lire_vitesse(chemin, 2), (True, 16))
             self.assertEqual(_lire_vitesse(chemin, 3)[0], True)  # vitesse typique du creneau publiee
             self.assertEqual(_lire_vitesse(chemin, 5)[0], False)
             # Embouteillages ecrits : memorises pour retards_signalements.
-            self.assertEqual(trafic_temps_reel.incidents_publies(), {'incident-a'})
+            self.assertEqual(trafic_temps_reel.incidents_publies(), {'incident-a', 'fermeture-a'})
 
             # Tour suivant : le signalement a disparu (retire, expire, conteste).
             # Son arete est effacee tout de suite, sans attendre DUREE_VALIDITE_S.

@@ -87,6 +87,33 @@ def _indexer(chemin):
 _cache_index = {}
 
 
+def chemins_tuiles(chemin):
+    """{tile_id: chemin relatif de la tuile sans extension} (ex. '1/034/029') :
+    traffic.tar reprend l'arborescence des tuiles routieres (cf. trafic_predit)."""
+    chemins = {}
+    try:
+        with tarfile.open(chemin) as archive, open(chemin, 'rb') as fichier:
+            for membre in archive.getmembers():
+                if not membre.name.endswith('.gph'):
+                    continue
+                fichier.seek(membre.offset_data)
+                tile_id = struct.unpack(FORMAT_ENTETE, fichier.read(TAILLE_ENTETE))[0]
+                chemins[tile_id] = membre.name[:-len('.gph')]
+    except (OSError, tarfile.TarError, struct.error) as exc:
+        raise TraficIndisponible(str(exc)) from exc
+    return chemins
+
+
+def generation(chemin):
+    """Identifiant du fichier traffic.tar (peripherique, inode) : change quand
+    les tuiles sont reconstruites (nouveau fichier), pas quand on y ecrit."""
+    try:
+        etat = os.stat(chemin)
+    except OSError as exc:
+        raise TraficIndisponible(str(exc)) from exc
+    return f'{etat.st_dev}:{etat.st_ino}'
+
+
 def _index(chemin):
     """Index mis en cache par process, invalide si le fichier est REMPLACE
     (reconstruction des tuiles : nouveau fichier, donc nouvel inode et/ou
@@ -138,8 +165,21 @@ def ecrire(chemin, valeurs: dict) -> int:
     return nb
 
 
-def ecrire_vitesses(chemin, vitesses_kmh: dict) -> int:
-    return ecrire(chemin, {graph_id: encoder_vitesse(v) for graph_id, v in vitesses_kmh.items()})
+# Arete FERMEE pour Valhalla (TrafficSpeed.closed() dans baldr/traffictile.h,
+# 3.5.1 : breakpoint1 != 0 et vitesse globale 0 ; congestion1 au maximum 63
+# en plus, pour closed(0)). Respectee par les calculs dont speed_types
+# contient 'current' (sauf ignore_closures) ; les points de depart/arrivee ne
+# se calent pas sur une arete fermee (search_filter.exclude_closures, vrai par
+# defaut).
+VITESSE_FERMEE = 255 << 28 | 255 << 36 | 63 << 44
+
+
+def ecrire_vitesses(chemin, vitesses_kmh: dict, fermees=()) -> int:
+    """vitesses_kmh : {graph_id: km/h} ; fermees : graph_ids a marquer fermes
+    (l'emportent sur une vitesse du meme graph_id)."""
+    valeurs = {graph_id: encoder_vitesse(v) for graph_id, v in vitesses_kmh.items()}
+    valeurs.update({graph_id: VITESSE_FERMEE for graph_id in fermees})
+    return ecrire(chemin, valeurs)
 
 
 def effacer(chemin, graph_ids) -> int:

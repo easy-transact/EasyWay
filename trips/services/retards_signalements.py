@@ -169,16 +169,31 @@ def separer_points_a_eviter(points, depart, arrivee, etapes):
     return gardes, ignores
 
 
-def fermetures_a_eviter(depart, arrivee, etapes, costing):
+def fermetures_a_eviter(depart, arrivee, etapes, costing, trafic_en_direct=False, moment=None):
     """Positions (lat, lon) des fermetures confirmees a exclure du calcul
     (exclude_locations), jamais a moins de 100 m du depart, de l'arrivee ou
-    d'une etape (le calcul deviendrait impossible)."""
+    d'une etape (le calcul deviendrait impossible).
+
+    trafic_en_direct (le calcul lit traffic.tar) : les fermetures deja
+    marquees fermees dans traffic.tar, sur leur arete et dans leur sens (cf.
+    trafic_temps_reel._fermetures_signalees), ne sont pas exclues en plus
+    comme un point -- plus precis : un point exclut tout ce qui passe pres.
+    moment (depart differe) : seulement les fermetures encore valables a ce moment."""
+    deja_dans_trafic = set()
+    if trafic_en_direct:
+        from .trafic_temps_reel import incidents_publies
+
+        deja_dans_trafic = incidents_publies() or set()
     extremites = [depart, arrivee, *(etapes or [])]
     exclusions = []
     for incident in _incidents_actifs(_rectangle(extremites)):
         effet = effet_de(incident)
         if effet is None or not fermeture_confirmee(incident, effet, costing):
             continue
+        if str(incident.id) in deja_dans_trafic:
+            continue
+        if moment is not None and incident.expire_le <= moment:
+            continue  # aura expire avant le depart
         lat, lon = incident.position.y, incident.position.x
         if any(distance_haversine_m((lat, lon), e) < MARGE_EXTREMITES_M for e in extremites):
             continue
@@ -233,7 +248,7 @@ def _retard_s(effet, vitesse_normale_ms):
     return longueur * (1 / vitesse_imposee - 1 / vitesse_normale_ms)
 
 
-def appliquer(candidats, costing, trafic_en_direct):
+def appliquer(candidats, costing, trafic_en_direct, moment=None):
     """Ajoute a chaque candidat (forme ServiceItineraire._normaliser_trip) :
     delai_signalements (s), signalements_appliques, et ajuste
     duree_avec_trafic = duree (ou duree trafic) + delai. Puis reclasse et
@@ -244,9 +259,10 @@ def appliquer(candidats, costing, trafic_en_direct):
     if not candidats:
         return candidats
     toutes_coords = [(lat, lon) for c in candidats for lon, lat in decoder_polyline6(c['geometrie'])[::20]]
+    # Depart differe (moment) : un signalement qui aura expire d'ici la ne compte pas.
     incidents = [
         i for i in _incidents_actifs(_rectangle(toutes_coords))
-        if effet_de(i) is not None
+        if effet_de(i) is not None and (moment is None or i.expire_le > moment)
     ]
 
     # Embouteillages reellement presents dans traffic.tar, par incident (pas

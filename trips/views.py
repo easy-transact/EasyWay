@@ -107,6 +107,7 @@ class CalculItineraireView(APIView):
             alternatives=donnees['alternatives'],
             etapes=[(p['lat'], p['lon']) for p in donnees['etapes']],
             type_vehicule=donnees['vehicle_type'],
+            depart_le=donnees['depart_le'],
         )
         ignores = [{'lat': lat, 'lon': lon, 'reason': 'TOO_CLOSE_TO_ENDPOINT'} for lat, lon in service.eviter_ignores]
         if not candidats and donnees['eviter']:

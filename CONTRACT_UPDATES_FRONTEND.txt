@@ -582,3 +582,61 @@ signales, deja pris en compte par le calcul d'itineraire).
 
   Trafic : seuls les trajets en VOITURE ou TAXI mesurent le trafic en direct
   (plus les bus, camions et utilitaires). Rien a changer cote appli.
+
+
+23. NOUVEAU — conduite plus fluide et donnees apprises des trajets (13/11/2026)
+
+  a) Envoi en direct "route.recheck" (WebSocket /ws/incidents/)
+     Quand un signalement qui agit sur les itineraires apparait ou change sur
+     la partie RESTANTE du trajet en cours, le serveur envoie au conducteur
+       {"type": "route.recheck", "trip_id", "incident_id", "incident_type",
+        "incident_subtype", "cause": "ROAD_CLOSED" | "NEW_REPORT"}
+     -> appeler better-route tout de suite. Detail et conseils de cadence :
+        REALTIME_INCIDENTS_FRONTEND.txt, section 4.
+     A faire cote appli : gerer ce message ; espacer l'appel periodique de
+     better-route (3-5 min) tant que le socket est connecte.
+
+  b) Validation passive des signalements (rien a faire cote appli)
+     La telemetrie suffit : une voiture ou un taxi qui franchit une route
+     barree a plus de 15 km/h vote "Plus rien" a sa place ; qui traverse un
+     embouteillage au pas le confirme, qui y passe a plus de 40 km/h
+     l'infirme. Vote a demi-poids, jamais de points de recompense, un seul
+     vote par conducteur et par signalement. Un vote a la main REMPLACE le
+     vote passif du meme conducteur (pas de "already voted").
+     Les signalements se valident et disparaissent donc plus vite ; les
+     confirmations/infirmations arrivent par incident.updated / removed.
+     -> Continuer a envoyer la telemetrie avec "speed_kmh" et "heading"
+        (sans eux, le serveur les estime entre deux positions).
+
+  c) Historique de trafic stable (rien a faire cote appli)
+     Les vitesses mesurees sont rattachees a la voie OSM + sens : une mise a
+     jour de la carte ne fait plus perdre l'historique.
+
+
+24. NOUVEAU — depart programme, routes barrees plus precises, lieux par temps de trajet (13/11/2026)
+
+  a) POST /api/routes/calculate/ : champ facultatif "depart_at"
+     Heure de depart prevue, ISO 8601 avec fuseau (ex. "2026-11-16T07:30:00+01:00"),
+     au plus 7 jours a l'avance. Plus de 15 min dans le futur : la duree tient
+     compte du trafic HABITUEL a cette heure-la (lundi 7 h 30 bouche, dimanche
+     fluide), et seuls les signalements encore valables a l'heure du depart
+     comptent. Absent : depart immediat, comme avant.
+     -> ecran "Partir plus tard" / "Arriver a l'heure" : proposer quelques
+        heures de depart et afficher la duree de chacune.
+     Le trafic habituel s'enrichit avec l'historique : au debut, peu de
+     routes ont un profil et la duree ressemble a celle d'un depart immediat.
+
+  b) Routes barrees : rien a changer cote appli
+     Une route barree confirmee (avec un sens de circulation) est maintenant
+     fermee dans le moteur de calcul sur le troncon exact et dans le bon sens,
+     au lieu d'exclure tout ce qui passe pres du point signale. Les
+     itineraires contournent mieux, sans ecarter les rues voisines.
+
+  c) GET /api/places/nearby/ : tri par temps de trajet
+     Nouveau parametre "sort" : "time" (defaut) ou "distance". Chaque resultat
+     porte en plus :
+       "drive_duration_s": 240,   // temps par la route depuis la position
+       "drive_distance_m": 1850   // distance par la route
+     (null si inaccessible, si sort=distance, ou si le calcul est indisponible ;
+     l'ordre est alors celui de la distance a vol d'oiseau, comme avant).
+     -> afficher "4 min" plutot que "1,2 km" quand drive_duration_s existe.

@@ -13,7 +13,7 @@ from django.utils import timezone
 from accounts.tests import connecter, creer_utilisateur
 from community.models import Incident, SousTypeIncident as S, StatutIncident, TypeIncident as T
 
-from .models import PrevisionItineraire, Trajet
+from .models import FUSEAU_TRAFIC, PrevisionItineraire, Trajet
 from .polyline import encoder_polyline6
 from .services import retards_signalements, trafic_temps_reel
 
@@ -139,6 +139,32 @@ class RetardsSignalementsTests(TestCase):
         self.calculer()
         self.assertEqual(self.options['exclude_locations'], [{'lat': 4.05, 'lon': 9.715}])
 
+    def test_route_barree_deja_fermee_dans_traffic_tar_pas_exclue_en_point(self):
+        # Publiee fermee sur son arete et dans son sens (traffic.tar) : la
+        # voiture n'a plus besoin de l'exclusion par point, plus grossiere.
+        incident = self.signaler(T.VOIE_BLOQUEE, S.ROUTE_BARREE, confirmations=3, score_confiance=3)
+        cache.set(trafic_temps_reel.CLE_INCIDENTS_PUBLIES, [str(incident.id)], timeout=60)
+        self.calculer()
+        self.assertNotIn('exclude_locations', self.options)
+        # La moto ne lit pas traffic.tar : toujours exclue par point.
+        self.calculer(vehicle_type='MOTO')
+        self.assertEqual(self.options['exclude_locations'], [{'lat': 4.05, 'lon': 9.715}])
+
+    def test_depart_differe_trafic_prevu_et_signalements_valables_a_l_heure(self):
+        # Depart dans 2 h : Valhalla recoit date_time (trafic prevu) ; un
+        # accident qui aura expire d'ici la ne ralentit pas l'itineraire.
+        self.signaler(T.ACCIDENT, S.CARAMBOLAGE, expire_le=timezone.now() + timedelta(minutes=30))
+        depart = timezone.now() + timedelta(hours=2)
+        routes = self.calculer(depart_at=depart.isoformat())
+        self.assertEqual(self.options['date_time']['type'], 1)
+        self.assertEqual(self.options['date_time']['value'], depart.astimezone(FUSEAU_TRAFIC).strftime('%Y-%m-%dT%H:%M'))
+        self.assertEqual(next(r for r in routes if r['duration'] == 400)['delay_from_reports'], 0)
+        # Depart immediat : l'accident compte.
+        cache.clear()
+        routes = self.calculer()
+        self.assertNotIn('date_time', self.options)
+        self.assertGreater(next(r for r in routes if r['duration'] == 400)['delay_from_reports'], 0)
+
     def test_route_barree_levee_par_les_votes_contraires(self):
         # Validee par la communaute, puis trois "Plus rien" : plus exclue.
         incident = self.signaler(T.VOIE_BLOQUEE, S.ROUTE_BARREE, confirmations=3, score_confiance=3)
@@ -228,6 +254,8 @@ class ValidationParLaModerationTests(RetardsSignalementsTests):
     test_embouteillage_actif_non_publie_compte_en_retard = None
     test_signalement_conteste_sans_effet = None
     test_route_barree_levee_par_les_votes_contraires = None
+    test_depart_differe_trafic_prevu_et_signalements_valables_a_l_heure = None
+    test_route_barree_deja_fermee_dans_traffic_tar_pas_exclue_en_point = None
     test_moto = None
     test_route_barree_confirmee_exclue_sinon_ralentissement = None
     test_signalement_tout_neuf_compte_moins = None

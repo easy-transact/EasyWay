@@ -34,6 +34,8 @@ from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.settings import api_settings as jwt_settings
 from rest_framework_simplejwt.tokens import AccessToken
 
+from trips.services.alertes_itineraire import groupe_utilisateur
+
 from .cache_incidents import MAX_CELLULES
 from .models import RESOLUTION_H3_FIN
 from .temps_reel import MAX_CELLULES_ZONE, RAYON_KM_MAX, cellules_zone, nom_groupe
@@ -62,6 +64,8 @@ class IncidentsConsumer(AsyncJsonWebsocketConsumer):
     async def disconnect(self, code):
         if self._minuteur is not None:
             self._minuteur.cancel()
+        if self.utilisateur is not None:
+            await self.channel_layer.group_discard(groupe_utilisateur(self.utilisateur.pk), self.channel_name)
         for cellule in self.cellules:
             await self.channel_layer.group_discard(nom_groupe(cellule), self.channel_name)
         self.cellules = set()
@@ -106,7 +110,12 @@ class IncidentsConsumer(AsyncJsonWebsocketConsumer):
         if not utilisateur.peut_signaler():  # is_active et non banni
             return await self.close(code=FERMETURE_COMPTE_BANNI)
 
+        if self.utilisateur is not None and self.utilisateur.pk != utilisateur.pk:
+            await self.channel_layer.group_discard(groupe_utilisateur(self.utilisateur.pk), self.channel_name)
         self.utilisateur = utilisateur
+        # Groupe personnel : messages qui ne concernent que ce conducteur
+        # (route.recheck, cf. trips.services.alertes_itineraire).
+        await self.channel_layer.group_add(groupe_utilisateur(utilisateur.pk), self.channel_name)
         # Jeton expire en cours de connexion : fermeture 4001 a l'echeance.
         self._fermer_dans(jeton_acces['exp'] - time.time(), FERMETURE_JETON_INVALIDE)
         await self.send_json({'type': 'ready', 'server_time': timezone.now().isoformat()})
@@ -161,6 +170,10 @@ class IncidentsConsumer(AsyncJsonWebsocketConsumer):
 
     async def incident_evenement(self, evenement):
         """group_send de community.temps_reel : payload deja au format client."""
+        await self.send_json(evenement['payload'])
+
+    async def itineraire_evenement(self, evenement):
+        """group_send de trips.services.alertes_itineraire (route.recheck)."""
         await self.send_json(evenement['payload'])
 
     async def _erreur(self, code, detail):
