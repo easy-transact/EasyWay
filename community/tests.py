@@ -750,13 +750,25 @@ class IncidentsSurTrajetApiTests(TestCase):
     # Matching par topologie (way_id OSM + sens) : cf. discussion frontend
     # (Waze) -- remplace le couloir de distance des que Valhalla repond.
 
-    def test_incident_meme_way_id_et_sens_inclus_meme_hors_couloir(self):
-        # A ~5.5km du trace -- prouve que l'inclusion vient du way_id, pas de
-        # la distance (qui l'aurait exclu sous n'importe quel couloir raisonnable).
+    def test_incident_meme_way_id_et_sens_hors_couloir_exclu(self):
+        # Meme voie OSM, mais ~5,5 km plus loin : une voie peut faire des
+        # kilometres et le trajet n'en parcourt qu'une partie -- la voie seule
+        # ne suffit pas, il faut aussi etre dans le couloir du trace.
+        patcher_attributs_trace(self, aretes=[{'way_id': 111, 'forward': True}])
+        creer_incident(
+            self.utilisateur, lat=DOUALA_LAT + 0.05, lon=DOUALA_LON + 0.05,
+            way_id_osm=111, forward_osm=True, cap=270,
+        )
+        reponse = self.client.post(
+            reverse('community:incidents-sur-trajet'), {'geometry': self.geometrie},
+            content_type='application/json',
+        )
+        self.assertEqual(reponse.json(), [])
+
+    def test_incident_meme_way_id_et_sens_sur_le_trace_inclus(self):
         patcher_attributs_trace(self, aretes=[{'way_id': 111, 'forward': True}])
         incident = creer_incident(
-            self.utilisateur, lat=DOUALA_LAT + 0.05, lon=DOUALA_LON + 0.05,
-            way_id_osm=111, forward_osm=True,
+            self.utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON - 0.003, way_id_osm=111, forward_osm=True, cap=270,
         )
         reponse = self.client.post(
             reverse('community:incidents-sur-trajet'), {'geometry': self.geometrie},
@@ -778,25 +790,38 @@ class IncidentsSurTrajetApiTests(TestCase):
 
     def test_incident_meme_way_id_sens_oppose_exclu(self):
         patcher_attributs_trace(self, aretes=[{'way_id': 111, 'forward': True}])
-        creer_incident(self.utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON, way_id_osm=111, forward_osm=False)
+        creer_incident(self.utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON, way_id_osm=111, forward_osm=False, cap=90)
         reponse = self.client.post(
             reverse('community:incidents-sur-trajet'), {'geometry': self.geometrie},
             content_type='application/json',
         )
         self.assertEqual(reponse.json(), [])
 
-    def test_incident_sans_way_id_osm_absent_quand_valhalla_repond(self):
-        # Incident "legacy" (cree avant cette colonne, ou signale sans
-        # verification routiere) : n'apparait jamais via ce matching des que
-        # Valhalla repond, meme s'il est geometriquement sur le trace -- pas
-        # de repli partiel, seule une panne Valhalla declenche le couloir.
+    def test_incident_sans_cap_meme_voie_inclus_dans_les_deux_sens(self):
+        # Sans cap, le sens (forward_osm) a ete devine par Valhalla : il ne
+        # doit pas exclure les trajets de l'autre sens.
         patcher_attributs_trace(self, aretes=[{'way_id': 111, 'forward': True}])
-        creer_incident(self.utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON, way_id_osm=None, forward_osm=None)
+        incident = creer_incident(
+            self.utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON, way_id_osm=111, forward_osm=False, cap=None,
+        )
         reponse = self.client.post(
             reverse('community:incidents-sur-trajet'), {'geometry': self.geometrie},
             content_type='application/json',
         )
-        self.assertEqual(reponse.json(), [])
+        self.assertEqual([i['id'] for i in reponse.json()], [str(incident.id)])
+
+    def test_incident_sans_way_id_osm_retrouve_par_le_couloir(self):
+        # Cree pendant une panne de Valhalla (pas encore recale sur une voie,
+        # cf. recaler_signalements_sans_voie) : retrouve par couloir + cap
+        # plutot que perdu pour tous les trajets.
+        patcher_attributs_trace(self, aretes=[{'way_id': 111, 'forward': True}])
+        incident = creer_incident(self.utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON, way_id_osm=None, cap=270)
+        creer_incident(self.utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON - 0.002, way_id_osm=None, cap=90)  # autre sens
+        reponse = self.client.post(
+            reverse('community:incidents-sur-trajet'), {'geometry': self.geometrie},
+            content_type='application/json',
+        )
+        self.assertEqual([i['id'] for i in reponse.json()], [str(incident.id)])
 
     def test_valhalla_indisponible_replie_sur_le_couloir(self):
         # Panne Valhalla (disjoncteur ouvert) : repli complet sur couloir+cap
@@ -810,6 +835,35 @@ class IncidentsSurTrajetApiTests(TestCase):
             content_type='application/json',
         )
         self.assertEqual([i['id'] for i in reponse.json()], [str(incident.id)])
+
+
+class RecalageSignalementsTests(TestCase):
+    def test_voie_et_sens_completes_quand_valhalla_repond(self):
+        from .tasks import recaler_signalements_sans_voie
+
+        incident = creer_incident(creer_utilisateur(), way_id_osm=None, cap=270)
+        arete = {'distance_m': 4, 'lat': DOUALA_LAT, 'lon': DOUALA_LON, 'destination_only': False,
+                 'use': 'road', 'way_id': 111, 'forward': False, 'graph_id': 9}
+        with patch('trips.services.client_locate.localiser', return_value=arete) as localiser:
+            self.assertEqual(recaler_signalements_sans_voie(), 1)
+        self.assertEqual(localiser.call_args.kwargs['cap'], 270)
+        incident.refresh_from_db()
+        self.assertEqual((incident.way_id_osm, incident.forward_osm), (111, False))
+
+    def test_hors_route_ou_valhalla_en_panne_laisse_sans_voie(self):
+        from trips.services.disjoncteur import DisjoncteurOuvert
+
+        from .tasks import recaler_signalements_sans_voie
+
+        incident = creer_incident(creer_utilisateur(), way_id_osm=None)
+        loin = {'distance_m': 400, 'lat': 0, 'lon': 0, 'destination_only': False, 'use': 'road',
+                'way_id': 111, 'forward': True, 'graph_id': 9}
+        with patch('trips.services.client_locate.localiser', return_value=loin):
+            self.assertEqual(recaler_signalements_sans_voie(), 0)
+        with patch('trips.services.client_locate.localiser', side_effect=DisjoncteurOuvert()):
+            self.assertEqual(recaler_signalements_sans_voie(), 0)
+        incident.refresh_from_db()
+        self.assertIsNone(incident.way_id_osm)
 
 
 class IncidentsParVilleApiTests(TestCase):

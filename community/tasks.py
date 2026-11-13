@@ -44,6 +44,46 @@ def activer_programmes():
     return len(a_activer)
 
 
+MAX_RECALAGES_PAR_PASSE = 100
+
+
+@shared_task
+def recaler_signalements_sans_voie():
+    """Celery Beat, toutes les 5 min. Un signalement cree pendant une panne
+    de Valhalla n'a ni voie OSM ni sens (way_id_osm/forward_osm) : sans eux,
+    il n'est retrouve sur un trajet que par le couloir de distance. Des que
+    Valhalla repond, on complete voie et sens (meme appel /locate, avec le cap,
+    que ServiceIncident._verifier_position_routiere). La position n'est pas
+    deplacee : sa cellule H3 (cache, temps reel) est calculee a la creation.
+    Un point decidement hors route (> 50 m, allee privee) reste sans voie."""
+    from trips.services import client_locate
+    from trips.services.disjoncteur import DisjoncteurOuvert
+
+    from .services import RAYON_MAX_HORS_ROUTE_M
+
+    a_recaler = (
+        Incident.objects.filter(
+            statut__in=[StatutIncident.ACTIF, StatutIncident.EN_ATTENTE, StatutIncident.PROGRAMME],
+            expire_le__gt=timezone.now(), way_id_osm__isnull=True,
+        ).order_by('-cree_le')[:MAX_RECALAGES_PAR_PASSE]
+    )
+    nb = 0
+    for incident in a_recaler:
+        try:
+            arete = client_locate.localiser(incident.position.y, incident.position.x, cap=incident.cap)
+        except DisjoncteurOuvert:
+            break  # Valhalla toujours en panne : on reessaiera a la passe suivante
+        except client_locate.ErreurLocate:
+            continue
+        if arete is None or arete['destination_only'] or arete['distance_m'] > RAYON_MAX_HORS_ROUTE_M:
+            continue
+        incident.way_id_osm, incident.forward_osm = arete['way_id'], arete['forward']
+        incident.save(update_fields=['way_id_osm', 'forward_osm'])
+        invalider_cache_cellule(incident.cellule_h3_res8)
+        nb += 1
+    return nb
+
+
 # Les signalements termines restent en base (votes compris) pour l'etat des
 # routes, qui les exploite sur cette fenetre -- au-dela, simple purge pour que
 # la table ne grossisse pas indefiniment.

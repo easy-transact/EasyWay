@@ -418,6 +418,10 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'community.tasks.activer_programmes',
         'schedule': 60.0,
     },
+    'recaler-signalements-sans-voie': {
+        'task': 'community.tasks.recaler_signalements_sans_voie',
+        'schedule': 300.0,
+    },
     'abandonner-trajets-inactifs': {
         'task': 'trips.tasks.abandonner_trajets_inactifs',
         'schedule': 15 * 60.0,

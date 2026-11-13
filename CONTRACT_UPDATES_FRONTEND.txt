@@ -640,3 +640,20 @@ signales, deja pris en compte par le calcul d'itineraire).
      (null si inaccessible, si sort=distance, ou si le calcul est indisponible ;
      l'ordre est alors celui de la distance a vol d'oiseau, comme avant).
      -> afficher "4 min" plutot que "1,2 km" quand drive_duration_s existe.
+
+
+25. CORRIGE — signalements le long d'un trajet (13/11/2026)
+
+  POST /api/incidents/along-route/ (et fiche trajet du back-office) : rien a
+  changer cote appli, mais la liste est plus juste.
+    - Un signalement doit etre a moins de 30 m du trace (meme couloir que le
+      calcul d'itineraire). Avant, toute la voie OSM comptait : un trajet qui
+      empruntait 200 m d'une avenue recevait aussi les signalements 3 km plus
+      loin sur cette avenue.
+    - Signalement sans "heading" : affiche dans les deux sens de la voie
+      (avant : un seul sens, choisi au hasard).
+    - Signalement cree pendant une panne du moteur de calcul : retrouve par
+      la distance et le sens, puis rattache a sa voie des que le moteur
+      repond (avant : jamais affiche sur un trajet).
+  -> Toujours envoyer "heading" au signalement quand le telephone le connait :
+     c'est lui qui distingue les deux sens d'une meme route.

@@ -8,7 +8,7 @@ verrouillee.
 import h3
 from django.conf import settings
 from django.contrib.gis.db.models.functions import Distance
-from django.contrib.gis.geos import Point
+from django.contrib.gis.geos import LineString, Point
 from django.contrib.gis.measure import D
 from django.db import transaction
 from django.db.models import Q
@@ -40,7 +40,20 @@ def incidents_actifs_par_topologie(points: list[tuple[float, float]]) -> list[In
     trajet", pas un echec. Extrait de IncidentsSurTrajetView pour etre
     reutilisable (cf. trips.serializers.TrajetModerationSerializer, qui
     l'appelle sur la geometrie stockee d'un Trajet plutot que sur une
-    geometrie fournie par le client)."""
+    geometrie fournie par le client).
+
+    Trois cas, tous limites au COULOIR du trace (meme couloir que le calcul
+    d'itineraire, retards_signalements.COULOIR_M) -- une voie OSM peut faire
+    des kilometres, le trajet n'en parcourt souvent qu'une partie :
+      - signalement oriente (cap) : meme voie ET meme sens que le trajet
+        (une contre-allee parallele, autre voie, n'est jamais prise) ;
+      - signalement sans cap : meme voie, dans les deux sens (son sens
+        `forward_osm` a ete devine par Valhalla, il ne veut rien dire) ;
+      - signalement pas encore cale sur une voie (Valhalla indisponible a sa
+        creation, cf. tache recaler_signalements_sans_voie) : couloir + cap,
+        comme le repli historique, plutot que de le perdre."""
+    from trips.services.retards_signalements import COULOIR_M, ECART_CAP_MAX, _cap_du_trace
+
     try:
         aretes = attributs_trace(points)
     except (ErreurTraceAttributes, DisjoncteurOuvert):
@@ -49,13 +62,30 @@ def incidents_actifs_par_topologie(points: list[tuple[float, float]]) -> list[In
         return None
 
     paires = {(arete['way_id'], arete['forward']) for arete in aretes}
-    q = Q(pk__in=[])
+    voies = {way_id for way_id, _forward in paires}
+    q_oriente = Q(pk__in=[])
     for way_id, forward in paires:
-        q |= Q(way_id_osm=way_id, forward_osm=forward)
-
-    return list(Incident.objects.select_related('auteur').filter(
+        q_oriente |= Q(way_id_osm=way_id, forward_osm=forward)
+    q = (
+        (Q(cap__isnull=False) & q_oriente)
+        | Q(cap__isnull=True, way_id_osm__in=voies)
+        | Q(way_id_osm__isnull=True)
+    )
+    ligne = LineString(points, srid=4326)
+    candidats = Incident.objects.select_related('auteur').filter(
         q, statut__in=[StatutIncident.ACTIF, StatutIncident.EN_ATTENTE], expire_le__gt=timezone.now(),
-    ))
+        position__distance_lte=(ligne, D(m=COULOIR_M)),
+    )
+
+    resultats = []
+    for incident in candidats:
+        if incident.way_id_osm is None and incident.cap is not None:
+            cap_trace = _cap_du_trace(points, incident.position)
+            if cap_trace is not None and abs((incident.cap - cap_trace + 180) % 360 - 180) > ECART_CAP_MAX:
+                continue  # signale dans l'autre sens de circulation
+        resultats.append(incident)
+    return resultats
+
 
 QUOTA_SIGNALEMENTS_PAR_HEURE = 10
 RAYON_DOUBLON_M = 150
