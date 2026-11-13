@@ -328,6 +328,12 @@ class EchantillonVitesse(models.Model):
     # la carte (cf. CorrespondanceArete). Null si Valhalla ne les a pas fournis.
     way_id = models.BigIntegerField(null=True, blank=True)
     sens_avant = models.BooleanField(null=True, blank=True)
+    # Cle la plus fine et stable : le TRONCON entre deux carrefours, par ses
+    # noeuds OSM de debut et de fin (l'ordre donne le sens). Fournie par
+    # Valhalla >= 3.6 avec mjolnir.keep_osm_node_ids ; null sinon (la voie +
+    # le sens ci-dessus servent alors de cle).
+    noeud_debut_osm = models.BigIntegerField(null=True, blank=True)
+    noeud_fin_osm = models.BigIntegerField(null=True, blank=True)
     debut_intervalle = models.DateTimeField()
     jour_semaine = models.PositiveSmallIntegerField()
     heure_jour = models.PositiveSmallIntegerField()
@@ -347,6 +353,9 @@ class EchantillonVitesse(models.Model):
             models.Index(fields=['identifiant_arete', 'jour_semaine', 'heure_jour']),
             # vitesses_typiques_creneau agrege par voie stable sur (jour, heure).
             models.Index(fields=['jour_semaine', 'heure_jour', 'way_id', 'sens_avant'], name='echantillon_creneau_voie_idx'),
+            models.Index(
+                fields=['jour_semaine', 'heure_jour', 'noeud_debut_osm', 'noeud_fin_osm'], name='echantillon_troncon_idx',
+            ),
         ]
 
     def __str__(self):
@@ -363,11 +372,16 @@ class CorrespondanceArete(models.Model):
     graph_id = models.BigIntegerField(primary_key=True)
     way_id = models.BigIntegerField()
     sens_avant = models.BooleanField()
+    noeud_debut_osm = models.BigIntegerField(null=True, blank=True)
+    noeud_fin_osm = models.BigIntegerField(null=True, blank=True)
     vu_le = models.DateTimeField()
 
     class Meta:
         db_table = 'correspondance_arete'
-        indexes = [models.Index(fields=['way_id', 'sens_avant'], name='correspondance_voie_idx')]
+        indexes = [
+            models.Index(fields=['way_id', 'sens_avant'], name='correspondance_voie_idx'),
+            models.Index(fields=['noeud_debut_osm', 'noeud_fin_osm'], name='correspondance_troncon_idx'),
+        ]
 
     def __str__(self):
         return f"{self.graph_id} -> way {self.way_id} ({'avant' if self.sens_avant else 'arriere'})"

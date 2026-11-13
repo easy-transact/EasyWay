@@ -366,3 +366,17 @@ class ClientMatriceTests(TestCase):
 
         with patch('trips.services.client_matrice.requests.post', side_effect=requests.exceptions.ConnectionError()):
             self.assertIsNone(durees_depuis((4.05, 9.70), [(4.06, 9.71)]))
+
+
+class SurTrajetTests(TestCase):
+    """Regle unique "ce signalement est-il sur ce trace, dans ce sens ?"."""
+
+    def test_couloir_et_sens(self):
+        from .services.sur_trajet import Trace
+
+        trace = Trace([(9.70, 4.05), (9.71, 4.05)])  # vers l'est, cap 90
+        self.assertTrue(trace.contient((4.05, 9.705), cap=90))
+        self.assertTrue(trace.contient((4.05, 9.705), cap=None))       # sans cap : les deux sens
+        self.assertFalse(trace.contient((4.05, 9.705), cap=270))       # chaussee d'en face
+        self.assertFalse(trace.contient((4.0505, 9.705), cap=90))      # ~55 m a cote : hors couloir
+        self.assertAlmostEqual(trace.distance_depuis_depart_m((4.05, 9.705)), 557, delta=3)

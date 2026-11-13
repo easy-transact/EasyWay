@@ -124,7 +124,9 @@ CLE_DEBUT_GENERATION_TUILES = 'trafic:generation:debut'
 def vitesses_typiques_creneau(moment=None) -> dict:
     """{graph_id: vitesse typique km/h} pour les aretes qui ont assez
     d'historique sur le creneau courant (jour de semaine + heure, fuseau de
-    Douala). Deux sources, la stable d'abord :
+    Douala). Trois sources, la plus fine et stable d'abord :
+
+      0. historique par troncon (noeuds OSM de debut et de fin, Valhalla >= 3.6) ;
 
       1. historique par voie OSM + sens (EchantillonVitesse.way_id/sens_avant),
          reporte sur les GraphId ACTUELS via CorrespondanceArete -- survit a
@@ -149,19 +151,33 @@ def vitesses_typiques_creneau(moment=None) -> dict:
     )
     moyenne = dict(somme_ponderee=Sum(F('vitesse_moyenne') * F('nombre_echantillons')), poids=Sum('nombre_echantillons'))
 
+    vitesses = {}
+    # 0. Troncon entre deux carrefours (noeuds OSM, Valhalla >= 3.6) : le plus fin.
+    par_troncon = {
+        (a['noeud_debut_osm'], a['noeud_fin_osm']): float(a['somme_ponderee'] / a['poids'])
+        for a in base.filter(noeud_debut_osm__isnull=False, noeud_fin_osm__isnull=False)
+        .values('noeud_debut_osm', 'noeud_fin_osm').annotate(**moyenne).filter(poids__gte=NB_MIN_ECHANTILLONS_TYPIQUE)
+    }
+    if par_troncon:
+        for graph_id, debut, fin in CorrespondanceArete.objects.filter(
+            noeud_debut_osm__in={d for d, _f in par_troncon},
+        ).values_list('graph_id', 'noeud_debut_osm', 'noeud_fin_osm').iterator():
+            vitesse = par_troncon.get((debut, fin))
+            if vitesse is not None:
+                vitesses[graph_id] = vitesse
+
     par_voie = {
         (a['way_id'], a['sens_avant']): float(a['somme_ponderee'] / a['poids'])
-        for a in base.filter(way_id__isnull=False, sens_avant__isnull=False)
+        for a in base.filter(way_id__isnull=False, sens_avant__isnull=False, noeud_debut_osm__isnull=True)
         .values('way_id', 'sens_avant').annotate(**moyenne).filter(poids__gte=NB_MIN_ECHANTILLONS_TYPIQUE)
     }
-    vitesses = {}
     if par_voie:
         for graph_id, way_id, sens in CorrespondanceArete.objects.filter(
             way_id__in={w for w, _s in par_voie},
         ).values_list('graph_id', 'way_id', 'sens_avant').iterator():
             vitesse = par_voie.get((way_id, sens))
             if vitesse is not None:
-                vitesses[graph_id] = vitesse
+                vitesses.setdefault(graph_id, vitesse)
 
     sans_voie = base.filter(way_id__isnull=True)
     debut_generation = cache.get(CLE_DEBUT_GENERATION_TUILES)

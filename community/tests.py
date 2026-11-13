@@ -83,6 +83,10 @@ def patcher_locate_incident(
             }
         fonction_simulee.side_effect = _repondre
     test_case.addCleanup(patcheur.stop)
+    # Troncon OSM (noeuds, Valhalla >= 3.6) : jamais d'appel reseau en test.
+    patcheur_troncon = patch('trips.services.client_trace_attributes.troncon_au_point', return_value=None)
+    patcheur_troncon.start()
+    test_case.addCleanup(patcheur_troncon.stop)
     return fonction_simulee
 
 
@@ -810,6 +814,37 @@ class IncidentsSurTrajetApiTests(TestCase):
         )
         self.assertEqual([i['id'] for i in reponse.json()], [str(incident.id)])
 
+    def test_troncon_osm_plus_precis_que_la_voie(self):
+        # Valhalla >= 3.6 : le trajet parcourt le troncon 10 -> 11 de la voie
+        # 111 ; un signalement sur le troncon suivant (11 -> 12) de la meme
+        # voie, a quelques metres apres le carrefour, n'est pas sur le trajet.
+        patcher_attributs_trace(self, aretes=[{'way_id': 111, 'forward': True, 'noeuds': (10, 11)}])
+        dessus = creer_incident(self.utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON - 0.003, way_id_osm=111,
+                                forward_osm=True, cap=270, noeud_debut_osm=10, noeud_fin_osm=11)
+        creer_incident(self.utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON - 0.0069, way_id_osm=111,
+                       forward_osm=True, cap=270, noeud_debut_osm=11, noeud_fin_osm=12)
+        reponse = self.client.post(
+            reverse('community:incidents-sur-trajet'), {'geometry': self.geometrie},
+            content_type='application/json',
+        )
+        self.assertEqual([i['id'] for i in reponse.json()], [str(dessus.id)])
+
+    def test_position_retire_les_depasses_et_trie_par_distance_restante(self):
+        # Trace vers l'ouest (~780 m) ; conducteur a ~330 m du depart.
+        derriere = creer_incident(self.utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON - 0.001, severite=5)
+        loin = creer_incident(self.utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON - 0.006, severite=5)
+        proche = creer_incident(self.utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON - 0.004, severite=1)
+        reponse = self.client.post(
+            reverse('community:incidents-sur-trajet'),
+            {'geometry': self.geometrie, 'lat': DOUALA_LAT, 'lon': DOUALA_LON - 0.003},
+            content_type='application/json',
+        )
+        corps = reponse.json()
+        self.assertEqual([i['id'] for i in corps], [str(proche.id), str(loin.id)])
+        self.assertNotIn(str(derriere.id), [i['id'] for i in corps])
+        self.assertAlmostEqual(corps[0]['distance_ahead_m'], 111, delta=5)
+        self.assertAlmostEqual(corps[0]['distance_from_start_m'], 445, delta=5)
+
     def test_incident_sans_way_id_osm_retrouve_par_le_couloir(self):
         # Cree pendant une panne de Valhalla (pas encore recale sur une voie,
         # cf. recaler_signalements_sans_voie) : retrouve par couloir + cap
@@ -1390,3 +1425,38 @@ class SuppressionIncidentAuthentificationTests(TestCase):
         self.assertEqual(reponse.status_code, 404)
         incident.refresh_from_db()
         self.assertEqual(incident.statut, StatutIncident.ACTIF)
+
+
+class CapDeTrajectoireTests(TestCase):
+    """Sens d'un signalement : celui dans lequel le conducteur roule vraiment
+    (dernieres positions), plus fiable que le cap du telephone a l'arret."""
+
+    def setUp(self):
+        cache.clear()
+        self.utilisateur = creer_utilisateur()
+
+    def rouler_vers_l_ouest(self):
+        import time
+
+        from trips.services import derniere_position
+
+        maintenant = time.time()
+        derniere_position.memoriser_trace(self.utilisateur.id, [
+            (DOUALA_LAT, DOUALA_LON + 0.001 * (3 - i), maintenant - 30 + 10 * i) for i in range(4)
+        ])
+
+    def test_cap_de_trajectoire(self):
+        from trips.services import derniere_position
+
+        self.assertIsNone(derniere_position.cap_de_trajectoire(self.utilisateur.id))  # aucune position
+        self.rouler_vers_l_ouest()
+        self.assertAlmostEqual(derniere_position.cap_de_trajectoire(self.utilisateur.id), 270, delta=1)
+
+    def test_cap_fiable(self):
+        from .views import _cap_fiable
+
+        self.assertEqual(_cap_fiable(self.utilisateur, 85), 85)  # sans trajectoire : celui du telephone
+        self.rouler_vers_l_ouest()
+        self.assertEqual(_cap_fiable(self.utilisateur, None), 270)  # pas de cap : celui de la trajectoire
+        self.assertEqual(_cap_fiable(self.utilisateur, 90), 270)    # cap oppose (arret) : trajectoire
+        self.assertEqual(_cap_fiable(self.utilisateur, 250), 250)   # coherent : celui du telephone

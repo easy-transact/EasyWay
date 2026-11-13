@@ -60,7 +60,21 @@ TAILLE_BUCKET_S = 5 * 60
 PREFIXE_CHAMP_TRAJET = 't:'
 # Sens de parcours de l'arete sur la voie OSM : avec edge.way_id (deja dans
 # ATTRIBUTS_TRONCON), cle stable d'une generation de tuiles a l'autre.
-ATTRIBUTS_CLE_STABLE = ['edge.forward']
+# Dans cet ordre : retires depuis la fin si Valhalla les refuse (cf. client_meili).
+# Noeuds OSM de debut/fin d'arete : Valhalla >= 3.6, tuiles construites avec
+# mjolnir.keep_osm_node_ids -- troncon entre deux carrefours, cle la plus fine.
+ATTRIBUTS_CLE_STABLE = ['edge.forward', 'edge.begin_osm_node_id', 'edge.end_osm_node_id']
+
+
+def noeuds_osm(arete):
+    """(noeud OSM de debut, noeud OSM de fin) de l'arete, ou None (Valhalla
+    < 3.6 ou tuiles sans keep_osm_node_ids). Format de trace_attributes :
+    edge.node_id (debut) et edge.end_node.node_id (fin)."""
+    debut = arete.get('node_id')
+    fin = (arete.get('end_node') or {}).get('node_id')
+    if debut is None or fin is None:
+        return None
+    return int(debut), int(fin)
 
 
 def cle_stable(arete):
@@ -83,13 +97,15 @@ def apprendre_correspondances(edges):
     for arete in edges:
         cle = cle_stable(arete)
         if cle is not None and arete.get('id') is not None:
+            noeuds = noeuds_osm(arete) or (None, None)
             lignes[arete['id']] = CorrespondanceArete(
-                graph_id=arete['id'], way_id=cle[0], sens_avant=cle[1], vu_le=maintenant,
+                graph_id=arete['id'], way_id=cle[0], sens_avant=cle[1],
+                noeud_debut_osm=noeuds[0], noeud_fin_osm=noeuds[1], vu_le=maintenant,
             )
     if lignes:
         CorrespondanceArete.objects.bulk_create(
             lignes.values(), update_conflicts=True, unique_fields=['graph_id'],
-            update_fields=['way_id', 'sens_avant', 'vu_le'],
+            update_fields=['way_id', 'sens_avant', 'noeud_debut_osm', 'noeud_fin_osm', 'vu_le'],
         )
 
 
@@ -261,10 +277,11 @@ class ConsommateurPositions:
             bucket = self._bucket_5min(self._parser_horodatage(paires[i][1]['horodatage']))
             self._accumuler(
                 identifiant_arete, bucket, distance_km, duree_s, paires[i][1].get('trajet_id'),
-                cle_stable=cle_stable(edges[index_arete]),
+                cle_stable=cle_stable(edges[index_arete]), noeuds=noeuds_osm(edges[index_arete]),
             )
 
-    def _accumuler(self, identifiant_arete, bucket_epoch, distance_km, duree_s, trajet_id=None, cle_stable=None):
+    def _accumuler(self, identifiant_arete, bucket_epoch, distance_km, duree_s, trajet_id=None, cle_stable=None,
+                   noeuds=None):
         """Accumule DISTANCE et DUREE (pas une moyenne de vitesses) : la vitesse
         d'une arete sur un bucket est Sigma distance / Sigma duree -- un vehicule
         qui roule 10 s vite puis 60 s au pas donne sa vraie vitesse, pas la
@@ -280,6 +297,8 @@ class ConsommateurPositions:
             if cle_stable is not None:
                 # Voie OSM + sens : recopies dans EchantillonVitesse au flush.
                 pipe.hset(cle, mapping={'way': cle_stable[0], 'avant': int(cle_stable[1])})
+            if noeuds is not None:
+                pipe.hset(cle, mapping={'debut': noeuds[0], 'fin': noeuds[1]})
             if trajet_id is not None:
                 pipe.hincrbyfloat(cle, f'{PREFIXE_CHAMP_TRAJET}{trajet_id}:distance', distance_km)
                 pipe.hincrbyfloat(cle, f'{PREFIXE_CHAMP_TRAJET}{trajet_id}:duree', duree_s)

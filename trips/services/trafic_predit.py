@@ -131,21 +131,37 @@ def profils_par_graph_id(debut_generation=None):
     base = EchantillonVitesse.objects.filter(debut_intervalle__gte=timezone.now() - FENETRE_HISTORIQUE)
     moyenne = dict(somme=Sum(F('vitesse_moyenne') * F('nombre_echantillons')), poids=Sum('nombre_echantillons'))
 
+    profils = {}
+    # Troncon (noeuds OSM) d'abord, puis voie + sens, puis GraphId.
+    par_troncon = defaultdict(dict)
+    for a in (base.filter(noeud_debut_osm__isnull=False, noeud_fin_osm__isnull=False)
+              .values('noeud_debut_osm', 'noeud_fin_osm', 'jour_semaine', 'heure_jour').annotate(**moyenne)):
+        if a['poids']:
+            par_troncon[(a['noeud_debut_osm'], a['noeud_fin_osm'])][
+                _heure_valhalla(a['jour_semaine'], a['heure_jour'])] = (float(a['somme'] / a['poids']), a['poids'])
+    profils_troncon = {cle: p for cle, par_heure in par_troncon.items() if (p := _profil(par_heure))}
+    if profils_troncon:
+        for graph_id, debut, fin in CorrespondanceArete.objects.filter(
+            noeud_debut_osm__isnull=False,
+        ).values_list('graph_id', 'noeud_debut_osm', 'noeud_fin_osm').iterator():
+            profil = profils_troncon.get((debut, fin))
+            if profil:
+                profils[graph_id] = profil
+
     par_voie = defaultdict(dict)
-    for a in (base.filter(way_id__isnull=False, sens_avant__isnull=False)
+    for a in (base.filter(way_id__isnull=False, sens_avant__isnull=False, noeud_debut_osm__isnull=True)
               .values('way_id', 'sens_avant', 'jour_semaine', 'heure_jour').annotate(**moyenne)):
         if a['poids']:
             par_voie[(a['way_id'], a['sens_avant'])][_heure_valhalla(a['jour_semaine'], a['heure_jour'])] = (
                 float(a['somme'] / a['poids']), a['poids'])
 
-    profils = {}
     profils_voie = {cle: p for cle, par_heure in par_voie.items() if (p := _profil(par_heure))}
     if profils_voie:
         for graph_id, way_id, sens in CorrespondanceArete.objects.values_list(
             'graph_id', 'way_id', 'sens_avant',
         ).iterator():
             profil = profils_voie.get((way_id, sens))
-            if profil:
+            if profil and graph_id not in profils:
                 profils[graph_id] = profil
 
     sans_voie = base.filter(way_id__isnull=True)

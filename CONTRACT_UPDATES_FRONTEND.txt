@@ -657,3 +657,31 @@ signales, deja pris en compte par le calcul d'itineraire).
       repond (avant : jamais affiche sur un trajet).
   -> Toujours envoyer "heading" au signalement quand le telephone le connait :
      c'est lui qui distingue les deux sens d'une meme route.
+
+
+26. AMELIORE — prochains signalements sur le trajet, sens des signalements (14/11/2026)
+
+  a) POST /api/incidents/along-route/ : position facultative "lat" + "lon"
+     Chaque signalement porte "distance_from_start_m" (le long du trace).
+     Avec la position actuelle du conducteur :
+       - "distance_ahead_m" en plus (metres restants jusqu'au signalement) ;
+       - signalements deja depasses retires ;
+       - tri du plus proche au plus loin.
+     Sans position : tri par gravite puis confiance, comme avant.
+     -> en conduite, envoyer la position : "Accident dans 800 m".
+
+  b) Sens d'un signalement (rien a changer cote appli)
+     Si le telephone n'envoie pas "heading", ou en envoie un qui contredit le
+     sens dans lequel la voiture roule (cap aleatoire a l'arret), le serveur
+     prend le sens de la trajectoire recente (dernieres positions de
+     telemetrie). Garder l'envoi de la telemetrie pendant le trajet.
+
+  c) Une seule regle "sur la route" partout
+     Affichage le long du trajet, calcul d'itineraire, alertes route.recheck :
+     meme couloir (30 m) et meme test de sens. Un signalement qui ralentit une
+     route apparait aussi dans sa liste, et inversement.
+
+  d) Troncon entre deux carrefours (apres la mise a jour de Valhalla >= 3.6)
+     Les signalements et l'historique de vitesses seront rattaches au troncon
+     exact (entre deux carrefours) plutot qu'a la voie entiere. Rien a changer
+     cote appli ; en attendant, la voie + le couloir s'appliquent.

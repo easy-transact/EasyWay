@@ -25,6 +25,7 @@ class ErreurMeili(Exception):
 
 
 ATTRIBUTS_DEFAUT = ['edge.id', 'edge.length', 'edge.speed']
+_optionnels_acceptes = {}  # {attributs optionnels: combien cette version de Valhalla en accepte}
 
 
 def tracer(points: list[dict], shape_match: str = 'map_snap', attributs=None,
@@ -62,15 +63,26 @@ def tracer(points: list[dict], shape_match: str = 'map_snap', attributs=None,
 
     try:
         reponse = None
-        if attributs_optionnels:
-            # Attributs utiles mais pas indispensables (ex. edge.forward pour la
-            # cle stable des aretes) : refuses par cette version de Valhalla ->
-            # on retente sans eux, jamais au prix des attributs requis.
-            reponse = appeler(list(attributs or ATTRIBUTS_DEFAUT) + list(attributs_optionnels))
-            if reponse.status_code == 400:
-                reponse = None
+        requis = list(attributs or ATTRIBUTS_DEFAUT)
+        optionnels = list(attributs_optionnels or [])
+        # Attributs utiles mais pas indispensables (ex. edge.forward, noeuds
+        # OSM) : on retire les derniers tant que cette version de Valhalla
+        # repond 400, jamais au prix des attributs requis. Le nombre accepte
+        # est memorise par process : une seule serie d'essais, pas a chaque lot.
+        cle_support = tuple(optionnels)
+        nb = _optionnels_acceptes.get(cle_support, len(optionnels))
+        while nb > 0:
+            reponse = appeler(requis + optionnels[:nb])
+            if reponse.status_code != 400:
+                break
+            reponse = None
+            nb -= 1
         if reponse is None:
-            reponse = appeler(attributs or ATTRIBUTS_DEFAUT)
+            reponse = appeler(requis)
+        # Memorise seulement si un essai a reussi : un 400 sur TOUS les essais
+        # vient de la trace (impossible a recaler), pas des attributs.
+        if optionnels and reponse.status_code != 400:
+            _optionnels_acceptes[cle_support] = nb
         if reponse.status_code == 400 and attributs and attributs != ATTRIBUTS_DEFAUT:
             # Un attribut supplementaire (etat_routes) refuse par cette version
             # de Valhalla ne doit jamais couper le trafic : nouvel essai avec

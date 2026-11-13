@@ -60,3 +60,17 @@ serveur. Vérifier :
 
 Faire d'abord une sauvegarde de `/custom_files/valhalla_tiles.tar` et du
 dossier des tuiles.
+
+## Mise à jour de Valhalla (≥ 3.6) : tronçons OSM
+
+Pour rattacher signalements et vitesses au **tronçon entre deux carrefours**
+(au lieu de la voie OSM entière), les tuiles doivent contenir les
+identifiants de nœuds OSM :
+
+- Valhalla **3.6.1 ou plus** (option ajoutée par la PR #5450) ; viser une
+  version précise (ex. 3.9.1), pas `latest`.
+- Dans la configuration de construction des tuiles :
+  `"mjolnir": {"keep_osm_node_ids": true}` (nœuds des carrefours, suffisant).
+- Reconstruire les tuiles. Le code détecte seul les nœuds (`edge.node_id`,
+  `end_node.node_id` dans `trace_attributes`) : aucun réglage côté Django.
+- Après la reconstruction, refaire l'export du trafic prévu (ci-dessus).

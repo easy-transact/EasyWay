@@ -14,17 +14,18 @@ propose des voies bloquees, et la vraie route barree est un sous-type de
 VOIE_BLOQUEE ; SENS_INVERSE existe sous POLICE et sous ACCIDENT.
 """
 
-import math
 from dataclasses import dataclass
 
-from django.contrib.gis.geos import LineString, Point, Polygon
+from django.contrib.gis.geos import Polygon
 
 from django.utils import timezone
 
 from community.models import Q_CONTESTE, Incident, SousTypeIncident as S, StatutIncident, TypeIncident as T
 
 from ..polyline import decoder_polyline6
+from . import sur_trajet
 from .geo import distance_haversine_m
+from .sur_trajet import Trace, cap_segment
 
 # Valeurs de depart de la spec (section 4), a caler avec les donnees.
 VITESSE = 'vitesse'      # vitesse imposee (km/h) sur `longueur_m`
@@ -86,8 +87,10 @@ def effet_de(incident):
         return EFFETS_SANS_SOUS_TYPE.get(incident.type)
     return EFFETS.get((incident.type, incident.sous_type))
 
-COULOIR_M = 30             # signalement a moins de 30 m de la ligne du trajet
-ECART_CAP_MAX = 45         # degres entre le cap du signalement et le sens du trajet
+# Couloir et sens : regle commune a tout le projet (cf. sur_trajet), reexportee
+# ici pour les modules qui lisaient deja rs.COULOIR_M / rs.ECART_CAP_MAX.
+COULOIR_M = sur_trajet.COULOIR_M
+ECART_CAP_MAX = sur_trajet.ECART_CAP_MAX
 MARGE_EXTREMITES_M = 100   # jamais de fermeture pres du depart ou de l'arrivee
 MARGE_RECHERCHE_DEG = 0.045  # ~5 km autour du rectangle depart-arrivee
 EGALITE_S = 60             # a moins d'1 min d'ecart, departage par nb de signalements puis distance
@@ -202,22 +205,12 @@ def fermetures_a_eviter(depart, arrivee, etapes, costing, trafic_en_direct=False
 
 
 def _cap(lon1, lat1, lon2, lat2):
-    d_lon = math.radians(lon2 - lon1)
-    p1, p2 = math.radians(lat1), math.radians(lat2)
-    x = math.sin(d_lon) * math.cos(p2)
-    y = math.cos(p1) * math.sin(p2) - math.sin(p1) * math.cos(p2) * math.cos(d_lon)
-    return (math.degrees(math.atan2(x, y)) + 360) % 360
+    return cap_segment(lon1, lat1, lon2, lat2)
 
 
 def _cap_du_trace(points, position):
-    """Sens du trajet au droit de la position : cap du segment le plus proche."""
-    meilleur, distance = None, float('inf')
-    for (lon1, lat1), (lon2, lat2) in zip(points, points[1:]):
-        segment = LineString([(lon1, lat1), (lon2, lat2)], srid=4326)
-        d = segment.distance(position)
-        if d < distance:
-            meilleur, distance = (lon1, lat1, lon2, lat2), d
-    return _cap(*meilleur) if meilleur else None
+    """Sens du trajet au droit de la position (cf. sur_trajet.Trace.cap_au_droit)."""
+    return Trace(points).cap_au_droit(position)
 
 
 # Vitesse de reference pour un retard INDICATIF (affichage back-office) : le
@@ -283,19 +276,13 @@ def appliquer(candidats, costing, trafic_en_direct, moment=None):
         points = decoder_polyline6(candidat['geometrie'])
         if len(points) < 2:
             continue
-        ligne = LineString(points, srid=4326)
+        trace = Trace(points)
         vitesse_normale = max(candidat['distance'] / max(candidat['duree'], 1), 2.0)  # m/s
         total = 0.0
         for incident in incidents:
             effet = effet_de(incident)
-            position = Point(incident.position.x, incident.position.y, srid=4326)
-            if ligne.distance(position) * METRES_PAR_DEGRE > COULOIR_M:
-                continue
-            if incident.cap is not None:
-                cap_trace = _cap_du_trace(points, position)
-                ecart = abs((incident.cap - cap_trace + 180) % 360 - 180) if cap_trace is not None else 0
-                if ecart > ECART_CAP_MAX:
-                    continue  # signale dans l'autre sens de circulation
+            if not trace.contient_incident(incident):
+                continue  # hors couloir, ou signale dans l'autre sens de circulation
             if fermeture_confirmee(incident, effet, costing):
                 continue  # deja exclue du calcul (fermetures_a_eviter)
             moto = costing == 'motorcycle'

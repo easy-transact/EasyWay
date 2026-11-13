@@ -268,6 +268,15 @@ class IncidentsSurTrajetSerializer(serializers.Serializer):
 
     geometry = serializers.CharField()
     buffer_m = serializers.IntegerField(required=False, default=BUFFER_M_DEFAUT, min_value=1, max_value=BUFFER_M_MAX)
+    # Position actuelle du conducteur (facultative) : les signalements deja
+    # depasses sont retires, les autres tries par distance restante.
+    lat = serializers.FloatField(required=False, allow_null=True, default=None, min_value=-90, max_value=90)
+    lon = serializers.FloatField(required=False, allow_null=True, default=None, min_value=-180, max_value=180)
+
+    def validate(self, donnees):
+        if (donnees['lat'] is None) != (donnees['lon'] is None):
+            raise serializers.ValidationError("'lat' and 'lon' must be provided together.")
+        return donnees
 
     def validate_geometry(self, valeur):
         try:

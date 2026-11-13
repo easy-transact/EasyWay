@@ -475,6 +475,9 @@ class TelemetriePositionsView(APIView):
         _cumuler_telemetrie(trajet, serializer.validated_data['positions'])
         derniere = max(serializer.validated_data['positions'], key=lambda p: p['horodatage'])
         derniere_position.memoriser(request.user.id, derniere['lat'], derniere['lon'])
+        derniere_position.memoriser_trace(request.user.id, [
+            (p['lat'], p['lon'], p['horodatage'].timestamp()) for p in serializer.validated_data['positions']
+        ])
         positions_direct.memoriser(trajet, derniere, trajet.type_vehicule or request.user.type_vehicule)
         if trajet.vehicule_id:
             # Trajet avec un vehicule d'agence : position en direct + exces de vitesse.

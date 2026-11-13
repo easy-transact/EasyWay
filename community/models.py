@@ -239,6 +239,11 @@ class Incident(models.Model):
     # 8h max (DUREE_VIE_BASE_PAR_TYPE) et retombent sur le repli par couloir.
     way_id_osm = models.BigIntegerField(null=True, blank=True)
     forward_osm = models.BooleanField(null=True, blank=True)
+    # Troncon entre deux carrefours (noeuds OSM de debut et de fin, dans le
+    # sens du signalement) : plus precis que la voie entiere. Valhalla >= 3.6
+    # avec mjolnir.keep_osm_node_ids ; null sinon (cf. services._troncon_osm).
+    noeud_debut_osm = models.BigIntegerField(null=True, blank=True)
+    noeud_fin_osm = models.BigIntegerField(null=True, blank=True)
 
     confirmations = models.IntegerField(default=0)
     infirmations = models.IntegerField(default=0)

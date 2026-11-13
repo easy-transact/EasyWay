@@ -18,7 +18,7 @@ Valeurs de depart, a caler avec les acceptations reelles (better-route).
 
 from datetime import timedelta
 
-from django.contrib.gis.geos import LineString, Point
+from django.contrib.gis.geos import Point
 from django.utils import timezone
 
 from community.models import Incident, SousTypeIncident as S, TypeIncident as T
@@ -27,6 +27,7 @@ from ..models import FUSEAU_TRAFIC
 from ..polyline import decoder_polyline6
 from . import retards_signalements as rs
 from .geo import distance_haversine_m
+from .sur_trajet import Trace
 
 # Gravite 0-10 par (type, sous-type). Police/radar : 0, on ne fait pas faire
 # de detour pour eviter un controle.
@@ -110,12 +111,7 @@ def ecart_max_s(duree_reference):
 
 
 def _dans_le_sens(incident, points, position):
-    if incident.cap is None:
-        return True
-    cap_trace = rs._cap_du_trace(points, position)
-    if cap_trace is None:
-        return True
-    return abs((incident.cap - cap_trace + 180) % 360 - 180) <= rs.ECART_CAP_MAX
+    return Trace(points).dans_le_sens(incident.cap, position)
 
 
 def incidents_autour(candidats):
@@ -131,7 +127,8 @@ def dangers_sur(points, distance_totale_m, duree_s, incidents, costing, nuit):
     Un signalement qui aura expire avant que le conducteur y arrive ne compte pas."""
     if len(points) < 2:
         return []
-    ligne = LineString(points, srid=4326)
+    trace = Trace(points)
+    ligne = trace.ligne
     vitesse = max(distance_totale_m / max(duree_s, 1), 1.0)
     maintenant = timezone.now()
     moto = costing == 'motorcycle'
@@ -141,9 +138,7 @@ def dangers_sur(points, distance_totale_m, duree_s, incidents, costing, nuit):
         if gravite <= 0:
             continue
         position = Point(incident.position.x, incident.position.y, srid=4326)
-        if ligne.distance(position) * rs.METRES_PAR_DEGRE > rs.COULOIR_M:
-            continue
-        if not _dans_le_sens(incident, points, position):
+        if not trace.contient_incident(incident):
             continue
         distance_m = ligne.project_normalized(position) * distance_totale_m
         if incident.expire_le <= maintenant + timedelta(seconds=distance_m / vitesse):
@@ -279,7 +274,8 @@ def fermetures_devant(points, costing):
     ((lon, lat)), dans le bon sens : le reste de la route suivie est coupe."""
     if len(points) < 2:
         return []
-    ligne = LineString(points, srid=4326)
+    trace = Trace(points)
+    ligne = trace.ligne
     rectangle = rs._rectangle([(lat, lon) for lon, lat in points[::20] + [points[-1]]])
     fermetures = []
     for incident in rs._incidents_actifs(rectangle):
@@ -287,7 +283,7 @@ def fermetures_devant(points, costing):
         if effet is None or not rs.fermeture_confirmee(incident, effet, costing):
             continue
         position = Point(incident.position.x, incident.position.y, srid=4326)
-        if ligne.distance(position) * rs.METRES_PAR_DEGRE > rs.COULOIR_M or not _dans_le_sens(incident, points, position):
+        if not trace.contient_incident(incident):
             continue
         fermetures.append({
             'id': str(incident.id), 'type': incident.type, 'subtype': incident.sous_type or '',

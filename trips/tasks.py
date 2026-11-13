@@ -188,6 +188,8 @@ def _flusher_un_bucket(connexion, cle, identifiant_arete, bucket_epoch) -> bool:
             # Cle stable (voie OSM + sens) si le consommateur l'a recue de Valhalla.
             'way_id': int(champs['way']) if champs.get('way') else None,
             'sens_avant': bool(int(champs['avant'])) if champs.get('avant') not in (None, '') else None,
+            'noeud_debut_osm': int(champs['debut']) if champs.get('debut') else None,
+            'noeud_fin_osm': int(champs['fin']) if champs.get('fin') else None,
             'jour_semaine': debut_local.weekday(),
             'heure_jour': debut_local.hour,
         },

@@ -360,12 +360,8 @@ class IncidentsProchesView(APIView):
         return Response(donnees[:MAX_RESULTATS])
 
 
-# Meme tolerance que SECTEUR_DOUBLON_DEGRES (community/services.py) : un
-# signalement dont le cap s'ecarte de plus de 45 deg du cap local du trajet
-# est considere comme une autre route (chaussee opposee, rue perpendiculaire)
-# -- ne resout pas le cas d'une contre-allee parallele (meme cap que la
-# route qu'elle longe), qui demande le matching par way_id ci-dessous.
-ECART_CAP_MAX_DEGRES = 45
+# Signalement juste derriere le conducteur : garde (bruit GPS, projection).
+MARGE_DEPASSE_M = 20
 
 
 @extend_schema(
@@ -379,7 +375,10 @@ ECART_CAP_MAX_DEGRES = 45
         "filet hors-ligne ; /nearby/ reste la source vivante pendant la conduite. "
         "Geometrie en corps de requete (POST), jamais en parametres d'URL -- un trajet "
         "long (Douala-Yaounde, ~250km) demanderait plusieurs centaines de cellules H3 "
-        "et une URL ingerable si on suivait le modele de /nearby/."
+        "et une URL ingerable si on suivait le modele de /nearby/. Chaque incident porte "
+        "distance_from_start_m (le long du trace). Avec lat/lon (position actuelle) : "
+        "distance_ahead_m en plus, incidents deja depasses retires, tri par distance "
+        "restante ; sans : tri par gravite puis confiance."
     ),
     request=IncidentsSurTrajetSerializer,
     responses={200: IncidentSerializer(many=True), 400: MessageSerializer},
@@ -404,12 +403,28 @@ class IncidentsSurTrajetView(APIView):
         if incidents is None:
             incidents = self._incidents_par_couloir(points, buffer_m)
 
-        # Meme logique de pertinence que /nearby/ sans position de reference
-        # (aucune ici -- le trajet entier est demande, pas un point) :
-        # gravite puis confiance, et un plafond identique pour ne jamais
-        # renvoyer un trajet tres long en entier sans limite.
+        from trips.services.sur_trajet import Trace
+
+        trace = Trace(points)
         donnees = IncidentSerializer(incidents, many=True).data
-        donnees.sort(key=lambda i: (-i['severity'], -float(i['confidence_score'])))
+        for incident, donnee in zip(incidents, donnees):
+            donnee['distance_from_start_m'] = round(trace.distance_depuis_depart_m(incident.position))
+
+        position = serializer.validated_data['lat'], serializer.validated_data['lon']
+        if position[0] is not None:
+            # En conduite : "quel est le prochain signalement, a combien ?".
+            # Ceux deja depasses (au-dela d'une marge de bruit GPS) sont
+            # retires, les autres tries par distance restante.
+            depart = trace.distance_depuis_depart_m(position)
+            for donnee in donnees:
+                donnee['distance_ahead_m'] = donnee['distance_from_start_m'] - round(depart)
+            donnees = [d for d in donnees if d['distance_ahead_m'] >= -MARGE_DEPASSE_M]
+            donnees.sort(key=lambda i: i['distance_ahead_m'])
+        else:
+            # Trajet entier (avant le depart, ou back-office) : gravite puis
+            # confiance, comme /nearby/ sans position de reference.
+            donnees.sort(key=lambda i: (-i['severity'], -float(i['confidence_score'])))
+        # Plafond identique a /nearby/ : jamais un trajet tres long en entier.
         return Response(donnees[:MAX_RESULTATS])
 
     def _incidents_par_couloir(self, points, buffer_m):
@@ -425,45 +440,10 @@ class IncidentsSurTrajetView(APIView):
             position__distance_lte=(ligne, D(m=buffer_m)),
         )
 
-        resultats = []
-        for incident in incidents:
-            if incident.cap is not None:
-                cap_trajet = _cap_trajet_le_plus_proche(points, incident.position)
-                ecart = abs(incident.cap - cap_trajet) % 360
-                ecart = min(ecart, 360 - ecart)
-                if ecart > ECART_CAP_MAX_DEGRES:
-                    continue
-            resultats.append(incident)
-        return resultats
+        from trips.services.sur_trajet import Trace
 
-
-def _cap_segment(lon1, lat1, lon2, lat2):
-    """Cap (0-359, degres depuis le nord) du segment [1 -> 2] -- meme
-    convention que Incident.cap (fourni par le client au signalement)."""
-    lat1_r, lat2_r = math.radians(lat1), math.radians(lat2)
-    delta_lon = math.radians(lon2 - lon1)
-    x = math.sin(delta_lon) * math.cos(lat2_r)
-    y = math.cos(lat1_r) * math.sin(lat2_r) - math.sin(lat1_r) * math.cos(lat2_r) * math.cos(delta_lon)
-    return math.degrees(math.atan2(x, y)) % 360
-
-
-def _cap_trajet_le_plus_proche(points, position):
-    """Cap du segment de `points` (liste de (lon, lat) decodee du polyline6)
-    le plus proche de `position` (geos Point) -- approxime par le sommet le
-    plus proche plutot qu'une vraie projection sur la ligne : suffisant a
-    l'echelle du couloir de recherche (quelques dizaines de metres, cf.
-    BUFFER_M_DEFAUT), pas mesure au-dela de ca."""
-    lon0, lat0 = position.x, position.y
-    index_plus_proche, distance_min = 0, float('inf')
-    for i, (lon, lat) in enumerate(points):
-        distance = (lon - lon0) ** 2 + (lat - lat0) ** 2
-        if distance < distance_min:
-            distance_min, index_plus_proche = distance, i
-    if index_plus_proche == len(points) - 1:
-        index_plus_proche -= 1
-    lon1, lat1 = points[index_plus_proche]
-    lon2, lat2 = points[index_plus_proche + 1]
-    return _cap_segment(lon1, lat1, lon2, lat2)
+        trace = Trace(points)
+        return [i for i in incidents if trace.dans_le_sens(i.cap, i.position)]
 
 
 @extend_schema(
@@ -620,12 +600,13 @@ class IncidentCreationView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        cap = _cap_fiable(request.user, donnees['cap'])
         try:
             incident, est_doublon = ServiceIncident().signaler(
                 utilisateur=request.user,
                 type_incident=donnees['type'],
                 position=Point(donnees['lon'], donnees['lat'], srid=4326),
-                cap=donnees['cap'],
+                cap=cap,
                 sous_type=donnees['sous_type'],
             )
         except QuotaDepasse:
@@ -1057,3 +1038,26 @@ class SmsEntrantView(APIView):
 
     def post(self, request):
         return Response(SMS_INDISPONIBLE, status=status.HTTP_501_NOT_IMPLEMENTED)
+
+
+# Au-dela, le cap envoye par le telephone contredit le sens dans lequel le
+# conducteur roule vraiment : c'est le cap du telephone qui est faux.
+ECART_CAP_TELEPHONE_MAX = 90
+
+
+def _cap_fiable(utilisateur, cap_telephone):
+    """Sens a enregistrer pour un signalement. Le cap instantane du telephone
+    est aleatoire a l'arret ou au pas (en bouchon, justement) ; le sens de la
+    trajectoire recente (dernieres positions de telemetrie) ne l'est pas.
+    Sans cap du telephone : celui de la trajectoire. Cap du telephone a plus
+    de ECART_CAP_TELEPHONE_MAX degres de la trajectoire : celui de la
+    trajectoire. Sinon (ou sans trajectoire connue) : celui du telephone."""
+    from trips.services import derniere_position
+    from trips.services.sur_trajet import ecart_caps
+
+    trajectoire = derniere_position.cap_de_trajectoire(utilisateur.id)
+    if trajectoire is None:
+        return cap_telephone
+    if cap_telephone is None or ecart_caps(cap_telephone, trajectoire) > ECART_CAP_TELEPHONE_MAX:
+        return round(trajectoire) % 360
+    return cap_telephone

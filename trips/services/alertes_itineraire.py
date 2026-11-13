@@ -22,20 +22,20 @@ import logging
 
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
-from django.contrib.gis.geos import LineString, Point
+from django.contrib.gis.geos import Point
 from django.contrib.gis.measure import D
 from django.core.cache import cache
 from django.utils import timezone
 
+from .sur_trajet import COULOIR_M, Trace  # couloir commun (cf. sur_trajet)
+
 logger = logging.getLogger(__name__)
 
-COULOIR_M = 30
 DELAI_INCIDENT_S = 120
 DELAI_CONDUCTEUR_S = 60
 MAX_TRAJETS = 300
 AGE_MAX_POSITION_S = 300
 CONFIANCE_MIN = 0.5  # en dessous, le signalement pese trop peu pour justifier un recalcul
-METRES_PAR_DEGRE = 111_320
 TYPE_MESSAGE = 'route.recheck'
 
 
@@ -81,7 +81,7 @@ def alerter_conducteurs(incident_id) -> int:
     nb = 0
     for trajet in trajets:
         position = derniere_position.lire(trajet.utilisateur_id, AGE_MAX_POSITION_S)
-        if position is not None and not _devant(trajet, position, point):
+        if position is not None and not _devant(trajet, position, incident):
             continue  # deja passe : rien a recalculer
         if not cache.add(f'alerte:conducteur:{trajet.utilisateur_id}', 1, timeout=DELAI_CONDUCTEUR_S):
             continue
@@ -96,14 +96,12 @@ def alerter_conducteurs(incident_id) -> int:
     return nb
 
 
-def _devant(trajet, position, point) -> bool:
-    """L'incident est-il sur la partie qui reste a parcourir ?"""
+def _devant(trajet, position, incident) -> bool:
+    """L'incident est-il sur la partie qui reste a parcourir, dans son sens ?"""
     from .meilleur_itineraire import troncon_restant
 
     reste = troncon_restant(list(trajet.geometrie.coords), position)
-    if len(reste) < 2:
-        return False
-    return LineString(reste, srid=4326).distance(point) * METRES_PAR_DEGRE <= COULOIR_M
+    return len(reste) >= 2 and Trace(reste).contient_incident(incident)
 
 
 def planifier_alerte(incident_id) -> None:

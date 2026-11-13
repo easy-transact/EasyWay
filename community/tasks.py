@@ -78,7 +78,15 @@ def recaler_signalements_sans_voie():
         if arete is None or arete['destination_only'] or arete['distance_m'] > RAYON_MAX_HORS_ROUTE_M:
             continue
         incident.way_id_osm, incident.forward_osm = arete['way_id'], arete['forward']
-        incident.save(update_fields=['way_id_osm', 'forward_osm'])
+        champs = ['way_id_osm', 'forward_osm']
+        if incident.cap is not None:
+            from trips.services.client_trace_attributes import troncon_au_point
+
+            noeuds = troncon_au_point(incident.position.y, incident.position.x, incident.cap)
+            if noeuds:
+                incident.noeud_debut_osm, incident.noeud_fin_osm = noeuds
+                champs += ['noeud_debut_osm', 'noeud_fin_osm']
+        incident.save(update_fields=champs)
         invalider_cache_cellule(incident.cellule_h3_res8)
         nb += 1
     return nb
