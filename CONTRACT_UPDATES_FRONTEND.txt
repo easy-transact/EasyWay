@@ -521,3 +521,64 @@ signales, deja pris en compte par le calcul d'itineraire).
   - Nouveau type d'autorite "POMPIERS" (comme MAIRIE/POLICE) : leurs
     signalements officiels arrivent par les memes endpoints (official = true,
     official_source.type = "POMPIERS").
+
+
+22. CHANGEMENTS — suite des revues (routage, Eviter, signalements, trafic) (13/11/2026)
+
+  POST /api/routes/calculate/
+    - "avoid" : 20 points au maximum, "waypoints" : 25 au maximum, lat/lon
+      bornes (-90..90, -180..180). Au-dela : 400.
+    - Limite de debit : 300 calculs par heure et par compte (429 au-dela).
+    - Un point "avoid" a moins de 100 m du depart, de l'arrivee ou d'une etape
+      est ignore (sinon aucun chemin possible). Chaque itineraire renvoye
+      porte la liste des points ignores :
+        "avoid_ignored": [ {"lat", "lon", "reason": "TOO_CLOSE_TO_ENDPOINT"} ]
+      -> l'afficher ("Impossible d'eviter ce point, trop proche du depart").
+    - Aucun itineraire n'evite tous les points demandes (ex. le point coupe le
+      seul passage) : 422
+        {"code": "NO_ROUTE_WITH_AVOID", "detail": "...", "avoid_ignored": [...]}
+      au lieu d'une ligne droite. -> proposer de retirer un point a eviter.
+    - Sans "avoid", "aucun chemin" renvoie une liste vide (200), plus jamais
+      une ligne droite.
+
+  POST /api/trips/{id}/better-route/  et  .../alternative-routes/
+    - Nouveau champ facultatif "speed_kmh" (vitesse GPS actuelle). Sous
+      10 km/h, le cap ("heading") est ignore : a l'arret (bouchon) il est
+      aleatoire et faisait partir le nouvel itineraire par un demi-tour.
+      -> envoyer la vitesse GPS a chaque appel (l'appli l'a deja pour la
+         telemetrie). Sans ce champ, le serveur compare avec et sans cap.
+    - Valhalla en panne : jamais de ligne droite proposee ou imposee ; reponse
+      NO_BETTER (garder la route actuelle et reessayer), avec l'alerte de
+      fermeture devant si elle existe.
+
+  POST /api/telemetry/positions/
+    - Les positions horodatees de plus de 12 h dans le passe ou de plus de
+      5 min dans le futur sont ignorees (le reste du lot est garde). Un lot
+      entierement hors fenetre repond quand meme 202 : ne pas le renvoyer.
+    - lat/lon bornes comme ci-dessus.
+
+  POST /api/incidents/{id}/vote/
+    - Position recente EXIGEE : le votant doit avoir envoye une position de
+      trajet (telemetrie ou derniere position) depuis moins de 5 min, a moins
+      de 1 km du signalement. Sinon 400 {"code": "TOO_FAR_TO_VOTE"}.
+      -> ne proposer "Toujours la ? / Plus rien" que pendant un trajet, pres
+         du signalement.
+    - Limite de debit : 60 votes par heure et par compte (429 au-dela).
+
+  Signalements (GET incidents, WebSocket) : nouveau champ "contested"
+    true quand au moins 2 "Plus rien" ont fait passer le score sous zero. Un
+    signalement conteste n'agit plus sur les itineraires (ni detour, ni retard,
+    ni trafic) mais reste affiche. -> badge "Conteste", pour que d'autres
+    conducteurs tranchent.
+
+  REMPLACE la regle de la section 7 sur les routes barrees :
+    une route barree / inondation n'est evitee pour tous qu'une fois VALIDEE
+    (meme seuil que pour devenir visible de tous : score de confiance 3, ou 2
+    pour un auteur repute), validee par la moderation, ou officielle. Avant :
+    simple ralentissement. Les "Plus rien" font baisser le score : une
+    fermeture contestee est levee au calcul suivant, sans attendre son
+    expiration. (Une seule confirmation ne suffit plus.) Inondation et moto :
+    inchange (evitee des le premier signalement, sauf contestee).
+
+  Trafic : seuls les trajets en VOITURE ou TAXI mesurent le trafic en direct
+  (plus les bus, camions et utilitaires). Rien a changer cote appli.

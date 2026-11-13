@@ -88,10 +88,14 @@ _cache_index = {}
 
 
 def _index(chemin):
-    """Index mis en cache par process, invalide si le fichier change (le
-    rebuild nocturne recree traffic.tar : nouvelle date de modification)."""
+    """Index mis en cache par process, invalide si le fichier est REMPLACE
+    (reconstruction des tuiles : nouveau fichier, donc nouvel inode et/ou
+    nouvelle taille). Pas sur la date de modification : nos propres
+    ecritures par mmap la changent a chaque publication (toutes les 90 s), ce
+    qui faisait relire l'en-tete de toutes les tuiles a chaque fois."""
     try:
-        signature = (os.stat(chemin).st_mtime_ns, os.stat(chemin).st_size)
+        etat = os.stat(chemin)
+        signature = (etat.st_dev, etat.st_ino, etat.st_size)
     except OSError as exc:
         raise TraficIndisponible(str(exc)) from exc
     en_cache = _cache_index.get(chemin)

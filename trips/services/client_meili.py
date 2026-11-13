@@ -66,6 +66,12 @@ def tracer(points: list[dict], shape_match: str = 'map_snap', attributs=None) ->
             reponse = appeler(ATTRIBUTS_DEFAUT)
         reponse.raise_for_status()
     except requests.RequestException as exc:
+        if disjoncteur.est_requete_refusee(exc):
+            # Valhalla repond 400 quand le recalage echoue completement : meme
+            # sens qu'une correspondance vide (mauvaise trace, pas une panne).
+            # Ne pas lever : le consommateur acquitte les messages au lieu de
+            # rejouer indefiniment une trace que Valhalla refusera toujours.
+            return [], []
         disjoncteur.enregistrer_echec()
         raise ErreurMeili(str(exc)) from exc
 

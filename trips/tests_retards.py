@@ -15,7 +15,7 @@ from community.models import Incident, SousTypeIncident as S, StatutIncident, Ty
 
 from .models import PrevisionItineraire, Trajet
 from .polyline import encoder_polyline6
-from .services import retards_signalements
+from .services import retards_signalements, trafic_temps_reel
 
 # Deux itineraires de ~3,3 km vers l'est : le direct (latitude 4.05) et un
 # detour par le nord. Le direct est le plus rapide a vide.
@@ -93,7 +93,21 @@ class RetardsSignalementsTests(TestCase):
         self.assertEqual(self.calculer()[0]['delay_from_reports'], 0)
 
     def test_embouteillage_actif_deja_dans_le_trafic_en_direct_pour_la_voiture(self):
+        incident = self.signaler(T.EMBOUTEILLAGE, S.A_L_ARRET)
+        # Ecrit dans traffic.tar a la derniere publication : pas recompte.
+        cache.set(trafic_temps_reel.CLE_INCIDENTS_PUBLIES, [str(incident.id)], timeout=60)
+        self.assertEqual(self.calculer()[0]['delay_from_reports'], 0)
+
+    def test_embouteillage_actif_non_publie_compte_en_retard(self):
+        # Publication arretee (TRAFIC_TAR_PATH vide, tache en panne) : rien dans
+        # traffic.tar, l'embouteillage doit quand meme ralentir la route.
         self.signaler(T.EMBOUTEILLAGE, S.A_L_ARRET)
+        direct = next(r for r in self.calculer() if r['duration'] == 400)
+        self.assertGreater(direct['delay_from_reports'], 0)
+
+    def test_signalement_conteste_sans_effet(self):
+        # Deux "Plus rien" et score negatif : n'agit plus sur l'itineraire.
+        self.signaler(T.ACCIDENT, S.CARAMBOLAGE, score_confiance=-1, infirmations=2)
         self.assertEqual(self.calculer()[0]['delay_from_reports'], 0)
 
     def test_moto(self):
@@ -110,16 +124,32 @@ class RetardsSignalementsTests(TestCase):
         self.assertEqual(direct['vehicle_type'], 'MOTO')
 
     def test_route_barree_confirmee_exclue_sinon_ralentissement(self):
-        incident = self.signaler(T.VOIE_BLOQUEE, S.ROUTE_BARREE, confirmations=0)
+        # Une seule confirmation (score 1) ne suffit plus a fermer la route pour
+        # tous : il faut le seuil de validation (score 3), comme pour ACTIF.
+        incident = self.signaler(
+            T.VOIE_BLOQUEE, S.ROUTE_BARREE, confirmations=1, score_confiance=1, statut=StatutIncident.EN_ATTENTE,
+        )
         routes = self.calculer()
         self.assertNotIn('exclude_locations', self.options)
         self.assertGreater(next(r for r in routes if r['duration'] == 400)['delay_from_reports'], 0)
 
-        incident.confirmations = 1
-        incident.save(update_fields=['confirmations'])
+        incident.confirmations, incident.score_confiance = 3, 3
+        incident.save(update_fields=['confirmations', 'score_confiance'])
         cache.clear()
         self.calculer()
         self.assertEqual(self.options['exclude_locations'], [{'lat': 4.05, 'lon': 9.715}])
+
+    def test_route_barree_levee_par_les_votes_contraires(self):
+        # Validee par la communaute, puis trois "Plus rien" : plus exclue.
+        incident = self.signaler(T.VOIE_BLOQUEE, S.ROUTE_BARREE, confirmations=3, score_confiance=3)
+        self.calculer()
+        self.assertIn('exclude_locations', self.options)
+
+        incident.infirmations, incident.score_confiance = 3, 0
+        incident.save(update_fields=['infirmations', 'score_confiance'])
+        cache.clear()
+        self.calculer()
+        self.assertNotIn('exclude_locations', self.options)
 
     def test_signalement_tout_neuf_compte_moins(self):
         self.signaler(T.ACCIDENT, S.CARAMBOLAGE, score_confiance=0)
@@ -151,7 +181,9 @@ class ValidationParLaModerationTests(RetardsSignalementsTests):
     """Le back-office valide une route barree : evitee sans attendre les votes."""
 
     def test_route_barree_validee_par_le_staff_exclue(self):
-        incident = self.signaler(T.VOIE_BLOQUEE, S.ROUTE_BARREE, confirmations=0, statut=StatutIncident.EN_ATTENTE)
+        incident = self.signaler(
+            T.VOIE_BLOQUEE, S.ROUTE_BARREE, confirmations=0, score_confiance=0, statut=StatutIncident.EN_ATTENTE,
+        )
         self.calculer()
         self.assertNotIn('exclude_locations', self.options)  # non confirmee : simple ralentissement
 
@@ -172,7 +204,7 @@ class ValidationParLaModerationTests(RetardsSignalementsTests):
     def test_voie_bloquee_sans_sous_type_validee_exclue(self):
         # Cas du 28/10 (Logbessou) : signalee depuis la carte de test, sans
         # sous-type ni cap -- ignoree jusqu'ici, meme validee.
-        incident = self.signaler(T.VOIE_BLOQUEE, '', cap=None, confirmations=0)
+        incident = self.signaler(T.VOIE_BLOQUEE, '', cap=None, confirmations=0, score_confiance=0)
         routes = self.calculer()
         self.assertNotIn('exclude_locations', self.options)
         self.assertGreater(next(r for r in routes if r['duration'] == 400)['delay_from_reports'], 0)  # au moins ralentie
@@ -193,6 +225,9 @@ class ValidationParLaModerationTests(RetardsSignalementsTests):
     test_autre_sens_de_circulation_sans_effet = None
     test_police_et_radar_sans_effet = None
     test_embouteillage_actif_deja_dans_le_trafic_en_direct_pour_la_voiture = None
+    test_embouteillage_actif_non_publie_compte_en_retard = None
+    test_signalement_conteste_sans_effet = None
+    test_route_barree_levee_par_les_votes_contraires = None
     test_moto = None
     test_route_barree_confirmee_exclue_sinon_ralentissement = None
     test_signalement_tout_neuf_compte_moins = None

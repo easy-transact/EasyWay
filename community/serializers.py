@@ -41,6 +41,9 @@ class IncidentSerializer(serializers.ModelSerializer):
     # Signalement officiel (autorite) : l'appli affiche un badge "officiel" et
     # la source. `official_source` = {name, type} ou null.
     official = serializers.BooleanField(source='est_officiel', read_only=True)
+    # Conteste (au moins 2 "Plus rien" et score negatif) : n'agit plus sur les
+    # itineraires, mais reste affiche (badge) pour que d'autres tranchent.
+    contested = serializers.BooleanField(source='est_conteste', read_only=True)
     official_source = serializers.SerializerMethodField()
     starts_at = serializers.DateTimeField(source='debut_le', read_only=True, allow_null=True)
     note = serializers.CharField(read_only=True, allow_blank=True)
@@ -60,6 +63,7 @@ class IncidentSerializer(serializers.ModelSerializer):
             'confirmations', 'disputes', 'confidence_score', 'estimated_impact',
             'status', 'severity', 'expires_at', 'created_at', 'way_id', 'forward',
             'reporter_name', 'reporter_id', 'validations_count', 'official', 'official_source', 'starts_at', 'note',
+            'contested',
         ]
         read_only_fields = fields
 

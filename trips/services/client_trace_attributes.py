@@ -47,6 +47,8 @@ def attributs_trace(points: list[tuple[float, float]]) -> list[dict] | None:
         )
         reponse.raise_for_status()
     except requests.RequestException as exc:
+        if disjoncteur.est_requete_refusee(exc):
+            return None  # geometrie refusee (4xx) : aucune arete, pas une panne
         disjoncteur.enregistrer_echec()
         raise ErreurTraceAttributes(str(exc)) from exc
 

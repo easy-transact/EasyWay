@@ -6,7 +6,7 @@ from django.conf import settings
 from django.contrib.gis.db import models as gis_models
 from django.contrib.gis.geos import Point
 from django.db import models
-from django.db.models import F
+from django.db.models import F, Q
 from django.utils import timezone
 
 from accounts.models import Utilisateur
@@ -190,6 +190,15 @@ POINTS_PAR_VALIDATION_TIERCE = Decimal('0.25')
 # faux coutent nettement plus cher que les bons ne rapportent. Multiple de
 # 0,1 (score_reputation a une seule decimale).
 MALUS_REPUTATION_SIGNALEMENT_FAUX = Decimal('1.0')
+# Signalement CONTESTE : au moins INFIRMATIONS_MIN_CONTESTE "Plus rien" et un
+# score repasse sous zero. Il n'agit plus sur l'itineraire (fermeture, retard,
+# risque, traffic.tar) mais reste visible pour que d'autres tranchent. Jamais
+# pour un signalement valide par la moderation ou officiel (autorite).
+INFIRMATIONS_MIN_CONTESTE = 2
+Q_CONTESTE = (
+    Q(infirmations__gte=INFIRMATIONS_MIN_CONTESTE, score_confiance__lt=0)
+    & Q(valide_par_staff=False, organisation__isnull=True)
+)
 
 
 class Incident(models.Model):
@@ -332,6 +341,26 @@ class Incident(models.Model):
         if self.auteur.score_reputation >= SEUIL_REPUTATION_PALIER_REDUCTION:
             return SEUIL_CONFIANCE_VALIDATION_REDUITE
         return SEUIL_CONFIANCE_VALIDATION
+
+    @property
+    def est_conteste(self) -> bool:
+        """Cf. Q_CONTESTE (meme regle, cote Python)."""
+        if self.valide_par_staff or self.est_officiel:
+            return False
+        return self.infirmations >= INFIRMATIONS_MIN_CONTESTE and self.score_confiance < 0
+
+    @property
+    def confirme_pour_fermeture(self) -> bool:
+        """Seuil UNIQUE pour retirer une route du graphe de routage de tous les
+        utilisateurs : le meme score pondere que pour devenir ACTIF
+        (seuil_validation), ou une validation par la moderation, ou un
+        signalement officiel. Le score baisse a chaque "Plus rien" : une
+        fermeture contestee est donc levee sans attendre l'expiration. En
+        dessous, une route barree reste un fort ralentissement (mecanisme
+        FERMETURE non confirme, cf. trips.services.retards_signalements)."""
+        if self.valide_par_staff or self.est_officiel:
+            return True
+        return not self.est_conteste and self.score_confiance >= self.seuil_validation()
 
     def confirmer(self, vote: 'Vote'):
         # F() plutot qu'un += sur vote.votant : l'instance de l'appelant

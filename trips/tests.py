@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone as dt_timezone
+from datetime import datetime, timedelta, timezone as dt_timezone
 from decimal import Decimal
 from unittest.mock import MagicMock, Mock, call, patch
 
@@ -379,6 +379,23 @@ class DisjoncteurValhallaTests(TestCase):
         self.assertEqual(post_simule.call_count, SEUIL_ECHECS + 1)  # pas de retry du 4xx
         self.assertIsNone(cache.get(CLE_OUVERT_JUSQU_A))  # disjoncteur ferme
 
+    def test_400_des_autres_clients_valhalla_ne_compte_pas_comme_panne(self):
+        # Meili, locate et trace_attributes : un 4xx est une reponse "vide"
+        # normale (trace impossible a recaler...), jamais un echec du disjoncteur.
+        from .services import client_meili, client_trace_attributes
+
+        reponse_400 = Mock(status_code=400)
+        reponse_400.raise_for_status.side_effect = requests.exceptions.HTTPError(response=reponse_400)
+        for _ in range(SEUIL_ECHECS + 1):
+            with patch('trips.services.client_meili.requests.post', return_value=reponse_400):
+                self.assertEqual(client_meili.tracer([{'lat': 4.0, 'lon': 9.7, 'time': 0}] * 2), ([], []))
+            with patch('trips.services.client_locate.requests.post', return_value=reponse_400):
+                self.assertIsNone(client_locate.localiser(4.0, 9.7))
+            with patch('trips.services.client_trace_attributes.requests.post', return_value=reponse_400):
+                self.assertIsNone(client_trace_attributes.attributs_trace([(9.7, 4.0), (9.71, 4.01)]))
+        self.assertIsNone(cache.get(CLE_ECHECS))
+        self.assertIsNone(cache.get(CLE_OUVERT_JUSQU_A))
+
     def test_succes_reinitialise_le_compteur_dechecs(self):
         client = ClientValhalla()
         cache.set(CLE_ECHECS, SEUIL_ECHECS - 1, timeout=60)
@@ -682,6 +699,28 @@ class RedisTraficFactice:
         for membre in membres:
             self.zset.pop(str(membre), None)
 
+    def pipeline(self, transaction=True):
+        return _PipelineFactice(self)
+
+
+class _PipelineFactice:
+    """Pipeline minimal : met les hgetall en file, execute() les rejoue."""
+
+    def __init__(self, connexion):
+        self.connexion, self.cles = connexion, []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def hgetall(self, cle):
+        self.cles.append(cle)
+
+    def execute(self):
+        return [self.connexion.hgetall(cle) for cle in self.cles]
+
 
 def _bucket(graph_id, bucket_epoch, **par_trajet):
     """par_trajet : trajet_id=(distance_km, duree_s). La vitesse d'un conducteur
@@ -721,6 +760,12 @@ class TraficTempsReelTests(SimpleTestCase):
     def test_publier_mesure_prioritaire_et_effacement_des_perimees(self):
         import tempfile
 
+        cache.clear()  # aretes de signalements memorisees par un test precedent
+        # Vitesse typique du creneau (historique) : arete 3 sans mesure ni signalement.
+        patcheur = patch.object(service_trafic, 'vitesses_typiques_creneau', return_value={_graph_id(3): 22})
+        patcheur.start()
+        self.addCleanup(patcheur.stop)
+
         with tempfile.TemporaryDirectory() as dossier:
             chemin = _creer_traffic_tar(dossier)
             connexion = RedisTraficFactice(
@@ -730,16 +775,26 @@ class TraficTempsReelTests(SimpleTestCase):
             tuiles_trafic.ecrire_vitesses(chemin, {_graph_id(5): 30})
             connexion.zset[str(_graph_id(5))] = self.MAINTENANT - 1200
 
-            with patch.object(trafic_temps_reel, 'vitesses_signalements', return_value={
+            with patch.object(trafic_temps_reel, '_vitesses_et_incidents_signalements', return_value=({
                 _graph_id(1): 5,  # mesure disponible : le signalement ne l'emporte pas
                 _graph_id(2): 15,
-            }):
+            }, {'incident-a'})):
                 compteurs = trafic_temps_reel.publier(chemin, connexion, self.MAINTENANT)
 
-            self.assertEqual(compteurs, {'ecrites': 2, 'effacees': 1})
+            self.assertEqual(compteurs, {'ecrites': 3, 'effacees': 1})
             self.assertEqual(_lire_vitesse(chemin, 1), (True, 40))
             self.assertEqual(_lire_vitesse(chemin, 2), (True, 16))
+            self.assertEqual(_lire_vitesse(chemin, 3)[0], True)  # vitesse typique du creneau publiee
             self.assertEqual(_lire_vitesse(chemin, 5)[0], False)
+            # Embouteillages ecrits : memorises pour retards_signalements.
+            self.assertEqual(trafic_temps_reel.incidents_publies(), {'incident-a'})
+
+            # Tour suivant : le signalement a disparu (retire, expire, conteste).
+            # Son arete est effacee tout de suite, sans attendre DUREE_VALIDITE_S.
+            with patch.object(trafic_temps_reel, '_vitesses_et_incidents_signalements', return_value=({}, set())):
+                trafic_temps_reel.publier(chemin, connexion, self.MAINTENANT + 90)
+            self.assertEqual(_lire_vitesse(chemin, 2)[0], False)
+            self.assertEqual(_lire_vitesse(chemin, 1), (True, 40))  # mesure GPS encore valable
             self.assertNotIn(str(_graph_id(5)), connexion.zset)
 
 
@@ -909,6 +964,35 @@ class TrajetApiTests(TestCase):
         self.assertEqual(reponse.status_code, 200)
         options_recues = calculer_simule.call_args.kwargs.get('options') or calculer_simule.call_args.args[2]
         self.assertEqual(options_recues['exclude_locations'], [{'lat': 4.05, 'lon': 9.70}])
+
+    def test_avoid_trop_pres_du_depart_ignore_et_signale(self):
+        # Point a ~30 m du depart : non transmis a Valhalla, renvoye dans avoid_ignored.
+        with patch('trips.services.client_valhalla.ClientValhalla.calculer_itineraires') as calculer_simule:
+            calculer_simule.return_value = [trip_factice()['trip']]
+            reponse = self.client.post(
+                reverse('trips:calculer-itineraire'),
+                {'origin_lat': 4.0483, 'origin_lon': 9.7043, 'destination_lat': 4.0469, 'destination_lon': 9.6970,
+                 'avoid': [{'lat': 4.0485, 'lon': 9.7045}, {'lat': 4.05, 'lon': 9.70}]},
+                content_type='application/json', **self.jetons,
+            )
+        self.assertEqual(reponse.status_code, 200)
+        options_recues = calculer_simule.call_args.kwargs.get('options') or calculer_simule.call_args.args[2]
+        self.assertEqual(options_recues['exclude_locations'], [{'lat': 4.05, 'lon': 9.70}])
+        self.assertEqual(
+            reponse.json()[0]['avoid_ignored'],
+            [{'lat': 4.0485, 'lon': 9.7045, 'reason': 'TOO_CLOSE_TO_ENDPOINT'}],
+        )
+
+    def test_aucun_chemin_avec_avoid_renvoie_422(self):
+        with patch('trips.services.client_valhalla.ClientValhalla.calculer_itineraires', return_value=[]):
+            reponse = self.client.post(
+                reverse('trips:calculer-itineraire'),
+                {'origin_lat': 4.0483, 'origin_lon': 9.7043, 'destination_lat': 4.0469, 'destination_lon': 9.6970,
+                 'avoid': [{'lat': 4.05, 'lon': 9.70}]},
+                content_type='application/json', **self.jetons,
+            )
+        self.assertEqual(reponse.status_code, 422)
+        self.assertEqual(reponse.json()['code'], 'NO_ROUTE_WITH_AVOID')
 
     def test_avoid_borne_en_nombre_et_coordonnees(self):
         # Trop de points, ou coordonnees hors bornes : 400 du serializer, sans
@@ -1150,15 +1234,43 @@ class TelemetriePositionsApiTests(TestCase):
         self.trajet = _trajet_actif_pour(self.utilisateur)
 
     def _lot(self, **overrides):
+        # Horodatages recents : les positions hors fenetre (cf.
+        # RETARD_MAX_TELEMETRIE) sont ecartees par le serializer.
+        t0 = timezone.now() - timedelta(minutes=1)
         payload = {
             'trip': str(self.trajet.id),
             'positions': [
-                {'lat': 4.0483, 'lon': 9.7043, 'speed_kmh': 32.5, 'heading': 180, 'timestamp': '2026-01-01T10:00:00Z'},
-                {'lat': 4.0480, 'lon': 9.7040, 'timestamp': '2026-01-01T10:00:05Z'},
+                {'lat': 4.0483, 'lon': 9.7043, 'speed_kmh': 32.5, 'heading': 180, 'timestamp': t0.isoformat()},
+                {'lat': 4.0480, 'lon': 9.7040, 'timestamp': (t0 + timedelta(seconds=5)).isoformat()},
             ],
         }
         payload.update(overrides)
         return payload
+
+    def test_positions_hors_fenetre_horaire_ecartees(self):
+        maintenant = timezone.now()
+        lot = self._lot(positions=[
+            {'lat': 4.0483, 'lon': 9.7043, 'timestamp': (maintenant - timedelta(days=2)).isoformat()},
+            {'lat': 4.0482, 'lon': 9.7042, 'timestamp': (maintenant + timedelta(hours=1)).isoformat()},
+            {'lat': 4.0480, 'lon': 9.7040, 'timestamp': (maintenant - timedelta(seconds=10)).isoformat()},
+        ])
+        with patch('trips.views.ProducteurRedisStreams') as ClasseProducteur:
+            reponse = self.client.post(
+                reverse('trips:telemetrie-positions'), lot, content_type='application/json', **self.jetons
+            )
+        self.assertEqual(reponse.status_code, 202)
+        self.assertEqual(ClasseProducteur.return_value.publier.call_count, 1)  # seule la position recente
+
+    def test_lot_entierement_hors_fenetre_accepte_sans_rien_publier(self):
+        lot = self._lot(positions=[
+            {'lat': 4.0483, 'lon': 9.7043, 'timestamp': '2020-01-01T10:00:00Z'},
+        ])
+        with patch('trips.views.ProducteurRedisStreams') as ClasseProducteur:
+            reponse = self.client.post(
+                reverse('trips:telemetrie-positions'), lot, content_type='application/json', **self.jetons
+            )
+        self.assertEqual(reponse.status_code, 202)
+        ClasseProducteur.return_value.publier.assert_not_called()
 
     def test_non_authentifie_rejete(self):
         reponse = self.client.post(

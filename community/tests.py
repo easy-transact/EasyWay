@@ -886,6 +886,9 @@ class InvalidationCacheProchesTests(TestCase):
         confirmations_avant = premiere_lecture[0]['confirmations']
         self.assertIsNotNone(cache.get(cle_cache_cellule(self.incident.cellule_h3_res8)))
 
+        from trips.services import derniere_position
+
+        derniere_position.memoriser(self.votant.id, self.incident.position.y, self.incident.position.x)
         self.client.post(
             reverse('community:incident-vote', kwargs={'id': self.incident.id}),
             {'direction': 'confirm'}, content_type='application/json', **self.jetons_votant,
@@ -988,6 +991,11 @@ class VoteApiTests(TestCase):
         self.auteur = creer_utilisateur('auteur@easyway.local')
         self.votant = creer_utilisateur('votant@easyway.local')
         self.jetons_votant = connecter(self.client, self.votant.telephone)
+        # Vote exige une position recente pres de l'incident (cf.
+        # VoterIncidentView) : tous les votants de ces tests sont sur place.
+        patcheur = patch('trips.services.derniere_position.lire', return_value=(DOUALA_LAT, DOUALA_LON))
+        patcheur.start()
+        self.addCleanup(patcheur.stop)
 
     def _voter(self, incident, sens, jetons=None):
         return self.client.post(
@@ -1087,6 +1095,42 @@ class VoteApiTests(TestCase):
         self._voter(incident, 'confirm', jetons=connecter(self.client, votant_fort.telephone))
         incident.refresh_from_db()
         self.assertEqual(incident.score_confiance, votant_fort.poids_de_vote())
+
+
+class VoteProximiteTests(TestCase):
+    """Vote refuse sans position recente pres de l'incident (confirmer une
+    route barree a Yaounde depuis Douala ne doit pas etre possible)."""
+
+    def setUp(self):
+        cache.clear()
+        self.incident = creer_incident(creer_utilisateur('auteur@easyway.local'))
+        self.votant = creer_utilisateur('votant@easyway.local')
+        self.jetons = connecter(self.client, self.votant.telephone)
+
+    def _voter(self):
+        return self.client.post(
+            reverse('community:incident-vote', kwargs={'id': self.incident.id}),
+            {'direction': 'confirm'}, content_type='application/json', **self.jetons,
+        )
+
+    def test_sans_position_recente_refuse(self):
+        reponse = self._voter()
+        self.assertEqual(reponse.status_code, 400)
+        self.assertEqual(reponse.json()['code'], 'TOO_FAR_TO_VOTE')
+        self.assertFalse(Vote.objects.exists())
+
+    def test_trop_loin_refuse(self):
+        from trips.services import derniere_position
+
+        derniere_position.memoriser(self.votant.id, DOUALA_LAT + 0.05, DOUALA_LON)  # ~5,5 km
+        self.assertEqual(self._voter().status_code, 400)
+
+    def test_a_proximite_accepte(self):
+        from trips.services import derniere_position
+
+        derniere_position.memoriser(self.votant.id, DOUALA_LAT + 0.002, DOUALA_LON)  # ~220 m
+        self.assertEqual(self._voter().status_code, 200)
+        self.assertEqual(Vote.objects.count(), 1)
 
 
 class MesSignalementsApiTests(TestCase):

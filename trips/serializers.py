@@ -1,4 +1,7 @@
+from datetime import timedelta
+
 from django.contrib.gis.geos import LineString, Point
+from django.utils import timezone
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
@@ -424,6 +427,12 @@ class MeilleurItineraireSerializer(serializers.Serializer):
         required=False, allow_null=True, min_value=0, max_value=359, default=None,
         help_text='Cap actuel : evite un demi-tour en tete du nouvel itineraire.',
     )
+    speed_kmh = serializers.FloatField(
+        required=False, allow_null=True, min_value=0, default=None,
+        help_text="Vitesse GPS actuelle (meme regle que origin_speed_kmh de routes/calculate) : "
+                  "sous 10 km/h le cap est ignore (aleatoire a l'arret, ex. dans un bouchon) ; "
+                  "absente, le calcul avec cap est compare a un calcul sans cap.",
+    )
     remaining_waypoints = PointEvitementSerializer(
         many=True, required=False, default=list, max_length=MAX_ETAPES,
         help_text='Etapes pas encore atteintes, dans l\'ordre (vide si aucune).',
@@ -483,14 +492,20 @@ class NoterTrajetSerializer(serializers.Serializer):
 
 
 LIMITE_POSITIONS_PAR_LOT = 500
+# Fenetre acceptee pour l'horodatage du telephone. Un lot envoye apres une
+# coupure reseau peut arriver avec des heures de retard (garde) ; au-dela, ou
+# dans le futur (horloge du telephone fausse), la position creerait un bucket
+# de trafic hors fenetre : ecartee.
+RETARD_MAX_TELEMETRIE = timedelta(hours=12)
+AVANCE_MAX_TELEMETRIE = timedelta(minutes=5)
 
 
 class PositionTelemetrieSerializer(serializers.Serializer):
     """Une position GPS du lot -- jamais persistee telle quelle (cf.
     TelemetriePositionsSerializer)."""
 
-    lat = serializers.FloatField()
-    lon = serializers.FloatField()
+    lat = serializers.FloatField(min_value=-90, max_value=90)
+    lon = serializers.FloatField(min_value=-180, max_value=180)
     speed_kmh = serializers.FloatField(required=False, allow_null=True, min_value=0, source='vitesse_kmh')
     heading = serializers.IntegerField(required=False, allow_null=True, min_value=0, max_value=359, source='cap')
     timestamp = serializers.DateTimeField(source='horodatage')
@@ -519,7 +534,14 @@ class TelemetriePositionsSerializer(serializers.Serializer):
     def validate_positions(self, positions):
         if len(positions) > LIMITE_POSITIONS_PAR_LOT:
             raise serializers.ValidationError(f'Maximum {LIMITE_POSITIONS_PAR_LOT} positions per batch.')
-        return positions
+        # Positions hors fenetre ecartees une a une, sans rejeter le lot : les
+        # autres restent exploitables. La liste peut donc devenir vide (la vue
+        # repond alors 202 sans rien publier).
+        maintenant = timezone.now()
+        return [
+            p for p in positions
+            if maintenant - RETARD_MAX_TELEMETRIE <= p['horodatage'] <= maintenant + AVANCE_MAX_TELEMETRIE
+        ]
 
 
 class ZoneVitesseCreationSerializer(serializers.Serializer):

@@ -72,6 +72,8 @@ def localiser(lat: float, lon: float, cap: int | None = None) -> dict | None:
         )
         reponse.raise_for_status()
     except requests.RequestException as exc:
+        if disjoncteur.est_requete_refusee(exc):
+            return None  # requete refusee (4xx) : aucune arete, pas une panne
         disjoncteur.enregistrer_echec()
         raise ErreurLocate(str(exc)) from exc
 

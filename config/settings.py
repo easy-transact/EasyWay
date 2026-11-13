@@ -182,6 +182,9 @@ REST_FRAMEWORK = {
         # essais de l'utilisateur), mais borne pour qu'un seul compte ne sature
         # pas Valhalla. A ajuster avec l'usage reel.
         'calcul-itineraire': '300/hour',
+        # Votes sur les signalements (confirmer / "Plus rien") : chaque
+        # confirmation rapporte des points et pese sur les fermetures de route.
+        'vote-incident': '60/hour',
         # Repond existe / n'existe pas : bloque l'enumeration de comptes en masse.
         'verification-existence': '20/hour',
         # Invitations de membres d'agence : chaque appel envoie un email.
@@ -441,6 +444,10 @@ CELERY_BEAT_SCHEDULE = {
         # Un bouchon doit influencer le routage en 1-2 min ; le bucket en
         # cours est lu tel quel, pas besoin d'attendre sa fermeture.
         'schedule': 90.0,
+    },
+    'surveiller-trafic-temps-reel': {
+        'task': 'trips.tasks.surveiller_trafic_temps_reel',
+        'schedule': 300.0,
     },
 }
 

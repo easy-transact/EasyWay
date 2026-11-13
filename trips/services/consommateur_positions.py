@@ -53,6 +53,7 @@ MARGE_DEPART_ARRIVEE_M = 200
 # Arret plus long que ca (sans avancer) : pause (livraison, panne), pas un
 # bouchon -- l'intervalle est ignore plutot que de compter 0 km/h a tort.
 DUREE_ARRET_MAX_S = 3 * 60
+VEHICULES_MESURANT_LE_TRAFIC = {'VOITURE', 'TAXI'}  # cf. _infos_trajet
 PREFIXE_ACCUMULATEUR = 'trafic:accumulateur'
 ENSEMBLE_BUCKETS_ACTIFS = 'trafic:buckets:actifs'
 TAILLE_BUCKET_S = 5 * 60
@@ -139,10 +140,10 @@ class ConsommateurPositions:
             logger.info('Meili indisponible, %d positions laissees en pending: %s', len(ids), exc)
             return []
 
-        extremites, moto = self._infos_trajet(paires[0][1]['trajet_id'])
-        # Une moto remonte les files : sa vitesse dans un bouchon ferait croire
-        # la route fluide aux voitures (traffic.tar est unique, cf. MOTO_TRAFIC_EN_DIRECT).
-        if not moto:
+        extremites, exclu = self._infos_trajet(paires[0][1]['trajet_id'])
+        # Moto, bus, camion, utilitaire : leur vitesse ne represente pas celle
+        # d'une voiture (traffic.tar est unique, cf. MOTO_TRAFIC_EN_DIRECT).
+        if not exclu:
             self._accumuler_vitesses(edges, matched_points, paires, extremites)
         # Etat des routes : passages par tranche de 100 m. Une erreur ici ne
         # doit jamais bloquer le trafic temps reel (messages acquittes quand meme).
@@ -154,10 +155,12 @@ class ConsommateurPositions:
 
     @staticmethod
     def _infos_trajet(trajet_id):
-        """([(lat, lon)] du depart et de l'arrivee, trajet a moto ?) --
-        ([], False) si le trajet est inconnu."""
-        from accounts.models import TypeVehicule
-
+        """([(lat, lon)] du depart et de l'arrivee, vehicule exclu de la mesure
+        du trafic ?) -- ([], False) si le trajet est inconnu. Seuls VOITURE et
+        TAXI (ou type non renseigne) mesurent le trafic : une moto remonte les
+        files, un bus s'arrete souvent, un camion est lent en cote, un
+        utilitaire de livraison stationne -- avec NB_MIN_CONDUCTEURS = 2, un
+        bus et un camion suffiraient a publier un faux bouchon pour tous."""
         from ..models import Trajet
 
         try:
@@ -170,7 +173,7 @@ class ConsommateurPositions:
             return [], False
         extremites = [(p.y, p.x) for p in (trajet['position_origine'], trajet['position_destination']) if p is not None]
         vehicule = trajet['type_vehicule'] or trajet['utilisateur__type_vehicule']
-        return extremites, vehicule == TypeVehicule.MOTO
+        return extremites, bool(vehicule) and vehicule not in VEHICULES_MESURANT_LE_TRAFIC
 
     @staticmethod
     def _vitesse_max(arete):

@@ -110,6 +110,30 @@ def vitesses_typiques(identifiants, jour_semaine, heure_jour):
     }
 
 
+# Vitesse typique publiee dans traffic.tar (cf. trafic_temps_reel.publier) a
+# partir de ce nombre d'echantillons sur le creneau (meme jour de semaine, meme
+# heure, FENETRE_HISTORIQUE) : sinon un passage isole un dimanche matin
+# deviendrait "la" vitesse typique. Pas mesure sur donnees reelles, a ajuster.
+NB_MIN_ECHANTILLONS_TYPIQUE = 10
+
+
+def vitesses_typiques_creneau(moment=None) -> dict:
+    """{arete: vitesse typique km/h} pour TOUTES les aretes qui ont assez
+    d'historique sur le creneau courant (jour de semaine + heure, fuseau de
+    Douala) -- une seule requete groupee."""
+    local = (moment or timezone.now()).astimezone(FUSEAU_TRAFIC)
+    agregats = (
+        EchantillonVitesse.objects.filter(
+            jour_semaine=local.weekday(), heure_jour=local.hour,
+            debut_intervalle__gte=timezone.now() - FENETRE_HISTORIQUE,
+        )
+        .values('identifiant_arete')
+        .annotate(somme_ponderee=Sum(F('vitesse_moyenne') * F('nombre_echantillons')), poids=Sum('nombre_echantillons'))
+        .filter(poids__gte=NB_MIN_ECHANTILLONS_TYPIQUE)
+    )
+    return {a['identifiant_arete']: float(a['somme_ponderee'] / a['poids']) for a in agregats}
+
+
 def niveau_relatif(vitesse_recente_kmh, vitesse_typique_kmh) -> str:
     if not vitesse_recente_kmh or not vitesse_typique_kmh:
         return NiveauTrafic.NORMAL  # pas assez d'historique pour cette arete -- honnete plutot que de deviner

@@ -29,6 +29,25 @@ logger = logging.getLogger(__name__)
 MARGE_FLUSH_S = SEUIL_INACTIVITE_MS / 1000
 
 
+def _verrou(nom, duree_s):
+    """Verrou Redis (cache.add = SET NX avec expiration) : une passe qui dure
+    plus que la cadence de Celery Beat ne se chevauche pas avec la suivante
+    (deux ecritures concurrentes dans traffic.tar, deux lectures du meme
+    flux). Expire seul si le worker meurt en cours de passe."""
+    from django.core.cache import cache
+
+    cle = f'verrou:tache:{nom}'
+    if not cache.add(cle, 1, timeout=duree_s):
+        return None
+    return cle
+
+
+def _liberer(cle):
+    from django.core.cache import cache
+
+    cache.delete(cle)
+
+
 @shared_task
 def consommer_positions():
     """Celery Beat, cadence courte (cf. CELERY_BEAT_SCHEDULE) : une passe de
@@ -37,8 +56,14 @@ def consommer_positions():
     dans le groupe Redis Streams. Un retard de consommation degrade
     uniquement la fraicheur du trafic -- jamais une erreur, POST
     /api/telemetry/positions/ retourne 202 quel que soit l'etat de cette tache."""
-    consommateur = ConsommateurPositions(nom_consommateur=f'celery-{os.getpid()}')
-    return consommateur.consommer()
+    verrou = _verrou('consommer_positions', 120)
+    if verrou is None:
+        return None  # passe precedente encore en cours
+    try:
+        consommateur = ConsommateurPositions(nom_consommateur=f'celery-{os.getpid()}')
+        return consommateur.consommer()
+    finally:
+        _liberer(verrou)
 
 
 @shared_task
@@ -89,12 +114,50 @@ def publier_trafic_temps_reel():
     chemin = settings.TRAFIC_TAR_PATH
     if not chemin:
         return None
+    verrou = _verrou('publier_trafic_temps_reel', 300)
+    if verrou is None:
+        return None  # passe precedente encore en cours (Valhalla lent)
     maintenant = int(datetime.now(tz=dt_timezone.utc).timestamp())
     try:
         return trafic_temps_reel.publier(chemin, connexion_redis_telemetrie(), maintenant)
     except TraficIndisponible as exc:
         logger.warning('traffic.tar indisponible, trafic temps reel non publie: %s', exc)
         return None
+    finally:
+        _liberer(verrou)
+
+
+# Au-dela, le trafic temps reel est considere en panne (publication toutes les 90 s).
+PUBLICATION_EN_RETARD_S = 10 * 60
+
+
+@shared_task
+def surveiller_trafic_temps_reel():
+    """Celery Beat, toutes les 5 min : chaque etape du trafic se degrade en
+    silence (par choix, le routage continue sans), donc rien ne montrait
+    qu'il ne marchait plus. Notifie le staff (une seule notification non lue
+    a la fois, regroupee) si la derniere publication reussie est trop vieille
+    ou si des positions attendent depuis trop longtemps dans le flux."""
+    if not settings.TRAFIC_TAR_PATH:
+        return None
+    from ads_admin.models import NiveauNotification, TypeNotification
+    from ads_admin.services import notifier
+
+    maintenant = int(datetime.now(tz=dt_timezone.utc).timestamp())
+    etat = trafic_temps_reel.sante_trafic(connexion_redis_telemetrie(), maintenant)
+    problemes = []
+    age = etat['last_publication_age_s']
+    if age is None or age > PUBLICATION_EN_RETARD_S:
+        problemes.append('aucune publication reussie' if age is None else 'aucune publication reussie depuis plus de 10 min')
+    if (etat['oldest_pending_age_s'] or 0) > PUBLICATION_EN_RETARD_S:
+        problemes.append(f"{etat['pending_messages']} positions en attente de traitement")
+    if problemes:
+        notifier(
+            TypeNotification.TRAFIC, 'Trafic temps reel en panne', texte='; '.join(problemes).capitalize() + '.',
+            lien='/insights/traffic-health', niveau=NiveauNotification.DANGER, cle='trafic:panne',
+            titre_groupe=lambda n: f'Trafic temps reel en panne ({n} alertes)',
+        )
+    return etat
 
 
 def _flusher_un_bucket(connexion, cle, identifiant_arete, bucket_epoch) -> bool:

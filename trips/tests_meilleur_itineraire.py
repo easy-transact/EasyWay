@@ -172,3 +172,19 @@ class PointsEvitesEnCoursDeRouteTests(TestCase):
                 )
             self.assertEqual(reponse.status_code, 200, reponse.content)
             self.assertEqual(Service.return_value.calculer.call_args.kwargs['eviter'], [(4.05, 9.72)])
+
+    def test_vitesse_transmise_et_cap_verifie_si_inconnue(self):
+        for corps, vitesse, verifier in (
+            ({'speed_kmh': 3}, 3, False),   # a l'arret : calculer() ignorera le cap
+            ({}, None, True),               # vitesse inconnue : cap compare a un calcul sans cap
+        ):
+            with patch('trips.services.meilleur_itineraire.ServiceItineraire') as Service:
+                Service.return_value.calculer.return_value = [candidat(ROUTE_SUIVIE, 300, 'suivie')]
+                reponse = self.client.post(
+                    reverse('trips:trajet-meilleur-itineraire', kwargs={'id': self.trajet.id}),
+                    {'lat': 4.05, 'lon': 9.705, 'heading': 270, **corps},
+                    content_type='application/json', **self.jetons,
+                )
+            self.assertEqual(reponse.status_code, 200, reponse.content)
+            kwargs = Service.return_value.calculer.call_args.kwargs
+            self.assertEqual((kwargs['vitesse_origine_kmh'], kwargs['verifier_cap']), (vitesse, verifier))

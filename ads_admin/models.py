@@ -109,6 +109,7 @@ class TypeNotification(models.TextChoices):
     ATTENTE = 'ATTENTE', "Liste d'attente"
     IMPORT = 'IMPORT', 'Import'
     PUB = 'PUB', 'Publicite'
+    TRAFIC = 'TRAFIC', 'Trafic temps reel'
 
 
 class NiveauNotification(models.TextChoices):

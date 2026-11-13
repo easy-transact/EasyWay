@@ -7,9 +7,11 @@ seulement en corriger la duree apres coup (cf. service_trafic.py).
 Sources, par ordre de priorite sur une meme arete :
   1. positions GPS deja recalees par ConsommateurPositions (Meili) :
      mediane des vitesses par conducteur, a partir de NB_MIN_CONDUCTEURS ;
-  2. signalements d'embouteillage actifs, la ou rien n'est mesure.
+  2. signalements d'embouteillage actifs, la ou rien n'est mesure ;
+  3. vitesse typique du creneau (EchantillonVitesse, meme jour et heure),
+     si l'historique est suffisant.
 Une arete non rafraichie depuis DUREE_VALIDITE_S est effacee : Valhalla
-retombe alors sur l'historique puis la vitesse de la classe de route.
+retombe alors sur la vitesse de la classe de route.
 """
 
 import logging
@@ -20,7 +22,7 @@ from collections import defaultdict
 from django.core.cache import cache
 from django.utils import timezone
 
-from community.models import Incident, SousTypeIncident, StatutIncident, TypeIncident
+from community.models import Q_CONTESTE, Incident, SousTypeIncident, StatutIncident, TypeIncident
 
 from . import client_locate, client_meili, tuiles_trafic
 from .consommateur_positions import (
@@ -34,8 +36,19 @@ logger = logging.getLogger(__name__)
 
 FENETRE_TEMPS_REEL_S = 5 * 60
 NB_MIN_CONDUCTEURS = 2  # un seul vehicule lent (livraison, panne) ne fait pas un bouchon
-DUREE_VALIDITE_S = 15 * 60
+# Une mesure non rafraichie depuis ce delai est effacee (Valhalla retombe sur
+# la vitesse de la classe) : un bouchon resorbe ne detourne plus les
+# conducteurs pendant 15 min. Les aretes venues d'un SIGNALEMENT sont, elles,
+# effacees des la publication suivante s'il ne les produit plus (retrait,
+# expiration, contestation) -- cf. CLE_ARETES_SIGNALEMENTS.
+DUREE_VALIDITE_S = 10 * 60
 CLE_ARETES_PUBLIEES = 'trafic:publie'  # ZSET {graph_id: horodatage de derniere ecriture}
+CLE_INCIDENTS_PUBLIES = 'trafic:incidents_publies'
+CLE_ARETES_SIGNALEMENTS = 'trafic:aretes_signalements'  # cache : aretes ecrites depuis un signalement au tour precedent
+CLE_DERNIERE_PUBLICATION = 'trafic:derniere_publication'  # cache : sante (cf. sante_trafic)
+# Un peu plus de 2 passes de la tache (90 s) : si la publication s'arrete, la
+# cle expire et les embouteillages repassent en retard dans le calcul.
+DUREE_INCIDENTS_PUBLIES_S = 3 * 60
 
 # Vitesses imposees par un signalement d'embouteillage -- a calibrer sur les
 # routes de Douala.
@@ -44,6 +57,9 @@ VITESSE_SIGNALEMENT_KMH = {
     SousTypeIncident.IMPORTANT: 15,
 }
 VITESSE_SIGNALEMENT_DEFAUT_KMH = 25
+# Vitesse "normale" de reference pour ponderer un embouteillage par sa
+# confiance (pas de vitesse par arete disponible ici) : vitesse urbaine fluide.
+VITESSE_NORMALE_REFERENCE_KMH = 40
 DUREE_CACHE_ARETE_INCIDENT_S = 3600  # un incident ne bouge pas : un seul recalage par heure
 # La file d'un bouchon s'etend en amont du point signale (spec TRAFIC_VALHALLA,
 # section 3) : aretes ralenties sur cette distance, recalee tous les PAS_AMONT_M.
@@ -57,6 +73,9 @@ def vitesses_mesurees(connexion, maintenant: int) -> dict:
     FENETRE_TEMPS_REEL_S dernieres secondes, y compris le bucket encore
     ouvert (contrairement au flush vers EchantillonVitesse)."""
     par_arete = defaultdict(lambda: defaultdict(lambda: [0.0, 0]))
+    # Filtre sur le nom de cle d'abord, puis une seule lecture groupee
+    # (pipeline) au lieu d'un aller-retour Redis par bucket.
+    a_lire = []
     for cle in connexion.smembers(ENSEMBLE_BUCKETS_ACTIFS):
         try:
             _prefixe, arete_str, bucket_str = cle.rsplit(':', 2)
@@ -65,7 +84,13 @@ def vitesses_mesurees(connexion, maintenant: int) -> dict:
             continue
         if bucket_epoch + TAILLE_BUCKET_S <= maintenant - FENETRE_TEMPS_REEL_S:
             continue
-        for champ, valeur in connexion.hgetall(cle).items():
+        a_lire.append((cle, graph_id))
+    with connexion.pipeline(transaction=False) as pipe:
+        for cle, _graph_id in a_lire:
+            pipe.hgetall(cle)
+        contenus = pipe.execute()
+    for (_cle, graph_id), contenu in zip(a_lire, contenus):
+        for champ, valeur in (contenu or {}).items():
             if not champ.startswith(PREFIXE_CHAMP_TRAJET):
                 continue
             trajet, _, mesure = champ[len(PREFIXE_CHAMP_TRAJET):].rpartition(':')
@@ -113,12 +138,17 @@ def _aretes_amont(incident):
 
 
 def _aretes_incident(incident):
-    """Aretes ralenties par un embouteillage signale : son arete et, s'il a
-    un cap, celles des AMONT_SIGNALEMENT_M metres en amont."""
+    """Aretes ralenties par un embouteillage signale : son arete et celles des
+    AMONT_SIGNALEMENT_M metres en amont. Sans cap, [] : sur une route a
+    double sens, /locate sans heading peut rendre l'arete du sens OPPOSE --
+    on ralentirait la mauvaise voie. L'embouteillage n'est alors pas dans
+    traffic.tar, et retards_signalements le compte en retard a la place."""
+    if incident.cap is None:
+        return []
     cle = f'trafic:incident:aretes:{incident.id}'
     aretes = cache.get(cle)
     if aretes is None:
-        aretes = _aretes_amont(incident) if incident.cap is not None else []
+        aretes = _aretes_amont(incident)
         if not aretes:
             arete = client_locate.localiser(incident.position.y, incident.position.x, incident.cap)
             aretes = [arete['graph_id']] if arete and arete.get('graph_id') is not None else []
@@ -132,37 +162,124 @@ def vitesses_signalements() -> dict:
     """{graph_id: km/h} pour l'arete de chaque embouteillage actif. Valhalla
     indisponible : on s'arrete la, sans lever -- les mesures GPS restent
     publiees."""
-    vitesses = {}
+    return _vitesses_et_incidents_signalements()[0]
+
+
+def incidents_publies() -> set | None:
+    """Ids (str) des embouteillages effectivement ecrits dans traffic.tar a la
+    derniere publication, ou None si aucune publication recente (tache
+    arretee, TRAFIC_TAR_PATH vide, fichier illisible) -- dans ce cas, aucun
+    embouteillage n'est dans traffic.tar et retards_signalements doit les
+    compter en retard (cf. REVUE_CONFIRMATION_SIGNALEMENTS, point 4)."""
+    ids = cache.get(CLE_INCIDENTS_PUBLIES)
+    return None if ids is None else set(ids)
+
+
+def _vitesses_et_incidents_signalements():
+    """({graph_id: km/h}, {ids des incidents dont au moins une arete est ecrite})."""
+    vitesses, publies = {}, set()
     incidents = Incident.objects.filter(
         type=TypeIncident.EMBOUTEILLAGE, statut=StatutIncident.ACTIF, expire_le__gt=timezone.now(),
-    )
+    ).exclude(Q_CONTESTE).select_related('auteur')  # conteste : sort de traffic.tar a la publication suivante
     for incident in incidents:
         try:
             aretes = _aretes_incident(incident)
-        except (client_locate.ErreurLocate, DisjoncteurOuvert) as exc:
+        except DisjoncteurOuvert as exc:
+            # Valhalla en panne : inutile d'essayer les suivants a ce tour.
             logger.info('Aretes des embouteillages signales indisponibles: %s', exc)
             break
-        vitesse = VITESSE_SIGNALEMENT_KMH.get(incident.sous_type, VITESSE_SIGNALEMENT_DEFAUT_KMH)
+        except client_locate.ErreurLocate as exc:
+            # Erreur sur CET incident : on passe au suivant, sans priver les autres.
+            logger.info('Aretes de l\'embouteillage %s indisponibles: %s', incident.id, exc)
+            continue
+        vitesse = _vitesse_ponderee(incident)
+        if aretes:
+            publies.add(str(incident.id))
         for graph_id in aretes:
             # Plusieurs signalements sur la meme arete : le plus severe l'emporte.
             vitesses[graph_id] = min(vitesse, vitesses.get(graph_id, vitesse))
-    return vitesses
+    return vitesses, publies
+
+
+def _vitesse_ponderee(incident) -> float:
+    """Vitesse imposee, ramenee vers la vitesse normale selon la confiance
+    (meme confiance que pour les retards : votes x usure dans le temps) : un
+    embouteillage en fin de vie ou peu confirme ralentit moins qu'un
+    embouteillage tout juste confirme par plusieurs conducteurs."""
+    from .retards_signalements import confiance
+
+    imposee = VITESSE_SIGNALEMENT_KMH.get(incident.sous_type, VITESSE_SIGNALEMENT_DEFAUT_KMH)
+    normale = max(VITESSE_NORMALE_REFERENCE_KMH, imposee)
+    return round(normale - (normale - imposee) * confiance(incident), 1)
 
 
 def publier(chemin_trafic, connexion, maintenant: int) -> dict:
     """Ecrit les vitesses courantes et efface les perimees. Retourne des
     compteurs pour les logs de la tache. Leve TraficIndisponible si le
     fichier est absent/illisible -- a l'appelant de journaliser."""
-    vitesses = vitesses_signalements()
-    vitesses.update(vitesses_mesurees(connexion, maintenant))  # une mesure reelle l'emporte
+    # Ordre de priorite sur une meme arete (le dernier update l'emporte) :
+    #   4. rien : vitesse de la classe de route (Valhalla) ;
+    #   3. vitesse typique du creneau, si l'historique est suffisant ;
+    #   2. embouteillage signale ;
+    #   1. mesure GPS en direct.
+    # Sans 3, l'historique accumule dans EchantillonVitesse n'atteignait jamais
+    # Valhalla : avec peu de conducteurs, presque tout le reseau etait route
+    # en vitesse theorique (REVUE_ROUTAGE_ET_SERVICES, point 1.2).
+    from .service_trafic import vitesses_typiques_creneau
+
+    signalements, publies = _vitesses_et_incidents_signalements()
+    mesurees = vitesses_mesurees(connexion, maintenant)
+    vitesses = vitesses_typiques_creneau()
+    vitesses.update(signalements)
+    vitesses.update(mesurees)  # une mesure reelle l'emporte
+    aretes_signalements = set(signalements) - set(mesurees)
 
     ecrites = tuiles_trafic.ecrire_vitesses(chemin_trafic, vitesses)
+    # Ecrit APRES l'ecriture reussie (ecrire_vitesses leve si le fichier est
+    # absent/illisible) : retards_signalements ne saute que ces embouteillages-la.
+    cache.set(CLE_INCIDENTS_PUBLIES, sorted(publies), timeout=DUREE_INCIDENTS_PUBLIES_S)
     if vitesses:
         connexion.zadd(CLE_ARETES_PUBLIEES, {str(graph_id): maintenant for graph_id in vitesses})
 
-    perimees = [int(g) for g in connexion.zrangebyscore(CLE_ARETES_PUBLIEES, 0, maintenant - DUREE_VALIDITE_S)]
+    # Aretes ecrites depuis un signalement au tour precedent et plus produites
+    # maintenant (signalement retire, expire, conteste) : effacees tout de
+    # suite plutot qu'apres DUREE_VALIDITE_S.
+    precedentes = set(cache.get(CLE_ARETES_SIGNALEMENTS) or [])
+    finies = precedentes - set(vitesses)
+    perimees = {int(g) for g in connexion.zrangebyscore(CLE_ARETES_PUBLIEES, 0, maintenant - DUREE_VALIDITE_S)}
+    a_effacer = sorted(perimees | finies)
     effacees = 0
-    if perimees:
-        effacees = tuiles_trafic.effacer(chemin_trafic, perimees)
-        connexion.zrem(CLE_ARETES_PUBLIEES, *perimees)
-    return {'ecrites': ecrites, 'effacees': effacees}
+    if a_effacer:
+        effacees = tuiles_trafic.effacer(chemin_trafic, a_effacer)
+        connexion.zrem(CLE_ARETES_PUBLIEES, *a_effacer)
+    cache.set(CLE_ARETES_SIGNALEMENTS, sorted(aretes_signalements), timeout=DUREE_VALIDITE_S)
+
+    compteurs = {'ecrites': ecrites, 'effacees': effacees}
+    cache.set(CLE_DERNIERE_PUBLICATION, {'le': maintenant, **compteurs}, timeout=None)
+    return compteurs
+
+
+def sante_trafic(connexion, maintenant: int) -> dict:
+    """Etat du trafic temps reel pour le back-office : chaque etape se degrade
+    en silence (par choix), d'ou ces compteurs pour voir qu'elle ne marche plus."""
+    from .consommateur_positions import NOM_GROUPE
+    from .producteur_evenements import FLUX_POSITIONS
+
+    derniere = cache.get(CLE_DERNIERE_PUBLICATION)
+    etat = {
+        'last_publication_at': derniere and derniere['le'],
+        'last_publication_age_s': derniere and maintenant - derniere['le'],
+        'last_publication_written': derniere and derniere['ecrites'],
+        'stream_length': None, 'pending_messages': None, 'oldest_pending_age_s': None,
+    }
+    try:
+        etat['stream_length'] = connexion.xlen(FLUX_POSITIONS)
+        resume = connexion.xpending(FLUX_POSITIONS, NOM_GROUPE)
+        etat['pending_messages'] = resume.get('pending', 0)
+        plus_ancien = resume.get('min')
+        if plus_ancien:
+            # Id Redis Streams "<ms>-<seq>" : l'horodatage d'arrivee du message.
+            etat['oldest_pending_age_s'] = maintenant - int(str(plus_ancien).split('-')[0]) // 1000
+    except Exception as exc:  # Redis-telemetrie injoignable : on le dit, sans planter la page
+        logger.info('Sante du flux de telemetrie indisponible: %s', exc)
+    return etat

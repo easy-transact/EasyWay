@@ -264,6 +264,9 @@ class PublicationTempsReelTests(TestCase):
 
     def _voter(self, incident, sens, votant):
         jetons = connecter(self.client, votant.telephone)
+        from trips.services import derniere_position
+
+        derniere_position.memoriser(votant.id, incident.position.y, incident.position.x)
         with self.captureOnCommitCallbacks(execute=True):
             return self.client.post(
                 reverse('community:incident-vote', args=[incident.id]), {'direction': sens},

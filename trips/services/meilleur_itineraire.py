@@ -131,7 +131,7 @@ PUBLIC = {
 }
 
 
-def chercher_meilleur(trajet, position, utilisateur, cap=None, etapes_restantes=None, eviter=None):
+def chercher_meilleur(trajet, position, utilisateur, cap=None, etapes_restantes=None, eviter=None, vitesse_kmh=None):
     """position : (lat, lon). Retourne un dict :
       reason : BETTER_FOUND | NO_BETTER | NO_ALTERNATIVE | OFF_ROUTE | NO_ROUTE
       action : IMPOSE | PROPOSE | ALERT | NONE ; cause : ROAD_CLOSED | FASTER | SAFER | None
@@ -142,7 +142,7 @@ def chercher_meilleur(trajet, position, utilisateur, cap=None, etapes_restantes=
       current_risk_score, hazards_ahead, avoided_hazards,
       pending_confirmation (route meilleure trouvee, proposee si elle l'est
       encore a l'appel suivant)."""
-    interne = _decider(trajet, position, utilisateur, cap, etapes_restantes, eviter)
+    interne = _decider(trajet, position, utilisateur, cap, etapes_restantes, eviter, vitesse_kmh)
     raison, action, cause = PUBLIC.get(interne['reason'], (interne['reason'], 'NONE', None))
     devant = interne['hazards_ahead']
     alerte = devant[0] if devant else None
@@ -155,7 +155,7 @@ def chercher_meilleur(trajet, position, utilisateur, cap=None, etapes_restantes=
     }
 
 
-def _decider(trajet, position, utilisateur, cap, etapes_restantes, eviter):
+def _decider(trajet, position, utilisateur, cap, etapes_restantes, eviter, vitesse_kmh=None):
     resultat = {'reason': NO_BETTER, 'better_route': None, 'current_duration_s': None,
                 'new_duration_s': None, 'time_saved_s': None, 'current_risk_score': None,
                 'hazards_ahead': [], 'avoided_hazards': [], 'pending_confirmation': False}
@@ -164,6 +164,9 @@ def _decider(trajet, position, utilisateur, cap, etapes_restantes, eviter):
         arrivee=(trajet.position_destination.y, trajet.position_destination.x),
         utilisateur=utilisateur, cap_origine=cap, alternatives=True, etapes=etapes_restantes or [],
         type_vehicule=trajet.type_vehicule or None, eviter=eviter or [],
+        # Cap GPS aleatoire a l'arret (bouchon) : ignore sous 10 km/h, verifie
+        # contre un calcul sans cap si la vitesse est inconnue (cf. routes/calculate).
+        vitesse_origine_kmh=vitesse_kmh, verifier_cap=vitesse_kmh is None,
     )
     if not candidats:
         return {**resultat, 'reason': NO_ROUTE}
@@ -243,7 +246,7 @@ def _decider(trajet, position, utilisateur, cap, etapes_restantes, eviter):
 ALTERNATIVES_FOUND = 'ALTERNATIVES_FOUND'
 
 
-def chercher_autres(trajet, position, utilisateur, cap=None, etapes_restantes=None, eviter=None):
+def chercher_autres(trajet, position, utilisateur, cap=None, etapes_restantes=None, eviter=None, vitesse_kmh=None):
     """Le conducteur DEMANDE un autre itineraire ("je veux une autre route") :
     contrairement a chercher_meilleur, aucune condition de gain -- toutes les
     routes differentes de celle suivie, plus lentes comprises, de la plus
@@ -256,6 +259,9 @@ def chercher_autres(trajet, position, utilisateur, cap=None, etapes_restantes=No
         arrivee=(trajet.position_destination.y, trajet.position_destination.x),
         utilisateur=utilisateur, cap_origine=cap, alternatives=True, etapes=etapes_restantes or [],
         type_vehicule=trajet.type_vehicule or None, eviter=eviter or [],
+        # Cap GPS aleatoire a l'arret (bouchon) : ignore sous 10 km/h, verifie
+        # contre un calcul sans cap si la vitesse est inconnue (cf. routes/calculate).
+        vitesse_origine_kmh=vitesse_kmh, verifier_cap=vitesse_kmh is None,
     )
     if not candidats:
         return {'reason': NO_ROUTE, 'routes': [], 'current_duration_s': None}

@@ -15,6 +15,7 @@ from rest_framework import status
 from rest_framework.generics import get_object_or_404
 from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from accounts.pagination import StaffPagination
@@ -63,6 +64,11 @@ DUREE_IDEMPOTENCE_S = 24 * 3600
 # Garde-fou : on signale ce qu'on voit, pas un point choisi sur la carte a distance.
 DISTANCE_MAX_AUTEUR_M = 500
 AGE_MAX_POSITION_S = 120
+# Vote : position du trajet en cours exigee, plus large que pour signaler (on
+# vote souvent juste APRES etre passe devant). L'age max suit la duree de vie
+# de derniere_position (5 min).
+DISTANCE_MAX_VOTANT_M = 1000
+AGE_MAX_POSITION_VOTE_S = 300
 
 # MAX_CELLULES (cf. cache_incidents.py) : meme plafond que l'abonnement temps
 # reel (consumers.py). Valeur pas mesuree sur donnees reelles.
@@ -689,10 +695,33 @@ class IncidentDetailView(APIView):
     responses={200: IncidentSerializer, 400: MessageSerializer},
 )
 class VoterIncidentView(APIView):
+    # Chaque confirmation rapporte des points (bons carburant) et pese sur la
+    # fermeture d'une route pour tous : debit borne par compte.
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'vote-incident'
+
     def post(self, request, id):
         serializer = VoteIncidentSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         sens = serializer.validated_data['sens']
+
+        # Vote seulement a proximite (position du trajet en cours) : sinon on
+        # confirmerait -- ou leverait -- une route barree a Yaounde depuis
+        # Douala. Contrairement au signalement, une position recente est
+        # EXIGEE : sans trajet en cours, rien ne prouve que le votant a vu
+        # l'incident. Le staff vote depuis le back-office, sans position.
+        if not request.user.is_staff:
+            from trips.services import derniere_position
+            from trips.services.geo import distance_haversine_m
+
+            cible = get_object_or_404(Incident.objects.only('position'), id=id)
+            position = derniere_position.lire(request.user.id, AGE_MAX_POSITION_VOTE_S)
+            if position is None or distance_haversine_m(position, (cible.position.y, cible.position.x)) > DISTANCE_MAX_VOTANT_M:
+                return Response(
+                    {'code': 'TOO_FAR_TO_VOTE',
+                     'detail': f'You must be within {DISTANCE_MAX_VOTANT_M} m of the report to vote.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
         with transaction.atomic():
             incident = get_object_or_404(Incident.objects.select_for_update(), id=id)

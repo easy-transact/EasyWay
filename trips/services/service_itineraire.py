@@ -79,6 +79,7 @@ def ajouter_reperes_sans_risque(candidat):
 class ServiceItineraire:
     def __init__(self, client=None):
         self.client = client or ClientValhalla()
+        self.eviter_ignores = []  # rempli par calculer() (points avoid trop pres d'une extremite)
 
     def calculer(
         self, depart, arrivee, utilisateur, eviter=None, cap_origine=None, alternatives=True, etapes=None,
@@ -111,9 +112,13 @@ class ServiceItineraire:
         type_vehicule = type_vehicule or utilisateur.type_vehicule
         options = self._options_depuis_parametres(utilisateur, type_vehicule)
         costing = options['costing']
+        # Points `avoid` de l'appli trop pres du depart, de l'arrivee ou d'une
+        # etape : ignores (sinon "aucun chemin"), et gardes dans
+        # self.eviter_ignores pour que la vue les signale a l'appli.
+        eviter, self.eviter_ignores = retards_signalements.separer_points_a_eviter(eviter, depart, arrivee, etapes)
         # Fermetures confirmees (route barree, inondation) : exclues du calcul,
         # comme un point `avoid` (cf. retards_signalements.fermetures_a_eviter).
-        eviter = list(eviter or []) + retards_signalements.fermetures_a_eviter(depart, arrivee, etapes, costing)
+        eviter = eviter + retards_signalements.fermetures_a_eviter(depart, arrivee, etapes, costing)
         if eviter:
             # cf. https://valhalla.github.io/valhalla/api/turn-by-turn/api-reference/#exclude-locations
             # -- cle top-level du payload /route, pas une costing_option.

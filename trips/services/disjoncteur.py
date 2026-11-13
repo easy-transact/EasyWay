@@ -30,9 +30,27 @@ def verifier():
         raise DisjoncteurOuvert()
 
 
+def est_requete_refusee(exc) -> bool:
+    """True pour une reponse 4xx de Valhalla : requete refusee (aucun chemin,
+    point trop loin d'une route, trace impossible a recaler...). C'est un cas
+    NORMAL, pas une panne : il ne doit ni compter pour le disjoncteur, ni etre
+    reessaye (meme requete = meme reponse). Seuls reseau, timeout et 5xx sont
+    des pannes."""
+    reponse = getattr(exc, 'response', None)
+    return reponse is not None and 400 <= reponse.status_code < 500
+
+
 def enregistrer_echec():
-    echecs = (cache.get(CLE_ECHECS) or 0) + 1
-    cache.set(CLE_ECHECS, echecs, timeout=FENETRE_COMPTAGE_ECHECS_S)
+    # cache.add + cache.incr : increment atomique entre workers (un get puis un
+    # set pouvait perdre des echecs comptes en meme temps).
+    cache.add(CLE_ECHECS, 0, timeout=FENETRE_COMPTAGE_ECHECS_S)
+    try:
+        echecs = cache.incr(CLE_ECHECS)
+    except ValueError:  # cle expiree entre add et incr
+        cache.set(CLE_ECHECS, 1, timeout=FENETRE_COMPTAGE_ECHECS_S)
+        echecs = 1
+    if echecs is None:  # Redis injoignable (IGNORE_EXCEPTIONS) : on ne compte rien
+        return
     if echecs >= SEUIL_ECHECS:
         cache.set(CLE_OUVERT_JUSQU_A, time.time() + DUREE_OUVERTURE_S, timeout=DUREE_OUVERTURE_S)
 

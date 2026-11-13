@@ -21,7 +21,7 @@ from django.contrib.gis.geos import LineString, Point, Polygon
 
 from django.utils import timezone
 
-from community.models import Incident, SousTypeIncident as S, StatutIncident, TypeIncident as T
+from community.models import Q_CONTESTE, Incident, SousTypeIncident as S, StatutIncident, TypeIncident as T
 
 from ..polyline import decoder_polyline6
 from .geo import distance_haversine_m
@@ -91,16 +91,20 @@ ECART_CAP_MAX = 45         # degres entre le cap du signalement et le sens du tr
 MARGE_EXTREMITES_M = 100   # jamais de fermeture pres du depart ou de l'arrivee
 MARGE_RECHERCHE_DEG = 0.045  # ~5 km autour du rectangle depart-arrivee
 EGALITE_S = 60             # a moins d'1 min d'ecart, departage par nb de signalements puis distance
-SEUIL_CONFIANCE = 3        # cf. community.models.SEUIL_CONFIANCE_VALIDATION
 METRES_PAR_DEGRE = 111_320
 
 
 def confiance(incident):
     """Probabilite (0-1) qu'un signalement soit encore la : confiance des
     votes x usure dans le temps. score_confiance est une SOMME de poids de
-    votes (3 = valide), pas une probabilite : ramenee a [0, 1] en comptant
-    l'auteur pour 1 (un signalement tout neuf vaut 1/4, valide il vaut 1)."""
-    votes = min(max((1 + float(incident.score_confiance)) / (1 + SEUIL_CONFIANCE), 0.0), 1.0)
+    votes (seuil_validation() = valide), pas une probabilite : ramenee a
+    [0, 1] en comptant l'auteur pour 1 (un signalement tout neuf vaut
+    1/(1+seuil), valide il vaut 1 -- y compris au seuil reduit d'un auteur
+    repute). Un signalement conteste vaut 0."""
+    if incident.est_conteste:
+        return 0.0
+    seuil = float(incident.seuil_validation())
+    votes = min(max((1 + float(incident.score_confiance)) / (1 + seuil), 0.0), 1.0)
     if incident.valide_par_staff:
         votes = 1.0  # valide par la moderation : plus de doute sur sa presence
     maintenant = timezone.now()
@@ -116,22 +120,26 @@ def confiance(incident):
 
 
 def fermeture_confirmee(incident, effet, costing):
-    """Deux auteurs distincts (un doublon corrobore = une confirmation) ou un
-    auteur et une confirmation, ou une validation par la moderation (back-office).
-    Une inondation ferme la route d'une moto des le premier signalement."""
+    """Route retiree du graphe : cf. Incident.confirme_pour_fermeture (score
+    au seuil de validation, moderation ou officiel -- meme seuil que pour
+    devenir ACTIF, plus un simple nombre de confirmations). Une inondation
+    ferme la route d'une moto des le premier signalement (sauf contestee)."""
     if effet.mecanisme != FERMETURE:
         return False
     if effet.fermeture_moto_immediate and costing == 'motorcycle':
-        return True
-    return incident.confirmations >= 1 or incident.valide_par_staff
+        return not incident.est_conteste
+    return incident.confirme_pour_fermeture
 
 
 def _incidents_actifs(rectangle):
+    """Signalements qui agissent sur l'itineraire : ACTIF ou EN_ATTENTE, non
+    expires, et non contestes (cf. community.models.Q_CONTESTE). auteur charge
+    d'avance : seuil_validation() le lit pour chaque signalement."""
     return Incident.objects.filter(
         statut__in=[StatutIncident.ACTIF, StatutIncident.EN_ATTENTE],
         expire_le__gt=timezone.now(),
         position__intersects=rectangle,
-    )
+    ).exclude(Q_CONTESTE).select_related('auteur')
 
 
 def _rectangle(points_latlon):
@@ -143,6 +151,22 @@ def _rectangle(points_latlon):
     ))
     rectangle.srid = 4326
     return rectangle
+
+
+def separer_points_a_eviter(points, depart, arrivee, etapes):
+    """Points `avoid` envoyes par l'appli -> (gardes, ignores). Meme regle que
+    pour les fermetures (fermetures_a_eviter) : un point a moins de
+    MARGE_EXTREMITES_M du depart, de l'arrivee ou d'une etape rendrait le
+    calcul impossible (Valhalla repond "aucun chemin") -- il est ignore, et
+    l'appelant le signale a l'appli plutot que d'echouer."""
+    extremites = [depart, arrivee, *(etapes or [])]
+    gardes, ignores = [], []
+    for point in points or []:
+        if any(distance_haversine_m(point, e) < MARGE_EXTREMITES_M for e in extremites):
+            ignores.append(point)
+        else:
+            gardes.append(point)
+    return gardes, ignores
 
 
 def fermetures_a_eviter(depart, arrivee, etapes, costing):
@@ -225,6 +249,15 @@ def appliquer(candidats, costing, trafic_en_direct):
         if effet_de(i) is not None
     ]
 
+    # Embouteillages reellement presents dans traffic.tar, par incident (pas
+    # par requete) : si la publication est arretee ou a echoue pour l'un
+    # d'eux, il est compte en retard ici plutot que de n'avoir aucun effet.
+    deja_dans_trafic = set()
+    if trafic_en_direct:
+        from .trafic_temps_reel import incidents_publies
+
+        deja_dans_trafic = incidents_publies() or set()
+
     for candidat in candidats:
         candidat['delai_signalements'] = 0
         candidat['signalements_appliques'] = []
@@ -250,8 +283,8 @@ def appliquer(candidats, costing, trafic_en_direct):
             if fermeture_confirmee(incident, effet, costing):
                 continue  # deja exclue du calcul (fermetures_a_eviter)
             moto = costing == 'motorcycle'
-            if trafic_en_direct and incident.type == T.EMBOUTEILLAGE and incident.statut == StatutIncident.ACTIF:
-                continue  # deja dans traffic.tar
+            if str(incident.id) in deja_dans_trafic:
+                continue  # deja ecrit en vitesses dans traffic.tar
             retard = _retard_s(effet, vitesse_normale) * confiance(incident) * (effet.part_moto if moto else 1.0)
             if retard < 1:
                 continue
