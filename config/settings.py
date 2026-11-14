@@ -188,6 +188,9 @@ REST_FRAMEWORK = {
         'invitation': '30/hour',
         # Avis sur les garages (creation/modification).
         'avis-garage': '10/hour',
+        # Votes sur les signalements (confirmer / infirmer) : borne les abus de
+        # vote en masse (cf. REVUE_CONFIRMATION_SIGNALEMENTS, point 3).
+        'vote-incident': '60/hour',
     },
 }
 

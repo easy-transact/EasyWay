@@ -36,6 +36,12 @@ FENETRE_TEMPS_REEL_S = 5 * 60
 NB_MIN_CONDUCTEURS = 2  # un seul vehicule lent (livraison, panne) ne fait pas un bouchon
 DUREE_VALIDITE_S = 15 * 60
 CLE_ARETES_PUBLIEES = 'trafic:publie'  # ZSET {graph_id: horodatage de derniere ecriture}
+# SET des ids d'embouteillages signales effectivement ecrits dans traffic.tar au
+# dernier passage de publier(). retards_signalements decide "deja dans
+# traffic.tar" PAR incident grace a cet ensemble (cf. REVUE_CONFIRMATION, point
+# 4) : absent/vide (publication arretee, TRAFIC_TAR_PATH non configure) => on
+# compte le retard du bouchon, il n'est nulle part ailleurs.
+CLE_INCIDENTS_PUBLIES = 'trafic:incidents_publies'
 
 # Vitesses imposees par un signalement d'embouteillage -- a calibrer sur les
 # routes de Douala.
@@ -128,37 +134,54 @@ def _aretes_incident(incident):
     return aretes
 
 
-def vitesses_signalements() -> dict:
-    """{graph_id: km/h} pour l'arete de chaque embouteillage actif. Valhalla
-    indisponible : on s'arrete la, sans lever -- les mesures GPS restent
-    publiees."""
+def vitesses_signalements() -> tuple[dict, set]:
+    """({graph_id: km/h}, {ids des incidents ecrits}) pour chaque embouteillage
+    actif. Un embouteillage conteste (cf. Incident.est_conteste) est ignore. Un
+    incident qui n'a produit aucune arete (recalage echoue) n'est pas marque
+    publie, donc son retard restera compte. Valhalla indisponible : on s'arrete
+    la, sans lever -- les mesures GPS restent publiees."""
     vitesses = {}
+    ids_publies = set()
     incidents = Incident.objects.filter(
         type=TypeIncident.EMBOUTEILLAGE, statut=StatutIncident.ACTIF, expire_le__gt=timezone.now(),
     )
     for incident in incidents:
+        if incident.est_conteste():
+            continue  # contredit par la communaute : plus impose dans traffic.tar
         try:
             aretes = _aretes_incident(incident)
         except (client_locate.ErreurLocate, DisjoncteurOuvert) as exc:
             logger.info('Aretes des embouteillages signales indisponibles: %s', exc)
             break
+        if not aretes:
+            continue
+        ids_publies.add(str(incident.id))
         vitesse = VITESSE_SIGNALEMENT_KMH.get(incident.sous_type, VITESSE_SIGNALEMENT_DEFAUT_KMH)
         for graph_id in aretes:
             # Plusieurs signalements sur la meme arete : le plus severe l'emporte.
             vitesses[graph_id] = min(vitesse, vitesses.get(graph_id, vitesse))
-    return vitesses
+    return vitesses, ids_publies
 
 
 def publier(chemin_trafic, connexion, maintenant: int) -> dict:
     """Ecrit les vitesses courantes et efface les perimees. Retourne des
     compteurs pour les logs de la tache. Leve TraficIndisponible si le
     fichier est absent/illisible -- a l'appelant de journaliser."""
-    vitesses = vitesses_signalements()
+    vitesses, incidents_publies_ids = vitesses_signalements()
     vitesses.update(vitesses_mesurees(connexion, maintenant))  # une mesure reelle l'emporte
 
     ecrites = tuiles_trafic.ecrire_vitesses(chemin_trafic, vitesses)
     if vitesses:
         connexion.zadd(CLE_ARETES_PUBLIEES, {str(graph_id): maintenant for graph_id in vitesses})
+
+    # Liste des embouteillages signales reellement ecrits, pour que
+    # retards_signalements ne les recompte pas en retard (point 4). Reecrite a
+    # chaque passage, expiration courte : si la tache s'arrete, l'ensemble
+    # disparait et les bouchons redeviennent comptes en retard.
+    connexion.delete(CLE_INCIDENTS_PUBLIES)
+    if incidents_publies_ids:
+        connexion.sadd(CLE_INCIDENTS_PUBLIES, *incidents_publies_ids)
+        connexion.expire(CLE_INCIDENTS_PUBLIES, DUREE_VALIDITE_S)
 
     perimees = [int(g) for g in connexion.zrangebyscore(CLE_ARETES_PUBLIEES, 0, maintenant - DUREE_VALIDITE_S)]
     effacees = 0
@@ -166,3 +189,14 @@ def publier(chemin_trafic, connexion, maintenant: int) -> dict:
         effacees = tuiles_trafic.effacer(chemin_trafic, perimees)
         connexion.zrem(CLE_ARETES_PUBLIEES, *perimees)
     return {'ecrites': ecrites, 'effacees': effacees}
+
+
+def incidents_en_traffic_tar(connexion) -> set:
+    """Ids (str) des embouteillages signales ecrits dans traffic.tar au dernier
+    passage de publier(). Vide si la publication est arretee / TRAFIC_TAR_PATH
+    absent / Redis injoignable -- l'appelant compte alors leur retard (jamais
+    de double comptage silencieux, cf. point 4)."""
+    try:
+        return set(connexion.smembers(CLE_INCIDENTS_PUBLIES))
+    except Exception:
+        return set()

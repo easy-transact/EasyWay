@@ -698,6 +698,17 @@ class RedisTraficFactice:
         for membre in membres:
             self.zset.pop(str(membre), None)
 
+    # Ensemble des incidents publies dans traffic.tar (cf. CLE_INCIDENTS_PUBLIES) :
+    # non exerce par ces tests, no-op suffisant pour que publier() n'echoue pas.
+    def delete(self, _cle):
+        pass
+
+    def sadd(self, _cle, *membres):
+        pass
+
+    def expire(self, _cle, _duree):
+        pass
+
 
 def _bucket(graph_id, bucket_epoch, **par_trajet):
     """par_trajet : trajet_id=(distance_km, duree_s). La vitesse d'un conducteur
@@ -746,10 +757,10 @@ class TraficTempsReelTests(SimpleTestCase):
             tuiles_trafic.ecrire_vitesses(chemin, {_graph_id(5): 30})
             connexion.zset[str(_graph_id(5))] = self.MAINTENANT - 1200
 
-            with patch.object(trafic_temps_reel, 'vitesses_signalements', return_value={
+            with patch.object(trafic_temps_reel, 'vitesses_signalements', return_value=({
                 _graph_id(1): 5,  # mesure disponible : le signalement ne l'emporte pas
                 _graph_id(2): 15,
-            }):
+            }, set())):
                 compteurs = trafic_temps_reel.publier(chemin, connexion, self.MAINTENANT)
 
             self.assertEqual(compteurs, {'ecrites': 2, 'effacees': 1})

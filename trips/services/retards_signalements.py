@@ -98,9 +98,14 @@ METRES_PAR_DEGRE = 111_320
 def confiance(incident):
     """Probabilite (0-1) qu'un signalement soit encore la : confiance des
     votes x usure dans le temps. score_confiance est une SOMME de poids de
-    votes (3 = valide), pas une probabilite : ramenee a [0, 1] en comptant
-    l'auteur pour 1 (un signalement tout neuf vaut 1/4, valide il vaut 1)."""
-    votes = min(max((1 + float(incident.score_confiance)) / (1 + SEUIL_CONFIANCE), 0.0), 1.0)
+    votes, pas une probabilite : ramenee a [0, 1] en comptant l'auteur pour 1
+    (un signalement tout neuf vaut ~1/4, valide il vaut 1). On divise par
+    1 + seuil_validation() -- et non une constante -- pour qu'un signalement
+    valide (score = seuil) vaille 1, y compris quand l'auteur repute abaisse le
+    seuil a 2 (cf. REVUE_CONFIRMATION_SIGNALEMENTS, point 7)."""
+    if incident.est_conteste():
+        return 0.0  # contredit par la communaute : ne compte plus (retard/risque)
+    votes = min(max((1 + float(incident.score_confiance)) / (1 + float(incident.seuil_validation())), 0.0), 1.0)
     if incident.valide_par_staff:
         votes = 1.0  # valide par la moderation : plus de doute sur sa presence
     maintenant = timezone.now()
@@ -116,18 +121,25 @@ def confiance(incident):
 
 
 def fermeture_confirmee(incident, effet, costing):
-    """Deux auteurs distincts (un doublon corrobore = une confirmation) ou un
-    auteur et une confirmation, ou une validation par la moderation (back-office).
-    Une inondation ferme la route d'une moto des le premier signalement."""
+    """Retire une route du graphe pour tous. Seuil aligne sur la visibilite
+    (score >= seuil_validation, signalement officiel, ou validation
+    moderation) -- une seule confirmation ne ferme plus une route pour tout le
+    pays, elle la ralentit fortement (cf. Incident.est_confirme_pour_fermeture
+    et REVUE_CONFIRMATION_SIGNALEMENTS, points 1 et 2). Une inondation ferme la
+    route d'une moto des le premier signalement, sauf si deja conteste."""
     if effet.mecanisme != FERMETURE:
+        return False
+    if incident.est_conteste():
         return False
     if effet.fermeture_moto_immediate and costing == 'motorcycle':
         return True
-    return incident.confirmations >= 1 or incident.valide_par_staff
+    return incident.est_confirme_pour_fermeture()
 
 
 def _incidents_actifs(rectangle):
-    return Incident.objects.filter(
+    # select_related('auteur') : seuil_validation()/est_confirme_pour_fermeture()
+    # lisent auteur.score_reputation pour chaque incident -- sinon un N+1.
+    return Incident.objects.select_related('auteur').filter(
         statut__in=[StatutIncident.ACTIF, StatutIncident.EN_ATTENTE],
         expire_le__gt=timezone.now(),
         position__intersects=rectangle,
@@ -209,14 +221,18 @@ def _retard_s(effet, vitesse_normale_ms):
     return longueur * (1 / vitesse_imposee - 1 / vitesse_normale_ms)
 
 
-def appliquer(candidats, costing, trafic_en_direct):
+def appliquer(candidats, costing, trafic_en_direct, incidents_en_trafic=None):
     """Ajoute a chaque candidat (forme ServiceItineraire._normaliser_trip) :
     delai_signalements (s), signalements_appliques, et ajuste
     duree_avec_trafic = duree (ou duree trafic) + delai. Puis reclasse et
     marque est_recommande sur le premier.
 
-    trafic_en_direct : les embouteillages ACTIFS sont deja ecrits en vitesses
-    dans traffic.tar (cf. trafic_temps_reel.py) -- ne pas les recompter."""
+    trafic_en_direct : ce costing utilise les vitesses courantes de traffic.tar.
+    incidents_en_trafic : ids (str) des embouteillages REELLEMENT ecrits dans
+    traffic.tar (cf. trafic_temps_reel.incidents_en_traffic_tar). Un
+    embouteillage n'est exclu du retard que s'il remplit les DEUX conditions --
+    sinon il n'est nulle part dans la duree et doit etre compte ici (point 4)."""
+    incidents_en_trafic = incidents_en_trafic or set()
     if not candidats:
         return candidats
     toutes_coords = [(lat, lon) for c in candidats for lon, lat in decoder_polyline6(c['geometrie'])[::20]]
@@ -250,8 +266,13 @@ def appliquer(candidats, costing, trafic_en_direct):
             if fermeture_confirmee(incident, effet, costing):
                 continue  # deja exclue du calcul (fermetures_a_eviter)
             moto = costing == 'motorcycle'
-            if trafic_en_direct and incident.type == T.EMBOUTEILLAGE and incident.statut == StatutIncident.ACTIF:
-                continue  # deja dans traffic.tar
+            if (
+                trafic_en_direct
+                and incident.type == T.EMBOUTEILLAGE
+                and incident.statut == StatutIncident.ACTIF
+                and str(incident.id) in incidents_en_trafic
+            ):
+                continue  # deja dans traffic.tar (vitesse ecrite), ne pas recompter
             retard = _retard_s(effet, vitesse_normale) * confiance(incident) * (effet.part_moto if moto else 1.0)
             if retard < 1:
                 continue

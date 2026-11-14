@@ -31,10 +31,11 @@ class EmbouteillageAmontTests(TestCase):
         )
 
     def test_aretes_des_200_m_en_amont_ralenties(self):
-        self.signaler(cap=90)  # vers l'est : la file est a l'ouest
+        incident = self.signaler(cap=90)  # vers l'est : la file est a l'ouest
         with patch('trips.services.client_meili.tracer', return_value=([{'id': 1}, {'id': 2}, {'id': 3}], [])) as tracer:
-            vitesses = trafic_temps_reel.vitesses_signalements()
+            vitesses, ids = trafic_temps_reel.vitesses_signalements()
         self.assertEqual(vitesses, {1: 5, 2: 5, 3: 5})
+        self.assertEqual(ids, {str(incident.id)})  # marque publie (compte comme deja dans traffic.tar)
         points = tracer.call_args.args[0]
         self.assertEqual(len(points), 6)  # 200, 160, ..., 0 m
         self.assertLess(points[0]['lon'], points[-1]['lon'])  # on part de l'ouest (amont)
@@ -44,7 +45,7 @@ class EmbouteillageAmontTests(TestCase):
         self.signaler(cap=None)
         with patch('trips.services.client_meili.tracer') as tracer, \
                 patch('trips.services.client_locate.localiser', return_value={'graph_id': 7}):
-            vitesses = trafic_temps_reel.vitesses_signalements()
+            vitesses, _ = trafic_temps_reel.vitesses_signalements()
         tracer.assert_not_called()
         self.assertEqual(vitesses, {7: 5})
 
@@ -54,7 +55,8 @@ class EmbouteillageAmontTests(TestCase):
         self.signaler(cap=90)
         with patch('trips.services.client_meili.tracer', side_effect=ErreurMeili('panne')), \
                 patch('trips.services.client_locate.localiser', return_value={'graph_id': 7}):
-            self.assertEqual(trafic_temps_reel.vitesses_signalements(), {7: 5})
+            vitesses, _ = trafic_temps_reel.vitesses_signalements()
+        self.assertEqual(vitesses, {7: 5})
 
 
 def _message(trajet_id, lat, lon, horodatage):

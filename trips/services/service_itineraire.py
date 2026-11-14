@@ -155,8 +155,9 @@ class ServiceItineraire:
                 trips = self._trips(depart, arrivee, options, None, alternatives, etapes, eviter) if alternatives else direct
 
         trafic_en_direct = 'current' in options['costing_options'][costing]['speed_types']
+        incidents_en_trafic = self._incidents_en_trafic() if trafic_en_direct else set()
         penalite = evitement.penalite_appliquee if parametres_de(utilisateur).eviter_routes_degradees else None
-        candidats = self._evaluer(trips, 0, type_vehicule, costing, trafic_en_direct)
+        candidats = self._evaluer(trips, 0, type_vehicule, costing, trafic_en_direct, incidents_en_trafic)
         candidats = risque_itineraire.classer(candidats, penalite)
 
         # La route choisie traverse un danger serieux et confirme (accident...) :
@@ -173,14 +174,30 @@ class ServiceItineraire:
                 )
                 connues = {c['geometrie'] for c in candidats}
                 nouveaux = [
-                    c for c in self._evaluer(contournement, len(candidats), type_vehicule, costing, trafic_en_direct)
+                    c for c in self._evaluer(
+                        contournement, len(candidats), type_vehicule, costing, trafic_en_direct, incidents_en_trafic,
+                    )
                     if c['geometrie'] not in connues and not c.get('degrade')
                 ]
                 if nouveaux:
                     candidats = risque_itineraire.classer(candidats + nouveaux, penalite)
         return candidats[:NOMBRE_MAX_ITINERAIRES] if alternatives else candidats[:1]
 
-    def _evaluer(self, trips, premier_index, type_vehicule, costing, trafic_en_direct):
+    @staticmethod
+    def _incidents_en_trafic() -> set:
+        """Embouteillages signales reellement ecrits dans traffic.tar (point 4).
+        Degrade en ensemble vide si Redis-telemetrie est injoignable -- on
+        comptera alors leur retard, jamais un double comptage silencieux."""
+        from . import trafic_temps_reel
+        from .producteur_evenements import connexion_redis_telemetrie
+
+        try:
+            return trafic_temps_reel.incidents_en_traffic_tar(connexion_redis_telemetrie())
+        except Exception:
+            logger.warning('Ensemble des embouteillages publies indisponible, retards comptes normalement')
+            return set()
+
+    def _evaluer(self, trips, premier_index, type_vehicule, costing, trafic_en_direct, incidents_en_trafic=None):
         """Trips Valhalla -> candidats normalises, avec reperes, retards des
         signalements et risque. Retards et risque recalcules a chaque appel (pas
         mis en cache : un signalement peut apparaitre ou expirer entre deux calculs)."""
@@ -188,7 +205,7 @@ class ServiceItineraire:
         for candidat in candidats:
             candidat['type_vehicule'] = type_vehicule or TypeVehicule.VOITURE
             ajouter_reperes_sans_risque(candidat)
-        candidats = retards_signalements.appliquer(candidats, costing, trafic_en_direct)
+        candidats = retards_signalements.appliquer(candidats, costing, trafic_en_direct, incidents_en_trafic)
         return risque_itineraire.evaluer(candidats, costing)
 
     def _trips(self, depart, arrivee, options, cap_origine, alternatives, etapes, eviter):

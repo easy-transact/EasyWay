@@ -875,6 +875,12 @@ class InvalidationCacheProchesTests(TestCase):
         self.incident = creer_incident(self.auteur, type_incident=TypeIncident.EMBOUTEILLAGE)
         self.votant = creer_utilisateur('votant@easyway.local')
         self.jetons_votant = connecter(self.client, self.votant.telephone)
+        # Voter exige une position recente pres de l'incident (point 3) ; l'incident est a DOUALA.
+        patcheur_position = patch(
+            'trips.services.derniere_position.lire', return_value=(DOUALA_LAT, DOUALA_LON)
+        )
+        patcheur_position.start()
+        self.addCleanup(patcheur_position.stop)
 
         import h3
         self.cellule_hex = h3.int_to_str(self.incident.cellule_h3_res8)
@@ -988,6 +994,14 @@ class VoteApiTests(TestCase):
         self.auteur = creer_utilisateur('auteur@easyway.local')
         self.votant = creer_utilisateur('votant@easyway.local')
         self.jetons_votant = connecter(self.client, self.votant.telephone)
+        # Voter exige une position recente pres de l'incident (point 3) : les
+        # incidents de ces tests sont tous a DOUALA, on simule donc un votant
+        # present. Les tests de rejet patchent lire() explicitement.
+        patcheur_position = patch(
+            'trips.services.derniere_position.lire', return_value=(DOUALA_LAT, DOUALA_LON)
+        )
+        patcheur_position.start()
+        self.addCleanup(patcheur_position.stop)
 
     def _voter(self, incident, sens, jetons=None):
         return self.client.post(
@@ -1023,6 +1037,26 @@ class VoteApiTests(TestCase):
         self._voter(incident, 'confirm')
         reponse = self._voter(incident, 'confirm')
         self.assertEqual(reponse.status_code, 400)
+
+    def test_vote_refuse_sans_position_recente(self):
+        # Voter exige une presence reelle pres de l'incident (point 3).
+        incident = creer_incident(self.auteur)
+        with patch('trips.services.derniere_position.lire', return_value=None):
+            reponse = self._voter(incident, 'confirm')
+        self.assertEqual(reponse.status_code, 400)
+
+    def test_vote_refuse_si_trop_loin_de_lincident(self):
+        incident = creer_incident(self.auteur)
+        with patch('trips.services.derniere_position.lire', return_value=(DOUALA_LAT + 0.1, DOUALA_LON)):
+            reponse = self._voter(incident, 'confirm')  # ~11 km
+        self.assertEqual(reponse.status_code, 400)
+
+    def test_staff_peut_voter_sans_position(self):
+        incident = creer_incident(self.auteur)
+        staff = creer_utilisateur('staff-vote@easyway.local', is_staff=True)
+        with patch('trips.services.derniere_position.lire', return_value=None):
+            reponse = self._voter(incident, 'confirm', jetons=connecter(self.client, staff.telephone))
+        self.assertEqual(reponse.status_code, 200)
 
     def test_trois_confirmations_promeuvent_en_attente_vers_actif(self):
         # SEUIL_CONFIANCE_VALIDATION = 3 : il faut 3 votants de reputation

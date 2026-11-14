@@ -264,7 +264,12 @@ class PublicationTempsReelTests(TestCase):
 
     def _voter(self, incident, sens, votant):
         jetons = connecter(self.client, votant.telephone)
-        with self.captureOnCommitCallbacks(execute=True):
+        # Voter exige une position recente pres de l'incident (point 3) : on
+        # place le votant sur l'incident, sans toucher aux tests de signalement.
+        with self.captureOnCommitCallbacks(execute=True), patch(
+            'trips.services.derniere_position.lire',
+            return_value=(incident.position.y, incident.position.x),
+        ):
             return self.client.post(
                 reverse('community:incident-vote', args=[incident.id]), {'direction': sens},
                 content_type='application/json', **jetons,

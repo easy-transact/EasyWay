@@ -15,6 +15,7 @@ from rest_framework import status
 from rest_framework.generics import get_object_or_404
 from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from accounts.pagination import StaffPagination
@@ -60,8 +61,10 @@ from .serializers import (
 from .services import PositionHorsRoute, QuotaDepasse, ServiceIncident, incidents_actifs_par_topologie
 
 DUREE_IDEMPOTENCE_S = 24 * 3600
-# Garde-fou : on signale ce qu'on voit, pas un point choisi sur la carte a distance.
+# Garde-fou : on signale (et on vote) ce qu'on voit, pas un point choisi sur la
+# carte a distance.
 DISTANCE_MAX_AUTEUR_M = 500
+DISTANCE_MAX_VOTE_M = 500
 AGE_MAX_POSITION_S = 120
 
 # MAX_CELLULES (cf. cache_incidents.py) : meme plafond que l'abonnement temps
@@ -689,6 +692,9 @@ class IncidentDetailView(APIView):
     responses={200: IncidentSerializer, 400: MessageSerializer},
 )
 class VoterIncidentView(APIView):
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'vote-incident'
+
     def post(self, request, id):
         serializer = VoteIncidentSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -696,6 +702,22 @@ class VoterIncidentView(APIView):
 
         with transaction.atomic():
             incident = get_object_or_404(Incident.objects.select_for_update(), id=id)
+
+            # Voter exige une presence reelle pres de l'incident, comme signaler
+            # (sinon deux comptes suffiraient a fermer n'importe quelle route du
+            # pays a distance -- cf. REVUE_CONFIRMATION_SIGNALEMENTS, point 3).
+            # Le staff (back-office) en est dispense.
+            if not request.user.is_staff:
+                from trips.services import derniere_position
+                from trips.services.geo import distance_haversine_m
+
+                position = derniere_position.lire(request.user.id, AGE_MAX_POSITION_S)
+                cible = (incident.position.y, incident.position.x)
+                if position is None or distance_haversine_m(position, cible) > DISTANCE_MAX_VOTE_M:
+                    return Response(
+                        {'detail': f'Too far from the report to vote (within {DISTANCE_MAX_VOTE_M} m of a recent position).'},
+                        status=400,
+                    )
 
             if incident.auteur_id == request.user.id:
                 return Response(

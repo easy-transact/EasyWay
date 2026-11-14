@@ -92,9 +92,23 @@ class RetardsSignalementsTests(TestCase):
         self.signaler(T.RADAR, '')
         self.assertEqual(self.calculer()[0]['delay_from_reports'], 0)
 
-    def test_embouteillage_actif_deja_dans_le_trafic_en_direct_pour_la_voiture(self):
+    def test_embouteillage_non_publie_est_compte_en_retard(self):
+        # traffic.tar non alimente (ensemble des incidents publies vide) : le
+        # bouchon DOIT etre compte en retard, sinon il n'agit nulle part (point 4).
         self.signaler(T.EMBOUTEILLAGE, S.A_L_ARRET)
-        self.assertEqual(self.calculer()[0]['delay_from_reports'], 0)
+        direct = next(r for r in self.calculer() if r['duration'] == 400)
+        self.assertGreater(direct['delay_from_reports'], 0)
+
+    def test_embouteillage_publie_dans_traffic_tar_non_recompte(self):
+        # L'embouteillage est reellement ecrit dans traffic.tar : sa vitesse est
+        # deja dans la duree Valhalla, on ne le recompte pas en retard.
+        incident = self.signaler(T.EMBOUTEILLAGE, S.A_L_ARRET)
+        with patch(
+            'trips.services.service_itineraire.ServiceItineraire._incidents_en_trafic',
+            return_value={str(incident.id)},
+        ):
+            direct = next(r for r in self.calculer() if r['duration'] == 400)
+        self.assertEqual(direct['delay_from_reports'], 0)
 
     def test_moto(self):
         self.signaler(T.EMBOUTEILLAGE, S.A_L_ARRET)
@@ -110,16 +124,46 @@ class RetardsSignalementsTests(TestCase):
         self.assertEqual(direct['vehicle_type'], 'MOTO')
 
     def test_route_barree_confirmee_exclue_sinon_ralentissement(self):
-        incident = self.signaler(T.VOIE_BLOQUEE, S.ROUTE_BARREE, confirmations=0)
+        # Score sous le seuil de validation (fermeture non confirmee) : simple
+        # ralentissement, pas d'exclusion -- une seule confirmation ne ferme
+        # plus la route pour tous (point 1/2).
+        incident = self.signaler(T.VOIE_BLOQUEE, S.ROUTE_BARREE, score_confiance=1)
         routes = self.calculer()
         self.assertNotIn('exclude_locations', self.options)
         self.assertGreater(next(r for r in routes if r['duration'] == 400)['delay_from_reports'], 0)
 
-        incident.confirmations = 1
-        incident.save(update_fields=['confirmations'])
+        # Score au seuil de validation : fermeture confirmee, exclue du graphe.
+        incident.score_confiance = 3
+        incident.save(update_fields=['score_confiance'])
         cache.clear()
         self.calculer()
         self.assertEqual(self.options['exclude_locations'], [{'lat': 4.05, 'lon': 9.715}])
+
+    def test_fermeture_contestee_nest_plus_exclue(self):
+        # Fermeture confirmee (score 3) puis contredite : >= 2 infirmations qui
+        # font repasser le score sous zero -> plus exclue, plus de retard (point 2/6).
+        incident = self.signaler(T.VOIE_BLOQUEE, S.ROUTE_BARREE, score_confiance=3)
+        self.calculer()
+        self.assertEqual(self.options['exclude_locations'], [{'lat': 4.05, 'lon': 9.715}])
+
+        incident.score_confiance = -1
+        incident.infirmations = 2
+        incident.save(update_fields=['score_confiance', 'infirmations'])
+        cache.clear()
+        routes = self.calculer()
+        self.assertNotIn('exclude_locations', self.options)
+        self.assertEqual(next(r for r in routes if r['duration'] == 400)['delay_from_reports'], 0)
+
+    def test_confiance_pleine_au_seuil_reduit_pour_auteur_repute(self):
+        # Point 7 : un auteur repute (seuil 2) voit son signalement valide a
+        # score 2 compter pour 1.0, pas 0.75 (division par 1 + seuil, pas par 4).
+        from decimal import Decimal
+
+        repute = creer_utilisateur(email='repute-conf@test.cm', score_reputation=Decimal('3'))
+        incident = self.signaler(T.ACCIDENT, S.CARAMBOLAGE, auteur=repute, score_confiance=2)
+        self.assertAlmostEqual(retards_signalements.confiance(incident), 1.0, places=5)
+        incident_neutre = self.signaler(T.ACCIDENT, S.CARAMBOLAGE, score_confiance=2)
+        self.assertAlmostEqual(retards_signalements.confiance(incident_neutre), 0.75, places=5)
 
     def test_signalement_tout_neuf_compte_moins(self):
         self.signaler(T.ACCIDENT, S.CARAMBOLAGE, score_confiance=0)
@@ -151,7 +195,9 @@ class ValidationParLaModerationTests(RetardsSignalementsTests):
     """Le back-office valide une route barree : evitee sans attendre les votes."""
 
     def test_route_barree_validee_par_le_staff_exclue(self):
-        incident = self.signaler(T.VOIE_BLOQUEE, S.ROUTE_BARREE, confirmations=0, statut=StatutIncident.EN_ATTENTE)
+        incident = self.signaler(
+            T.VOIE_BLOQUEE, S.ROUTE_BARREE, confirmations=0, score_confiance=0, statut=StatutIncident.EN_ATTENTE,
+        )
         self.calculer()
         self.assertNotIn('exclude_locations', self.options)  # non confirmee : simple ralentissement
 
@@ -172,7 +218,7 @@ class ValidationParLaModerationTests(RetardsSignalementsTests):
     def test_voie_bloquee_sans_sous_type_validee_exclue(self):
         # Cas du 28/10 (Logbessou) : signalee depuis la carte de test, sans
         # sous-type ni cap -- ignoree jusqu'ici, meme validee.
-        incident = self.signaler(T.VOIE_BLOQUEE, '', cap=None, confirmations=0)
+        incident = self.signaler(T.VOIE_BLOQUEE, '', cap=None, confirmations=0, score_confiance=0)
         routes = self.calculer()
         self.assertNotIn('exclude_locations', self.options)
         self.assertGreater(next(r for r in routes if r['duration'] == 400)['delay_from_reports'], 0)  # au moins ralentie
@@ -192,8 +238,11 @@ class ValidationParLaModerationTests(RetardsSignalementsTests):
     test_accident_sur_le_direct_fait_passer_le_detour_devant = None
     test_autre_sens_de_circulation_sans_effet = None
     test_police_et_radar_sans_effet = None
-    test_embouteillage_actif_deja_dans_le_trafic_en_direct_pour_la_voiture = None
+    test_embouteillage_non_publie_est_compte_en_retard = None
+    test_embouteillage_publie_dans_traffic_tar_non_recompte = None
     test_moto = None
     test_route_barree_confirmee_exclue_sinon_ralentissement = None
+    test_fermeture_contestee_nest_plus_exclue = None
+    test_confiance_pleine_au_seuil_reduit_pour_auteur_repute = None
     test_signalement_tout_neuf_compte_moins = None
     test_prevision_enregistree_et_reliee_au_trajet = None

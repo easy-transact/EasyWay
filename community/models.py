@@ -333,6 +333,29 @@ class Incident(models.Model):
             return SEUIL_CONFIANCE_VALIDATION_REDUITE
         return SEUIL_CONFIANCE_VALIDATION
 
+    def est_conteste(self) -> bool:
+        """Contredit par la communaute : le score est retombe sous zero apres
+        au moins deux infirmations. Un signalement conteste ne s'applique plus
+        a l'itineraire (fermeture, retard, risque, trafic) mais reste visible,
+        pour que d'autres conducteurs tranchent."""
+        return self.infirmations >= 2 and self.score_confiance < 0
+
+    def est_confirme_pour_fermeture(self) -> bool:
+        """Seuil unique pour RETIRER une route du graphe de routage pour tous :
+        le meme que pour devenir ACTIF/visible (score >= seuil_validation), ou
+        un signalement officiel (autorite), ou une validation par la
+        moderation. En dessous, une route barree reste un fort ralentissement
+        (effet FERMETURE non confirme : ~10 km/h sur 300 m), jamais une
+        exclusion -- une seule confirmation ne ferme plus une route pour tout
+        le pays (cf. REVUE_CONFIRMATION_SIGNALEMENTS, points 1 et 2)."""
+        if self.est_conteste():
+            return False
+        return (
+            self.valide_par_staff
+            or self.organisation_id is not None
+            or self.score_confiance >= self.seuil_validation()
+        )
+
     def confirmer(self, vote: 'Vote'):
         # F() plutot qu'un += sur vote.votant : l'instance de l'appelant
         # (request.user) n'a pas a etre verrouillee pour ce simple compteur.
