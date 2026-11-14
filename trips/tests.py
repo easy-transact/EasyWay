@@ -16,7 +16,14 @@ from accounts.tests import connecter, numero_telephone_test
 from .exceptions import TransitionInvalide
 from .models import FUSEAU_TRAFIC, EchantillonVitesse, NiveauTrafic, StatutTrajet, Trajet
 from .polyline import decoder_polyline6, encoder_polyline6
-from .services import client_locate, service_trafic, trafic_temps_reel, tuiles_trafic
+from .services import (
+    client_locate,
+    client_meili,
+    client_trace_attributes,
+    service_trafic,
+    trafic_temps_reel,
+    tuiles_trafic,
+)
 from .services.client_corridor_reference import ClientCorridorReference
 from .services.client_meili import ErreurMeili
 from .services.client_routage import ClientRoutage
@@ -180,6 +187,15 @@ class ServiceItineraireTests(TestCase):
         self.assertTrue(candidat['est_recommande'])
         self.assertEqual(candidat['distance'], 1280)
         self.assertEqual(len(candidat['manoeuvres']), 1)
+
+    def test_evitement_colle_a_une_extremite_est_ignore(self):
+        # Un point a eviter sur le depart ne peut pas etre exclu (Valhalla ne
+        # pourrait plus partir) : il est ecarte, l'autre est bien transmis.
+        client = ClientFactice()
+        service = ServiceItineraire(client=client)
+        depart, arrivee = (4.0483, 9.7043), (4.0469, 9.6970)
+        service.calculer(depart, arrivee, self.utilisateur, eviter=[depart, (4.10, 9.80)])
+        self.assertEqual(client.dernieres_options.get('exclude_locations'), [{'lat': 4.10, 'lon': 9.80}])
 
     def test_trafic_du_candidat_reflete_evaluer_route(self):
         with patch(
@@ -829,6 +845,19 @@ class ClientLocateTests(TestCase):
             with self.assertRaises(client_locate.ErreurLocate):
                 client_locate.localiser(4.0, 9.7)
 
+    def test_reponse_400_ne_compte_pas_pour_le_disjoncteur(self):
+        # 4xx = requete refusee (cas normal), pas une panne : ErreurLocate mais
+        # le disjoncteur partage reste ferme -- sinon un seul mauvais point
+        # couperait le routage de tous (meme logique que ClientValhalla).
+        reponse_400 = Mock(status_code=400)
+        reponse_400.raise_for_status.side_effect = requests.exceptions.HTTPError(response=reponse_400)
+        with patch('trips.services.client_locate.requests.post', return_value=reponse_400):
+            for _ in range(SEUIL_ECHECS + 1):
+                with self.assertRaises(client_locate.ErreurLocate):
+                    client_locate.localiser(4.0, 9.7)
+        self.assertIsNone(cache.get(CLE_ECHECS))
+        self.assertIsNone(cache.get(CLE_OUVERT_JUSQU_A))
+
     def test_disjoncteur_partage_avec_valhalla(self):
         # Le disjoncteur est partage (meme conteneur) : des echecs de
         # ClientValhalla doivent aussi bloquer client_locate sans nouvel appel reseau.
@@ -844,6 +873,50 @@ class ClientLocateTests(TestCase):
             with self.assertRaises(DisjoncteurOuvert):
                 client_locate.localiser(4.0, 9.7)
             post_simule.assert_not_called()
+
+
+class ClientsValhalla4xxDisjoncteurTests(TestCase):
+    """Un 4xx de /trace_attributes (map-matching, suivi de trace) ne doit pas
+    non plus ouvrir le disjoncteur partage : il couperait le routage de tous
+    pour une geometrie que Valhalla a simplement refusee."""
+
+    def setUp(self):
+        cache.clear()
+
+    @staticmethod
+    def _reponse_400():
+        reponse = Mock(status_code=400)
+        reponse.raise_for_status.side_effect = requests.exceptions.HTTPError(response=reponse)
+        return reponse
+
+    def test_meili_400_leve_erreur_sans_ouvrir_le_disjoncteur(self):
+        points = [{'lat': 4.0, 'lon': 9.7, 'time': 0}, {'lat': 4.01, 'lon': 9.71, 'time': 4}]
+        with patch('trips.services.client_meili.requests.post', return_value=self._reponse_400()):
+            for _ in range(SEUIL_ECHECS + 1):
+                with self.assertRaises(ErreurMeili):
+                    client_meili.tracer(points)
+        self.assertIsNone(cache.get(CLE_ECHECS))
+        self.assertIsNone(cache.get(CLE_OUVERT_JUSQU_A))
+
+    def test_trace_attributes_400_leve_erreur_sans_ouvrir_le_disjoncteur(self):
+        points = [(9.70, 4.0), (9.71, 4.01)]
+        with patch('trips.services.client_trace_attributes.requests.post', return_value=self._reponse_400()):
+            for _ in range(SEUIL_ECHECS + 1):
+                with self.assertRaises(client_trace_attributes.ErreurTraceAttributes):
+                    client_trace_attributes.attributs_trace(points)
+        self.assertIsNone(cache.get(CLE_ECHECS))
+        self.assertIsNone(cache.get(CLE_OUVERT_JUSQU_A))
+
+    def test_meili_5xx_ouvre_le_disjoncteur(self):
+        # Contraste : une vraie panne (5xx) compte toujours comme un echec.
+        reponse_500 = Mock(status_code=500)
+        reponse_500.raise_for_status.side_effect = requests.exceptions.HTTPError(response=reponse_500)
+        points = [{'lat': 4.0, 'lon': 9.7, 'time': 0}, {'lat': 4.01, 'lon': 9.71, 'time': 4}]
+        with patch('trips.services.client_meili.requests.post', return_value=reponse_500):
+            for _ in range(SEUIL_ECHECS):
+                with self.assertRaises(ErreurMeili):
+                    client_meili.tracer(points)
+        self.assertIsNotNone(cache.get(CLE_OUVERT_JUSQU_A))
 
 
 def _trajet_actif_pour(utilisateur, **overrides):
@@ -1181,6 +1254,29 @@ class TelemetriePositionsApiTests(TestCase):
             self.assertEqual(evenement['trajet_id'], str(self.trajet.id))
             self.assertNotIn('utilisateur_id', evenement)
             self.assertNotIn('user_id', evenement)
+
+    def test_position_dans_le_futur_rejetee(self):
+        # Horodatage futur = tentative d'injecter un faux trafic "actuel".
+        futur = (timezone.now() + timezone.timedelta(hours=1)).isoformat()
+        lot = self._lot(positions=[{'lat': 4.05, 'lon': 9.70, 'timestamp': futur}])
+        reponse = self.client.post(
+            reverse('trips:telemetrie-positions'), lot, content_type='application/json', **self.jetons,
+        )
+        self.assertEqual(reponse.status_code, 400)
+
+    def test_position_future_ecartee_sans_perdre_le_reste_du_lot(self):
+        futur = (timezone.now() + timezone.timedelta(hours=1)).isoformat()
+        lot = self._lot(positions=[
+            {'lat': 4.0483, 'lon': 9.7043, 'timestamp': '2026-01-01T10:00:00Z'},
+            {'lat': 4.0480, 'lon': 9.7040, 'timestamp': futur},
+        ])
+        with patch('trips.views.ProducteurRedisStreams') as ClasseProducteur:
+            producteur = ClasseProducteur.return_value
+            reponse = self.client.post(
+                reverse('trips:telemetrie-positions'), lot, content_type='application/json', **self.jetons,
+            )
+        self.assertEqual(reponse.status_code, 202)
+        self.assertEqual(producteur.publier.call_count, 1)  # seule la position non future est publiee
 
     def test_mode_invisible_ne_publie_rien(self):
         self.utilisateur.mode_invisible = True

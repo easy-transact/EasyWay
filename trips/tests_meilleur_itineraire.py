@@ -59,6 +59,30 @@ class MeilleurItineraireTests(TestCase):
         self.assertEqual(donnees['better_route']['route_id'], 'nord')
         self.assertEqual((donnees['current_duration_s'], donnees['time_saved_s']), (1200, 660))
 
+    def test_vitesse_connue_transmise_au_service_sans_verification_de_cap(self):
+        # A l'arret (3 km/h), le service recoit la vitesse -- il ignorera le cap
+        # GPS lui-meme (VITESSE_MIN_CAP_KMH), sans calcul sans-cap supplementaire.
+        with patch('trips.services.meilleur_itineraire.ServiceItineraire') as Service:
+            Service.return_value.calculer.return_value = [candidat(ROUTE_SUIVIE, 600, 'suivie')]
+            self.client.post(
+                self.url, {'lat': 4.05, 'lon': 9.705, 'heading': 90, 'speed_kmh': 3},
+                content_type='application/json', **self.jetons,
+            )
+            kwargs = Service.return_value.calculer.call_args.kwargs
+        self.assertEqual(kwargs['vitesse_origine_kmh'], 3)
+        self.assertFalse(kwargs['verifier_cap'])
+
+    def test_cap_verifie_quand_vitesse_absente(self):
+        with patch('trips.services.meilleur_itineraire.ServiceItineraire') as Service:
+            Service.return_value.calculer.return_value = [candidat(ROUTE_SUIVIE, 600, 'suivie')]
+            self.client.post(
+                self.url, {'lat': 4.05, 'lon': 9.705, 'heading': 90},
+                content_type='application/json', **self.jetons,
+            )
+            kwargs = Service.return_value.calculer.call_args.kwargs
+        self.assertIsNone(kwargs['vitesse_origine_kmh'])
+        self.assertTrue(kwargs['verifier_cap'])
+
     def test_gain_trop_faible(self):
         reponse = self.demander([candidat(ROUTE_SUIVIE, 600, 'suivie'), candidat(VARIANTE, 520, 'nord')])
         self.assertEqual(reponse.json()['reason'], 'NO_BETTER')

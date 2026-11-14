@@ -31,8 +31,22 @@ def verifier():
 
 
 def enregistrer_echec():
-    echecs = (cache.get(CLE_ECHECS) or 0) + 1
-    cache.set(CLE_ECHECS, echecs, timeout=FENETRE_COMPTAGE_ECHECS_S)
+    # Comptage atomique : cache.get + cache.set n'est PAS atomique -- deux
+    # workers qui echouent en meme temps peuvent lire la meme valeur et perdre
+    # un echec, retardant l'ouverture du disjoncteur. cache.incr (INCR Redis)
+    # l'est. add() pose la cle (et sa fenetre) si absente ; sinon on incremente
+    # et on prolonge la fenetre (comptage glissant, comme avant).
+    if cache.add(CLE_ECHECS, 1, timeout=FENETRE_COMPTAGE_ECHECS_S):
+        echecs = 1
+    else:
+        try:
+            echecs = cache.incr(CLE_ECHECS)
+        except ValueError:
+            # la cle a expire entre add et incr -- repartir de 1
+            cache.set(CLE_ECHECS, 1, timeout=FENETRE_COMPTAGE_ECHECS_S)
+            echecs = 1
+        else:
+            cache.touch(CLE_ECHECS, FENETRE_COMPTAGE_ECHECS_S)
     if echecs >= SEUIL_ECHECS:
         cache.set(CLE_OUVERT_JUSQU_A, time.time() + DUREE_OUVERTURE_S, timeout=DUREE_OUVERTURE_S)
 

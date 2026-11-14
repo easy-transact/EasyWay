@@ -46,6 +46,14 @@ def attributs_trace(points: list[tuple[float, float]]) -> list[dict] | None:
             timeout=TIMEOUT_S,
         )
         reponse.raise_for_status()
+    except requests.HTTPError as exc:
+        # 4xx = geometrie refusee par Valhalla : cas normal, pas une panne. Ne
+        # jamais ouvrir le disjoncteur partage pour ca -- ce serait couper le
+        # routage de tous. Seuls 5xx/reseau comptent comme panne.
+        if exc.response is not None and 400 <= exc.response.status_code < 500:
+            raise ErreurTraceAttributes(str(exc)) from exc
+        disjoncteur.enregistrer_echec()
+        raise ErreurTraceAttributes(str(exc)) from exc
     except requests.RequestException as exc:
         disjoncteur.enregistrer_echec()
         raise ErreurTraceAttributes(str(exc)) from exc

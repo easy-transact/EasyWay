@@ -1,4 +1,7 @@
+from datetime import timedelta
+
 from django.contrib.gis.geos import LineString, Point
+from django.utils import timezone
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
@@ -424,6 +427,14 @@ class MeilleurItineraireSerializer(serializers.Serializer):
         required=False, allow_null=True, min_value=0, max_value=359, default=None,
         help_text='Cap actuel : evite un demi-tour en tete du nouvel itineraire.',
     )
+    speed_kmh = serializers.FloatField(
+        required=False, allow_null=True, min_value=0, default=None, source='vitesse_kmh',
+        help_text=(
+            'Vitesse GPS actuelle (km/h). Sous 10 km/h, heading est ignore (cap GPS non fiable '
+            "a l'arret, ex. feu rouge). Absente : le serveur compare avec un calcul sans cap et "
+            "ne garde le cap que s'il evite un detour notable."
+        ),
+    )
     remaining_waypoints = PointEvitementSerializer(
         many=True, required=False, default=list, max_length=MAX_ETAPES,
         help_text='Etapes pas encore atteintes, dans l\'ordre (vide si aucune).',
@@ -484,6 +495,13 @@ class NoterTrajetSerializer(serializers.Serializer):
 
 LIMITE_POSITIONS_PAR_LOT = 500
 
+# Un horodatage de telemetrie dans le futur (hors petite derive d'horloge)
+# serait pris pour du trafic recent et publierait une fausse vitesse courante
+# (cf. trafic_temps_reel.vitesses_mesurees) : on l'ecarte. Le passe n'est PAS
+# borne -- une position bufferisee hors reseau, renvoyee en retard, tombe dans
+# son bucket historique reel, ce qui est correct, pas dangereux.
+MARGE_HORODATAGE_FUTUR_S = 5 * 60
+
 
 class PositionTelemetrieSerializer(serializers.Serializer):
     """Une position GPS du lot -- jamais persistee telle quelle (cf.
@@ -519,7 +537,13 @@ class TelemetriePositionsSerializer(serializers.Serializer):
     def validate_positions(self, positions):
         if len(positions) > LIMITE_POSITIONS_PAR_LOT:
             raise serializers.ValidationError(f'Maximum {LIMITE_POSITIONS_PAR_LOT} positions per batch.')
-        return positions
+        plafond = timezone.now() + timedelta(seconds=MARGE_HORODATAGE_FUTUR_S)
+        # On ECARTE les positions dans le futur plutot que de rejeter tout le
+        # lot : une seule position aberrante ne doit pas perdre les autres.
+        passees = [p for p in positions if p['horodatage'] <= plafond]
+        if not passees:
+            raise serializers.ValidationError('timestamp: horodatage dans le futur.')
+        return passees
 
 
 class ZoneVitesseCreationSerializer(serializers.Serializer):

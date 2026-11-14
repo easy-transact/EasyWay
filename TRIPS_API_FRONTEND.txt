@@ -49,10 +49,18 @@ Body:
   {
     "origin_lat": 4.0483, "origin_lon": 9.7043,
     "destination_lat": 4.0469, "destination_lon": 9.6970,
-    "avoid": [                          // optional, default []
+    "avoid": [                          // optional, default [], MAX 20 points
       { "lat": 4.0505, "lon": 9.7021 }  // e.g. an incident's position
-    ]
+    ],
+    "waypoints": [ ... ],               // optional, default [], MAX 25 points
+    "origin_heading": 180,              // optional, 0-359
+    "origin_speed_kmh": 32.5            // optional; under 10 km/h origin_heading is ignored
   }
+
+LIMITS (new): avoid <= 20, waypoints <= 25, and every lat/lon is bounds-checked
+(lat -90..90, lon -180..180). Over the limit or out of bounds => 400.
+RATE LIMIT (new): this endpoint is throttled to 300 requests/hour per user;
+over it => 429 (back off, don't hammer it on every map pan).
 
 `avoid` is a REAL exclusion sent to Valhalla (exclude_locations) — it is not
 a client-side reclassification. Verified end-to-end this session: the same
@@ -61,6 +69,14 @@ recommended route's distance from 1280m to 1787m with a genuinely different
 geometry. This is what "propose a new route near an incident" actually is —
 recompute with avoid=[{incident.lat, incident.lon}], don't try to filter the
 existing candidates client-side.
+
+AVOID NEAR THE ENDS (new): an avoid point within ~100m of the origin, the
+destination or a waypoint is silently DROPPED server-side — you cannot exclude
+the very place you start from or arrive at (Valhalla would fail the whole
+request). So a non-empty `avoid` does not guarantee every point was applied;
+there is no per-point "ignored" flag yet (planned, needs this contract to grow
+into an object response first). If `avoid` makes the trip genuinely impossible,
+you get an EMPTY ARRAY (see below), never a straight line.
 
 Success 200 — a JSON ARRAY (not wrapped in an object) of 1–3 route
 candidates, first one is `is_recommended: true` unless traffic pushed
@@ -108,6 +124,13 @@ Notes:
     haversine "route" so the UI has *something*, but do not draw it as a
     road-following path or use its maneuvers (there are none). Show this
     state distinctly to the user (e.g. "routing service degraded").
+  - EMPTY ARRAY `[]` (new, distinct from degraded): Valhalla answered but
+    there is NO path — typically because `avoid` boxed the trip in, or no road
+    connects the two points. This is NOT a server error and NOT a straight
+    line: there simply is no route under these constraints. Handle it as
+    "no route found" (e.g. suggest the user remove an avoid point), separate
+    from `degraded` (service down). A 4xx from Valhalla now maps to this empty
+    array, and never trips the shared circuit breaker.
 
 TRAFFIC (traffic_level / duration_with_traffic) — be aware this is honest
 but currently uninformative: the traffic pipeline (P5) exists and is wired
@@ -310,6 +333,13 @@ Body:
       // up to 500 positions per call
     ]
   }
+
+TIMESTAMP (new): a position whose `timestamp` is in the FUTURE (beyond a 5-min
+clock-skew tolerance) is dropped — it would otherwise poison the live-traffic
+signal as fake "current" speed. Positions in the past are fine (buffered
+offline sends are kept, they land in their real historical bucket). If EVERY
+position in the batch is future-dated, you get a 400 on `timestamp`; otherwise
+the future ones are silently skipped and the rest are accepted (still 202).
 
 Success 202: empty body. ALWAYS 202 on success, even if the batch is
 silently dropped (see mode_invisible below) — this is intentional, the

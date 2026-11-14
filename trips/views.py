@@ -311,6 +311,7 @@ class MeilleurItineraireView(APIView):
             trajet, (donnees['lat'], donnees['lon']), request.user, cap=donnees['heading'],
             etapes_restantes=[(p['lat'], p['lon']) for p in donnees['remaining_waypoints']],
             eviter=[(p['lat'], p['lon']) for p in donnees['avoid']],
+            vitesse_kmh=donnees['vitesse_kmh'],
         )
         if resultat['action'] in ('PROPOSE', 'IMPOSE') and resultat['better_route']:
             PropositionItineraire.objects.create(
@@ -350,6 +351,7 @@ class AutresItinerairesView(APIView):
             trajet, (donnees['lat'], donnees['lon']), request.user, cap=donnees['heading'],
             etapes_restantes=[(p['lat'], p['lon']) for p in donnees['remaining_waypoints']],
             eviter=[(p['lat'], p['lon']) for p in donnees['avoid']],
+            vitesse_kmh=donnees['vitesse_kmh'],
         )
         return Response(AutresItinerairesReponseSerializer(resultat).data)
 

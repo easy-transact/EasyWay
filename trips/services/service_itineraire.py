@@ -21,6 +21,7 @@ from . import duree_ville, retards_signalements, risque_itineraire, service_traf
 from .client_corridor_reference import ClientCorridorReference
 from .client_valhalla import NOMBRE_MAX_ITINERAIRES, ClientValhalla
 from .corridors import trouver_corridor
+from .geo import distance_haversine_m
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,26 @@ VITESSE_MIN_CAP_KMH = 10
 # Vitesse inconnue (verifier_cap) : si l'itineraire sans cap est plus rapide
 # d'au moins ce delai, le cap a force un detour -- on le laisse tomber.
 GAIN_MIN_SANS_CAP_S = 120
+
+# Un point `avoid` a moins de cette distance du depart, de l'arrivee ou d'une
+# etape ne peut pas etre exclu : Valhalla ne pourrait ni partir ni arriver et
+# echouerait TOUT le calcul ("no path"). On l'ignore en silence plutot que de
+# renvoyer "aucun itineraire" -- un tel point est de toute facon sur le trajet,
+# pas un detour contournable.
+MARGE_EVITEMENT_EXTREMITE_M = 100
+
+
+def _evitements_exploitables(eviter, depart, arrivee, etapes):
+    """Separe les points `avoid` en (gardes, ignores) : ignore ceux a moins de
+    MARGE_EVITEMENT_EXTREMITE_M d'une extremite ou d'une etape (cf. constante)."""
+    reperes = [depart, arrivee, *(etapes or [])]
+    gardes, ignores = [], []
+    for point in eviter:
+        if any(distance_haversine_m(point, repere) < MARGE_EVITEMENT_EXTREMITE_M for repere in reperes):
+            ignores.append(point)
+        else:
+            gardes.append(point)
+    return gardes, ignores
 
 
 def parametres_de(utilisateur):
@@ -111,9 +132,17 @@ class ServiceItineraire:
         type_vehicule = type_vehicule or utilisateur.type_vehicule
         options = self._options_depuis_parametres(utilisateur, type_vehicule)
         costing = options['costing']
+        # Un point a eviter colle au depart/arrivee/etape ferait echouer tout
+        # le calcul : on l'ecarte avant de parler a Valhalla (cf. constante).
+        eviter, eviter_ignores = _evitements_exploitables(list(eviter or []), depart, arrivee, etapes)
+        if eviter_ignores:
+            logger.info(
+                '%d point(s) a eviter ignore(s) : trop proche(s) du depart, de la destination ou d\'une etape',
+                len(eviter_ignores),
+            )
         # Fermetures confirmees (route barree, inondation) : exclues du calcul,
         # comme un point `avoid` (cf. retards_signalements.fermetures_a_eviter).
-        eviter = list(eviter or []) + retards_signalements.fermetures_a_eviter(depart, arrivee, etapes, costing)
+        eviter = eviter + retards_signalements.fermetures_a_eviter(depart, arrivee, etapes, costing)
         if eviter:
             # cf. https://valhalla.github.io/valhalla/api/turn-by-turn/api-reference/#exclude-locations
             # -- cle top-level du payload /route, pas une costing_option.
