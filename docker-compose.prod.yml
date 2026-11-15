@@ -67,6 +67,12 @@ services:
       # interprete en UTC (profils historiques decales d'1 h a Douala).
       # Changer cette valeur demande UN rebuild (force_rebuild=True une fois).
       - build_time_zones=True
+      # Vitesses par defaut OSM communautaires (moins optimistes en ville que
+      # les valeurs internes de Valhalla) : corrige le choix de route qui
+      # privilegie les axes principaux bouches (revue 1.1, cf.
+      # docker/VITESSES_DEFAUT.md). Prend effet au PROCHAIN rebuild des tuiles
+      # (force_rebuild=True une passe), comme build_time_zones ci-dessus.
+      - use_default_speeds_config=True
       - build_transit=False
       - server_threads=2
       # Squelette traffic.tar (mjolnir.traffic_extract) rempli toutes les 90 s
