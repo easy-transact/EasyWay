@@ -83,6 +83,10 @@ def patcher_locate_incident(
             }
         fonction_simulee.side_effect = _repondre
     test_case.addCleanup(patcheur.stop)
+    # Troncon OSM (noeuds, Valhalla >= 3.6) : jamais d'appel reseau en test.
+    patcheur_troncon = patch('trips.services.client_trace_attributes.troncon_au_point', return_value=None)
+    patcheur_troncon.start()
+    test_case.addCleanup(patcheur_troncon.stop)
     return fonction_simulee
 
 
@@ -750,13 +754,25 @@ class IncidentsSurTrajetApiTests(TestCase):
     # Matching par topologie (way_id OSM + sens) : cf. discussion frontend
     # (Waze) -- remplace le couloir de distance des que Valhalla repond.
 
-    def test_incident_meme_way_id_et_sens_inclus_meme_hors_couloir(self):
-        # A ~5.5km du trace -- prouve que l'inclusion vient du way_id, pas de
-        # la distance (qui l'aurait exclu sous n'importe quel couloir raisonnable).
+    def test_incident_meme_way_id_et_sens_hors_couloir_exclu(self):
+        # Meme voie OSM, mais ~5,5 km plus loin : une voie peut faire des
+        # kilometres et le trajet n'en parcourt qu'une partie -- la voie seule
+        # ne suffit pas, il faut aussi etre dans le couloir du trace.
+        patcher_attributs_trace(self, aretes=[{'way_id': 111, 'forward': True}])
+        creer_incident(
+            self.utilisateur, lat=DOUALA_LAT + 0.05, lon=DOUALA_LON + 0.05,
+            way_id_osm=111, forward_osm=True, cap=270,
+        )
+        reponse = self.client.post(
+            reverse('community:incidents-sur-trajet'), {'geometry': self.geometrie},
+            content_type='application/json',
+        )
+        self.assertEqual(reponse.json(), [])
+
+    def test_incident_meme_way_id_et_sens_sur_le_trace_inclus(self):
         patcher_attributs_trace(self, aretes=[{'way_id': 111, 'forward': True}])
         incident = creer_incident(
-            self.utilisateur, lat=DOUALA_LAT + 0.05, lon=DOUALA_LON + 0.05,
-            way_id_osm=111, forward_osm=True,
+            self.utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON - 0.003, way_id_osm=111, forward_osm=True, cap=270,
         )
         reponse = self.client.post(
             reverse('community:incidents-sur-trajet'), {'geometry': self.geometrie},
@@ -778,25 +794,69 @@ class IncidentsSurTrajetApiTests(TestCase):
 
     def test_incident_meme_way_id_sens_oppose_exclu(self):
         patcher_attributs_trace(self, aretes=[{'way_id': 111, 'forward': True}])
-        creer_incident(self.utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON, way_id_osm=111, forward_osm=False)
+        creer_incident(self.utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON, way_id_osm=111, forward_osm=False, cap=90)
         reponse = self.client.post(
             reverse('community:incidents-sur-trajet'), {'geometry': self.geometrie},
             content_type='application/json',
         )
         self.assertEqual(reponse.json(), [])
 
-    def test_incident_sans_way_id_osm_absent_quand_valhalla_repond(self):
-        # Incident "legacy" (cree avant cette colonne, ou signale sans
-        # verification routiere) : n'apparait jamais via ce matching des que
-        # Valhalla repond, meme s'il est geometriquement sur le trace -- pas
-        # de repli partiel, seule une panne Valhalla declenche le couloir.
+    def test_incident_sans_cap_meme_voie_inclus_dans_les_deux_sens(self):
+        # Sans cap, le sens (forward_osm) a ete devine par Valhalla : il ne
+        # doit pas exclure les trajets de l'autre sens.
         patcher_attributs_trace(self, aretes=[{'way_id': 111, 'forward': True}])
-        creer_incident(self.utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON, way_id_osm=None, forward_osm=None)
+        incident = creer_incident(
+            self.utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON, way_id_osm=111, forward_osm=False, cap=None,
+        )
         reponse = self.client.post(
             reverse('community:incidents-sur-trajet'), {'geometry': self.geometrie},
             content_type='application/json',
         )
-        self.assertEqual(reponse.json(), [])
+        self.assertEqual([i['id'] for i in reponse.json()], [str(incident.id)])
+
+    def test_troncon_osm_plus_precis_que_la_voie(self):
+        # Valhalla >= 3.6 : le trajet parcourt le troncon 10 -> 11 de la voie
+        # 111 ; un signalement sur le troncon suivant (11 -> 12) de la meme
+        # voie, a quelques metres apres le carrefour, n'est pas sur le trajet.
+        patcher_attributs_trace(self, aretes=[{'way_id': 111, 'forward': True, 'noeuds': (10, 11)}])
+        dessus = creer_incident(self.utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON - 0.003, way_id_osm=111,
+                                forward_osm=True, cap=270, noeud_debut_osm=10, noeud_fin_osm=11)
+        creer_incident(self.utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON - 0.0069, way_id_osm=111,
+                       forward_osm=True, cap=270, noeud_debut_osm=11, noeud_fin_osm=12)
+        reponse = self.client.post(
+            reverse('community:incidents-sur-trajet'), {'geometry': self.geometrie},
+            content_type='application/json',
+        )
+        self.assertEqual([i['id'] for i in reponse.json()], [str(dessus.id)])
+
+    def test_position_retire_les_depasses_et_trie_par_distance_restante(self):
+        # Trace vers l'ouest (~780 m) ; conducteur a ~330 m du depart.
+        derriere = creer_incident(self.utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON - 0.001, severite=5)
+        loin = creer_incident(self.utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON - 0.006, severite=5)
+        proche = creer_incident(self.utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON - 0.004, severite=1)
+        reponse = self.client.post(
+            reverse('community:incidents-sur-trajet'),
+            {'geometry': self.geometrie, 'lat': DOUALA_LAT, 'lon': DOUALA_LON - 0.003},
+            content_type='application/json',
+        )
+        corps = reponse.json()
+        self.assertEqual([i['id'] for i in corps], [str(proche.id), str(loin.id)])
+        self.assertNotIn(str(derriere.id), [i['id'] for i in corps])
+        self.assertAlmostEqual(corps[0]['distance_ahead_m'], 111, delta=5)
+        self.assertAlmostEqual(corps[0]['distance_from_start_m'], 445, delta=5)
+
+    def test_incident_sans_way_id_osm_retrouve_par_le_couloir(self):
+        # Cree pendant une panne de Valhalla (pas encore recale sur une voie,
+        # cf. recaler_signalements_sans_voie) : retrouve par couloir + cap
+        # plutot que perdu pour tous les trajets.
+        patcher_attributs_trace(self, aretes=[{'way_id': 111, 'forward': True}])
+        incident = creer_incident(self.utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON, way_id_osm=None, cap=270)
+        creer_incident(self.utilisateur, lat=DOUALA_LAT, lon=DOUALA_LON - 0.002, way_id_osm=None, cap=90)  # autre sens
+        reponse = self.client.post(
+            reverse('community:incidents-sur-trajet'), {'geometry': self.geometrie},
+            content_type='application/json',
+        )
+        self.assertEqual([i['id'] for i in reponse.json()], [str(incident.id)])
 
     def test_valhalla_indisponible_replie_sur_le_couloir(self):
         # Panne Valhalla (disjoncteur ouvert) : repli complet sur couloir+cap
@@ -810,6 +870,35 @@ class IncidentsSurTrajetApiTests(TestCase):
             content_type='application/json',
         )
         self.assertEqual([i['id'] for i in reponse.json()], [str(incident.id)])
+
+
+class RecalageSignalementsTests(TestCase):
+    def test_voie_et_sens_completes_quand_valhalla_repond(self):
+        from .tasks import recaler_signalements_sans_voie
+
+        incident = creer_incident(creer_utilisateur(), way_id_osm=None, cap=270)
+        arete = {'distance_m': 4, 'lat': DOUALA_LAT, 'lon': DOUALA_LON, 'destination_only': False,
+                 'use': 'road', 'way_id': 111, 'forward': False, 'graph_id': 9}
+        with patch('trips.services.client_locate.localiser', return_value=arete) as localiser:
+            self.assertEqual(recaler_signalements_sans_voie(), 1)
+        self.assertEqual(localiser.call_args.kwargs['cap'], 270)
+        incident.refresh_from_db()
+        self.assertEqual((incident.way_id_osm, incident.forward_osm), (111, False))
+
+    def test_hors_route_ou_valhalla_en_panne_laisse_sans_voie(self):
+        from trips.services.disjoncteur import DisjoncteurOuvert
+
+        from .tasks import recaler_signalements_sans_voie
+
+        incident = creer_incident(creer_utilisateur(), way_id_osm=None)
+        loin = {'distance_m': 400, 'lat': 0, 'lon': 0, 'destination_only': False, 'use': 'road',
+                'way_id': 111, 'forward': True, 'graph_id': 9}
+        with patch('trips.services.client_locate.localiser', return_value=loin):
+            self.assertEqual(recaler_signalements_sans_voie(), 0)
+        with patch('trips.services.client_locate.localiser', side_effect=DisjoncteurOuvert()):
+            self.assertEqual(recaler_signalements_sans_voie(), 0)
+        incident.refresh_from_db()
+        self.assertIsNone(incident.way_id_osm)
 
 
 class IncidentsParVilleApiTests(TestCase):
@@ -892,6 +981,9 @@ class InvalidationCacheProchesTests(TestCase):
         confirmations_avant = premiere_lecture[0]['confirmations']
         self.assertIsNotNone(cache.get(cle_cache_cellule(self.incident.cellule_h3_res8)))
 
+        from trips.services import derniere_position
+
+        derniere_position.memoriser(self.votant.id, self.incident.position.y, self.incident.position.x)
         self.client.post(
             reverse('community:incident-vote', kwargs={'id': self.incident.id}),
             {'direction': 'confirm'}, content_type='application/json', **self.jetons_votant,
@@ -994,14 +1086,11 @@ class VoteApiTests(TestCase):
         self.auteur = creer_utilisateur('auteur@easyway.local')
         self.votant = creer_utilisateur('votant@easyway.local')
         self.jetons_votant = connecter(self.client, self.votant.telephone)
-        # Voter exige une position recente pres de l'incident (point 3) : les
-        # incidents de ces tests sont tous a DOUALA, on simule donc un votant
-        # present. Les tests de rejet patchent lire() explicitement.
-        patcheur_position = patch(
-            'trips.services.derniere_position.lire', return_value=(DOUALA_LAT, DOUALA_LON)
-        )
-        patcheur_position.start()
-        self.addCleanup(patcheur_position.stop)
+        # Vote exige une position recente pres de l'incident (cf.
+        # VoterIncidentView) : tous les votants de ces tests sont sur place.
+        patcheur = patch('trips.services.derniere_position.lire', return_value=(DOUALA_LAT, DOUALA_LON))
+        patcheur.start()
+        self.addCleanup(patcheur.stop)
 
     def _voter(self, incident, sens, jetons=None):
         return self.client.post(
@@ -1121,6 +1210,42 @@ class VoteApiTests(TestCase):
         self._voter(incident, 'confirm', jetons=connecter(self.client, votant_fort.telephone))
         incident.refresh_from_db()
         self.assertEqual(incident.score_confiance, votant_fort.poids_de_vote())
+
+
+class VoteProximiteTests(TestCase):
+    """Vote refuse sans position recente pres de l'incident (confirmer une
+    route barree a Yaounde depuis Douala ne doit pas etre possible)."""
+
+    def setUp(self):
+        cache.clear()
+        self.incident = creer_incident(creer_utilisateur('auteur@easyway.local'))
+        self.votant = creer_utilisateur('votant@easyway.local')
+        self.jetons = connecter(self.client, self.votant.telephone)
+
+    def _voter(self):
+        return self.client.post(
+            reverse('community:incident-vote', kwargs={'id': self.incident.id}),
+            {'direction': 'confirm'}, content_type='application/json', **self.jetons,
+        )
+
+    def test_sans_position_recente_refuse(self):
+        reponse = self._voter()
+        self.assertEqual(reponse.status_code, 400)
+        self.assertEqual(reponse.json()['code'], 'TOO_FAR_TO_VOTE')
+        self.assertFalse(Vote.objects.exists())
+
+    def test_trop_loin_refuse(self):
+        from trips.services import derniere_position
+
+        derniere_position.memoriser(self.votant.id, DOUALA_LAT + 0.05, DOUALA_LON)  # ~5,5 km
+        self.assertEqual(self._voter().status_code, 400)
+
+    def test_a_proximite_accepte(self):
+        from trips.services import derniere_position
+
+        derniere_position.memoriser(self.votant.id, DOUALA_LAT + 0.002, DOUALA_LON)  # ~220 m
+        self.assertEqual(self._voter().status_code, 200)
+        self.assertEqual(Vote.objects.count(), 1)
 
 
 class MesSignalementsApiTests(TestCase):
@@ -1326,3 +1451,38 @@ class SuppressionIncidentAuthentificationTests(TestCase):
         self.assertEqual(reponse.status_code, 404)
         incident.refresh_from_db()
         self.assertEqual(incident.statut, StatutIncident.ACTIF)
+
+
+class CapDeTrajectoireTests(TestCase):
+    """Sens d'un signalement : celui dans lequel le conducteur roule vraiment
+    (dernieres positions), plus fiable que le cap du telephone a l'arret."""
+
+    def setUp(self):
+        cache.clear()
+        self.utilisateur = creer_utilisateur()
+
+    def rouler_vers_l_ouest(self):
+        import time
+
+        from trips.services import derniere_position
+
+        maintenant = time.time()
+        derniere_position.memoriser_trace(self.utilisateur.id, [
+            (DOUALA_LAT, DOUALA_LON + 0.001 * (3 - i), maintenant - 30 + 10 * i) for i in range(4)
+        ])
+
+    def test_cap_de_trajectoire(self):
+        from trips.services import derniere_position
+
+        self.assertIsNone(derniere_position.cap_de_trajectoire(self.utilisateur.id))  # aucune position
+        self.rouler_vers_l_ouest()
+        self.assertAlmostEqual(derniere_position.cap_de_trajectoire(self.utilisateur.id), 270, delta=1)
+
+    def test_cap_fiable(self):
+        from .views import _cap_fiable
+
+        self.assertEqual(_cap_fiable(self.utilisateur, 85), 85)  # sans trajectoire : celui du telephone
+        self.rouler_vers_l_ouest()
+        self.assertEqual(_cap_fiable(self.utilisateur, None), 270)  # pas de cap : celui de la trajectoire
+        self.assertEqual(_cap_fiable(self.utilisateur, 90), 270)    # cap oppose (arret) : trajectoire
+        self.assertEqual(_cap_fiable(self.utilisateur, 250), 250)   # coherent : celui du telephone

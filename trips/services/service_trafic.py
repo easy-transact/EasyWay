@@ -110,6 +110,87 @@ def vitesses_typiques(identifiants, jour_semaine, heure_jour):
     }
 
 
+# Vitesse typique publiee dans traffic.tar (cf. trafic_temps_reel.publier) a
+# partir de ce nombre d'echantillons sur le creneau (meme jour de semaine, meme
+# heure, FENETRE_HISTORIQUE) : sinon un passage isole un dimanche matin
+# deviendrait "la" vitesse typique. Pas mesure sur donnees reelles, a ajuster.
+NB_MIN_ECHANTILLONS_TYPIQUE = 10
+DUREE_CACHE_TYPIQUES_S = 10 * 60
+# Debut de la generation de tuiles en cours (datetime), pose par
+# trafic_temps_reel.publier quand traffic.tar est remplace. Absent : inconnu.
+CLE_DEBUT_GENERATION_TUILES = 'trafic:generation:debut'
+
+
+def vitesses_typiques_creneau(moment=None) -> dict:
+    """{graph_id: vitesse typique km/h} pour les aretes qui ont assez
+    d'historique sur le creneau courant (jour de semaine + heure, fuseau de
+    Douala). Trois sources, la plus fine et stable d'abord :
+
+      0. historique par troncon (noeuds OSM de debut et de fin, Valhalla >= 3.6) ;
+
+      1. historique par voie OSM + sens (EchantillonVitesse.way_id/sens_avant),
+         reporte sur les GraphId ACTUELS via CorrespondanceArete -- survit a
+         une reconstruction des tuiles ;
+      2. historique par GraphId (lignes sans voie connue), seulement depuis le
+         debut de la generation de tuiles en cours (un ancien GraphId peut
+         designer une autre arete apres reconstruction).
+
+    Mis en cache DUREE_CACHE_TYPIQUES_S : le creneau change toutes les heures,
+    la publication tourne toutes les 90 s."""
+    from ..models import CorrespondanceArete
+
+    local = (moment or timezone.now()).astimezone(FUSEAU_TRAFIC)
+    cle_cache = f'trafic:typiques:{local.weekday()}:{local.hour}'
+    en_cache = cache.get(cle_cache)
+    if en_cache is not None:
+        return dict(en_cache)
+
+    base = EchantillonVitesse.objects.filter(
+        jour_semaine=local.weekday(), heure_jour=local.hour,
+        debut_intervalle__gte=timezone.now() - FENETRE_HISTORIQUE,
+    )
+    moyenne = dict(somme_ponderee=Sum(F('vitesse_moyenne') * F('nombre_echantillons')), poids=Sum('nombre_echantillons'))
+
+    vitesses = {}
+    # 0. Troncon entre deux carrefours (noeuds OSM, Valhalla >= 3.6) : le plus fin.
+    par_troncon = {
+        (a['noeud_debut_osm'], a['noeud_fin_osm']): float(a['somme_ponderee'] / a['poids'])
+        for a in base.filter(noeud_debut_osm__isnull=False, noeud_fin_osm__isnull=False)
+        .values('noeud_debut_osm', 'noeud_fin_osm').annotate(**moyenne).filter(poids__gte=NB_MIN_ECHANTILLONS_TYPIQUE)
+    }
+    if par_troncon:
+        for graph_id, debut, fin in CorrespondanceArete.objects.filter(
+            noeud_debut_osm__in={d for d, _f in par_troncon},
+        ).values_list('graph_id', 'noeud_debut_osm', 'noeud_fin_osm').iterator():
+            vitesse = par_troncon.get((debut, fin))
+            if vitesse is not None:
+                vitesses[graph_id] = vitesse
+
+    par_voie = {
+        (a['way_id'], a['sens_avant']): float(a['somme_ponderee'] / a['poids'])
+        for a in base.filter(way_id__isnull=False, sens_avant__isnull=False, noeud_debut_osm__isnull=True)
+        .values('way_id', 'sens_avant').annotate(**moyenne).filter(poids__gte=NB_MIN_ECHANTILLONS_TYPIQUE)
+    }
+    if par_voie:
+        for graph_id, way_id, sens in CorrespondanceArete.objects.filter(
+            way_id__in={w for w, _s in par_voie},
+        ).values_list('graph_id', 'way_id', 'sens_avant').iterator():
+            vitesse = par_voie.get((way_id, sens))
+            if vitesse is not None:
+                vitesses.setdefault(graph_id, vitesse)
+
+    sans_voie = base.filter(way_id__isnull=True)
+    debut_generation = cache.get(CLE_DEBUT_GENERATION_TUILES)
+    if debut_generation is not None:
+        sans_voie = sans_voie.filter(debut_intervalle__gte=debut_generation)
+    for a in (sans_voie.values('identifiant_arete').annotate(**moyenne)
+              .filter(poids__gte=NB_MIN_ECHANTILLONS_TYPIQUE)):
+        vitesses.setdefault(a['identifiant_arete'], float(a['somme_ponderee'] / a['poids']))
+
+    cache.set(cle_cache, vitesses, timeout=DUREE_CACHE_TYPIQUES_S)
+    return vitesses
+
+
 def niveau_relatif(vitesse_recente_kmh, vitesse_typique_kmh) -> str:
     if not vitesse_recente_kmh or not vitesse_typique_kmh:
         return NiveauTrafic.NORMAL  # pas assez d'historique pour cette arete -- honnete plutot que de deviner

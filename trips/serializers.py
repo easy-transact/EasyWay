@@ -62,6 +62,13 @@ class CalculItineraireSerializer(serializers.Serializer):
         many=True, required=False, default=list, source='etapes', max_length=MAX_ETAPES,
         help_text="Arrets intermediaires, dans l'ordre de passage entre origine et destination.",
     )
+    depart_at = serializers.DateTimeField(
+        required=False, allow_null=True, default=None, source='depart_le',
+        help_text="Heure de depart prevue (ISO 8601). Absente ou dans moins de 15 min : depart "
+                  "immediat, avec le trafic du moment. Plus tard : trafic PREVU a cette heure "
+                  "(historique des conducteurs EasyWay), signalements encore valables a cette heure "
+                  "seulement. Au plus 7 jours a l'avance.",
+    )
     alternatives = serializers.BooleanField(
         required=False, default=True,
         help_text=(
@@ -90,6 +97,14 @@ class CalculItineraireSerializer(serializers.Serializer):
                 raise serializers.ValidationError({'vehicle_id': str(exc)}) from exc
             donnees['vehicle_type'] = vehicule.type
         return donnees
+
+    def validate_depart_at(self, valeur):
+        if valeur is None:
+            return valeur
+        maintenant = timezone.now()
+        if valeur < maintenant - timedelta(minutes=5) or valeur > maintenant + timedelta(days=7):
+            raise serializers.ValidationError('depart_at must be between now and 7 days ahead.')
+        return valeur
 
 
 class SignalementApplique(serializers.Serializer):
@@ -428,12 +443,10 @@ class MeilleurItineraireSerializer(serializers.Serializer):
         help_text='Cap actuel : evite un demi-tour en tete du nouvel itineraire.',
     )
     speed_kmh = serializers.FloatField(
-        required=False, allow_null=True, min_value=0, default=None, source='vitesse_kmh',
-        help_text=(
-            'Vitesse GPS actuelle (km/h). Sous 10 km/h, heading est ignore (cap GPS non fiable '
-            "a l'arret, ex. feu rouge). Absente : le serveur compare avec un calcul sans cap et "
-            "ne garde le cap que s'il evite un detour notable."
-        ),
+        required=False, allow_null=True, min_value=0, default=None,
+        help_text="Vitesse GPS actuelle (meme regle que origin_speed_kmh de routes/calculate) : "
+                  "sous 10 km/h le cap est ignore (aleatoire a l'arret, ex. dans un bouchon) ; "
+                  "absente, le calcul avec cap est compare a un calcul sans cap.",
     )
     remaining_waypoints = PointEvitementSerializer(
         many=True, required=False, default=list, max_length=MAX_ETAPES,
@@ -494,21 +507,20 @@ class NoterTrajetSerializer(serializers.Serializer):
 
 
 LIMITE_POSITIONS_PAR_LOT = 500
-
-# Un horodatage de telemetrie dans le futur (hors petite derive d'horloge)
-# serait pris pour du trafic recent et publierait une fausse vitesse courante
-# (cf. trafic_temps_reel.vitesses_mesurees) : on l'ecarte. Le passe n'est PAS
-# borne -- une position bufferisee hors reseau, renvoyee en retard, tombe dans
-# son bucket historique reel, ce qui est correct, pas dangereux.
-MARGE_HORODATAGE_FUTUR_S = 5 * 60
+# Fenetre acceptee pour l'horodatage du telephone. Un lot envoye apres une
+# coupure reseau peut arriver avec des heures de retard (garde) ; au-dela, ou
+# dans le futur (horloge du telephone fausse), la position creerait un bucket
+# de trafic hors fenetre : ecartee.
+RETARD_MAX_TELEMETRIE = timedelta(hours=12)
+AVANCE_MAX_TELEMETRIE = timedelta(minutes=5)
 
 
 class PositionTelemetrieSerializer(serializers.Serializer):
     """Une position GPS du lot -- jamais persistee telle quelle (cf.
     TelemetriePositionsSerializer)."""
 
-    lat = serializers.FloatField()
-    lon = serializers.FloatField()
+    lat = serializers.FloatField(min_value=-90, max_value=90)
+    lon = serializers.FloatField(min_value=-180, max_value=180)
     speed_kmh = serializers.FloatField(required=False, allow_null=True, min_value=0, source='vitesse_kmh')
     heading = serializers.IntegerField(required=False, allow_null=True, min_value=0, max_value=359, source='cap')
     timestamp = serializers.DateTimeField(source='horodatage')
@@ -537,13 +549,14 @@ class TelemetriePositionsSerializer(serializers.Serializer):
     def validate_positions(self, positions):
         if len(positions) > LIMITE_POSITIONS_PAR_LOT:
             raise serializers.ValidationError(f'Maximum {LIMITE_POSITIONS_PAR_LOT} positions per batch.')
-        plafond = timezone.now() + timedelta(seconds=MARGE_HORODATAGE_FUTUR_S)
-        # On ECARTE les positions dans le futur plutot que de rejeter tout le
-        # lot : une seule position aberrante ne doit pas perdre les autres.
-        passees = [p for p in positions if p['horodatage'] <= plafond]
-        if not passees:
-            raise serializers.ValidationError('timestamp: horodatage dans le futur.')
-        return passees
+        # Positions hors fenetre ecartees une a une, sans rejeter le lot : les
+        # autres restent exploitables. La liste peut donc devenir vide (la vue
+        # repond alors 202 sans rien publier).
+        maintenant = timezone.now()
+        return [
+            p for p in positions
+            if maintenant - RETARD_MAX_TELEMETRIE <= p['horodatage'] <= maintenant + AVANCE_MAX_TELEMETRIE
+        ]
 
 
 class ZoneVitesseCreationSerializer(serializers.Serializer):

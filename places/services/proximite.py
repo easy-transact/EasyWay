@@ -127,8 +127,10 @@ def _filtre_lieux(types):
     return filtre
 
 
-def a_proximite(lat, lon, rayon_m, types, limite, maintenant):
-    """Liste triee par distance. maintenant : datetime local (Africa/Douala)."""
+def a_proximite(lat, lon, rayon_m, types, limite, maintenant, par_temps=True):
+    """Liste triee par TEMPS DE TRAJET (par_temps, matrice Valhalla), sinon
+    par distance -- et toujours par distance si Valhalla ne repond pas.
+    maintenant : datetime local (Africa/Douala)."""
     centre = Point(lon, lat, srid=4326)
     lieux = (
         Lieu.objects.filter(statut=StatutLieu.APPROUVE, position__dwithin=(centre, D(m=rayon_m)))
@@ -168,6 +170,11 @@ def a_proximite(lat, lon, rayon_m, types, limite, maintenant):
     # (centre du quartier), chacune par distance.
     resultats.sort(key=lambda r: (r['position_approximate'], r['distance_m']))
     resultats = resultats[:limite]
+    if par_temps:
+        _classer_par_temps(lat, lon, resultats)
+    else:
+        for r in resultats:
+            r['drive_duration_s'] = r['drive_distance_m'] = None
 
     garages = [r for r in resultats if r['type'] == 'garage']
     stats = notes(
@@ -184,6 +191,40 @@ def a_proximite(lat, lon, rayon_m, types, limite, maintenant):
             r['rating_average'], r['rating_count'] = note['average'], note['count']
             r['stars'] = etoiles(note['average'], note['count'])
     return resultats
+
+
+def _classer_par_temps(lat, lon, resultats):
+    """Ajoute drive_duration_s / drive_distance_m (temps et distance par la
+    route, matrice Valhalla) et reclasse par temps de trajet : positions sures
+    d'abord, puis approximatives ; une destination inaccessible passe en fin
+    de son groupe. Valhalla indisponible : champs a null, ordre par distance
+    inchange. Matrice en cache 2 min par position arrondie (~110 m)."""
+    from django.core.cache import cache
+
+    from trips.services.client_matrice import MAX_CIBLES, durees_depuis
+
+    for r in resultats:
+        r['drive_duration_s'] = r['drive_distance_m'] = None
+    cibles = resultats[:MAX_CIBLES]
+    if not cibles:
+        return
+    cle = 'proximite:matrice:' + ':'.join(
+        [f'{lat:.3f}', f'{lon:.3f}'] + [f"{r['kind']}{r['id']}" for r in cibles]
+    )
+    durees = cache.get(cle)
+    if durees is None:
+        durees = durees_depuis((lat, lon), [(r['lat'], r['lon']) for r in cibles])
+        if durees is None:
+            return
+        cache.set(cle, durees, timeout=120)
+    for r, (duree, distance) in zip(cibles, durees):
+        r['drive_duration_s'], r['drive_distance_m'] = duree, distance
+    infini = float('inf')
+    resultats.sort(key=lambda r: (
+        r['position_approximate'],
+        r['drive_duration_s'] if r['drive_duration_s'] is not None else infini,
+        r['distance_m'],
+    ))
 
 
 def maintenant_local():

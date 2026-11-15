@@ -94,7 +94,8 @@ class CalculItineraireView(APIView):
         serializer.is_valid(raise_exception=True)
         donnees = serializer.validated_data
 
-        candidats = ServiceItineraire().calculer(
+        service = ServiceItineraire()
+        candidats = service.calculer(
             depart=(donnees['origine_lat'], donnees['origine_lon']),
             arrivee=(donnees['destination_lat'], donnees['destination_lon']),
             utilisateur=request.user,
@@ -106,9 +107,25 @@ class CalculItineraireView(APIView):
             alternatives=donnees['alternatives'],
             etapes=[(p['lat'], p['lon']) for p in donnees['etapes']],
             type_vehicule=donnees['vehicle_type'],
+            depart_le=donnees['depart_le'],
         )
+        ignores = [{'lat': lat, 'lon': lon, 'reason': 'TOO_CLOSE_TO_ENDPOINT'} for lat, lon in service.eviter_ignores]
+        if not candidats and donnees['eviter']:
+            # Aucun chemin qui evite les points demandes (ex. le point coupe le
+            # seul passage) : erreur explicite plutot qu'une liste vide muette.
+            return Response(
+                {'code': 'NO_ROUTE_WITH_AVOID',
+                 'detail': "Aucun itineraire n'evite tous les points demandes.",
+                 'avoid_ignored': ignores},
+                status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
         _enregistrer_prevision(request.user, donnees, candidats)
-        return Response(ItineraireCandidatSerializer(candidats, many=True).data)
+        donnees_reponse = ItineraireCandidatSerializer(candidats, many=True).data
+        # Points `avoid` non appliques (trop pres du depart, de l'arrivee ou
+        # d'une etape), repetes sur chaque candidat : la reponse reste une liste.
+        for candidat in donnees_reponse:
+            candidat['avoid_ignored'] = ignores
+        return Response(donnees_reponse)
 
 
 def _enregistrer_prevision(utilisateur, donnees, candidats):
@@ -309,9 +326,9 @@ class MeilleurItineraireView(APIView):
         donnees = serializer.validated_data
         resultat = chercher_meilleur(
             trajet, (donnees['lat'], donnees['lon']), request.user, cap=donnees['heading'],
+            vitesse_kmh=donnees['speed_kmh'],
             etapes_restantes=[(p['lat'], p['lon']) for p in donnees['remaining_waypoints']],
             eviter=[(p['lat'], p['lon']) for p in donnees['avoid']],
-            vitesse_kmh=donnees['vitesse_kmh'],
         )
         if resultat['action'] in ('PROPOSE', 'IMPOSE') and resultat['better_route']:
             PropositionItineraire.objects.create(
@@ -349,9 +366,9 @@ class AutresItinerairesView(APIView):
         donnees = serializer.validated_data
         resultat = chercher_autres(
             trajet, (donnees['lat'], donnees['lon']), request.user, cap=donnees['heading'],
+            vitesse_kmh=donnees['speed_kmh'],
             etapes_restantes=[(p['lat'], p['lon']) for p in donnees['remaining_waypoints']],
             eviter=[(p['lat'], p['lon']) for p in donnees['avoid']],
-            vitesse_kmh=donnees['vitesse_kmh'],
         )
         return Response(AutresItinerairesReponseSerializer(resultat).data)
 
@@ -430,6 +447,10 @@ class TelemetriePositionsView(APIView):
         serializer = TelemetriePositionsSerializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
         trajet = serializer.validated_data['trajet']
+        if not serializer.validated_data['positions']:
+            # Toutes les positions etaient hors fenetre d'horodatage : rien a
+            # publier, mais 202 pour que l'appli ne renvoie pas le lot en boucle.
+            return Response(status=status.HTTP_202_ACCEPTED)
 
         # Publication sur le flux de telemetrie (Redis /3) : jamais une
         # dependance dure, comme le cache (IGNORE_EXCEPTIONS) et le WebSocket.
@@ -454,6 +475,9 @@ class TelemetriePositionsView(APIView):
         _cumuler_telemetrie(trajet, serializer.validated_data['positions'])
         derniere = max(serializer.validated_data['positions'], key=lambda p: p['horodatage'])
         derniere_position.memoriser(request.user.id, derniere['lat'], derniere['lon'])
+        derniere_position.memoriser_trace(request.user.id, [
+            (p['lat'], p['lon'], p['horodatage'].timestamp()) for p in serializer.validated_data['positions']
+        ])
         positions_direct.memoriser(trajet, derniere, trajet.type_vehicule or request.user.type_vehicule)
         if trajet.vehicule_id:
             # Trajet avec un vehicule d'agence : position en direct + exces de vitesse.

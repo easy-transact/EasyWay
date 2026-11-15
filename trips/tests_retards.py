@@ -13,9 +13,9 @@ from django.utils import timezone
 from accounts.tests import connecter, creer_utilisateur
 from community.models import Incident, SousTypeIncident as S, StatutIncident, TypeIncident as T
 
-from .models import PrevisionItineraire, Trajet
+from .models import FUSEAU_TRAFIC, PrevisionItineraire, Trajet
 from .polyline import encoder_polyline6
-from .services import retards_signalements
+from .services import retards_signalements, trafic_temps_reel
 
 # Deux itineraires de ~3,3 km vers l'est : le direct (latitude 4.05) et un
 # detour par le nord. Le direct est le plus rapide a vide.
@@ -92,23 +92,23 @@ class RetardsSignalementsTests(TestCase):
         self.signaler(T.RADAR, '')
         self.assertEqual(self.calculer()[0]['delay_from_reports'], 0)
 
-    def test_embouteillage_non_publie_est_compte_en_retard(self):
-        # traffic.tar non alimente (ensemble des incidents publies vide) : le
-        # bouchon DOIT etre compte en retard, sinon il n'agit nulle part (point 4).
+    def test_embouteillage_actif_deja_dans_le_trafic_en_direct_pour_la_voiture(self):
+        incident = self.signaler(T.EMBOUTEILLAGE, S.A_L_ARRET)
+        # Ecrit dans traffic.tar a la derniere publication : pas recompte.
+        cache.set(trafic_temps_reel.CLE_INCIDENTS_PUBLIES, [str(incident.id)], timeout=60)
+        self.assertEqual(self.calculer()[0]['delay_from_reports'], 0)
+
+    def test_embouteillage_actif_non_publie_compte_en_retard(self):
+        # Publication arretee (TRAFIC_TAR_PATH vide, tache en panne) : rien dans
+        # traffic.tar, l'embouteillage doit quand meme ralentir la route.
         self.signaler(T.EMBOUTEILLAGE, S.A_L_ARRET)
         direct = next(r for r in self.calculer() if r['duration'] == 400)
         self.assertGreater(direct['delay_from_reports'], 0)
 
-    def test_embouteillage_publie_dans_traffic_tar_non_recompte(self):
-        # L'embouteillage est reellement ecrit dans traffic.tar : sa vitesse est
-        # deja dans la duree Valhalla, on ne le recompte pas en retard.
-        incident = self.signaler(T.EMBOUTEILLAGE, S.A_L_ARRET)
-        with patch(
-            'trips.services.service_itineraire.ServiceItineraire._incidents_en_trafic',
-            return_value={str(incident.id)},
-        ):
-            direct = next(r for r in self.calculer() if r['duration'] == 400)
-        self.assertEqual(direct['delay_from_reports'], 0)
+    def test_signalement_conteste_sans_effet(self):
+        # Deux "Plus rien" et score negatif : n'agit plus sur l'itineraire.
+        self.signaler(T.ACCIDENT, S.CARAMBOLAGE, score_confiance=-1, infirmations=2)
+        self.assertEqual(self.calculer()[0]['delay_from_reports'], 0)
 
     def test_moto(self):
         self.signaler(T.EMBOUTEILLAGE, S.A_L_ARRET)
@@ -124,46 +124,58 @@ class RetardsSignalementsTests(TestCase):
         self.assertEqual(direct['vehicle_type'], 'MOTO')
 
     def test_route_barree_confirmee_exclue_sinon_ralentissement(self):
-        # Score sous le seuil de validation (fermeture non confirmee) : simple
-        # ralentissement, pas d'exclusion -- une seule confirmation ne ferme
-        # plus la route pour tous (point 1/2).
-        incident = self.signaler(T.VOIE_BLOQUEE, S.ROUTE_BARREE, score_confiance=1)
+        # Une seule confirmation (score 1) ne suffit plus a fermer la route pour
+        # tous : il faut le seuil de validation (score 3), comme pour ACTIF.
+        incident = self.signaler(
+            T.VOIE_BLOQUEE, S.ROUTE_BARREE, confirmations=1, score_confiance=1, statut=StatutIncident.EN_ATTENTE,
+        )
         routes = self.calculer()
         self.assertNotIn('exclude_locations', self.options)
         self.assertGreater(next(r for r in routes if r['duration'] == 400)['delay_from_reports'], 0)
 
-        # Score au seuil de validation : fermeture confirmee, exclue du graphe.
-        incident.score_confiance = 3
-        incident.save(update_fields=['score_confiance'])
+        incident.confirmations, incident.score_confiance = 3, 3
+        incident.save(update_fields=['confirmations', 'score_confiance'])
         cache.clear()
         self.calculer()
         self.assertEqual(self.options['exclude_locations'], [{'lat': 4.05, 'lon': 9.715}])
 
-    def test_fermeture_contestee_nest_plus_exclue(self):
-        # Fermeture confirmee (score 3) puis contredite : >= 2 infirmations qui
-        # font repasser le score sous zero -> plus exclue, plus de retard (point 2/6).
-        incident = self.signaler(T.VOIE_BLOQUEE, S.ROUTE_BARREE, score_confiance=3)
+    def test_route_barree_deja_fermee_dans_traffic_tar_pas_exclue_en_point(self):
+        # Publiee fermee sur son arete et dans son sens (traffic.tar) : la
+        # voiture n'a plus besoin de l'exclusion par point, plus grossiere.
+        incident = self.signaler(T.VOIE_BLOQUEE, S.ROUTE_BARREE, confirmations=3, score_confiance=3)
+        cache.set(trafic_temps_reel.CLE_INCIDENTS_PUBLIES, [str(incident.id)], timeout=60)
         self.calculer()
+        self.assertNotIn('exclude_locations', self.options)
+        # La moto ne lit pas traffic.tar : toujours exclue par point.
+        self.calculer(vehicle_type='MOTO')
         self.assertEqual(self.options['exclude_locations'], [{'lat': 4.05, 'lon': 9.715}])
 
-        incident.score_confiance = -1
-        incident.infirmations = 2
-        incident.save(update_fields=['score_confiance', 'infirmations'])
+    def test_depart_differe_trafic_prevu_et_signalements_valables_a_l_heure(self):
+        # Depart dans 2 h : Valhalla recoit date_time (trafic prevu) ; un
+        # accident qui aura expire d'ici la ne ralentit pas l'itineraire.
+        self.signaler(T.ACCIDENT, S.CARAMBOLAGE, expire_le=timezone.now() + timedelta(minutes=30))
+        depart = timezone.now() + timedelta(hours=2)
+        routes = self.calculer(depart_at=depart.isoformat())
+        self.assertEqual(self.options['date_time']['type'], 1)
+        self.assertEqual(self.options['date_time']['value'], depart.astimezone(FUSEAU_TRAFIC).strftime('%Y-%m-%dT%H:%M'))
+        self.assertEqual(next(r for r in routes if r['duration'] == 400)['delay_from_reports'], 0)
+        # Depart immediat : l'accident compte.
         cache.clear()
         routes = self.calculer()
+        self.assertNotIn('date_time', self.options)
+        self.assertGreater(next(r for r in routes if r['duration'] == 400)['delay_from_reports'], 0)
+
+    def test_route_barree_levee_par_les_votes_contraires(self):
+        # Validee par la communaute, puis trois "Plus rien" : plus exclue.
+        incident = self.signaler(T.VOIE_BLOQUEE, S.ROUTE_BARREE, confirmations=3, score_confiance=3)
+        self.calculer()
+        self.assertIn('exclude_locations', self.options)
+
+        incident.infirmations, incident.score_confiance = 3, 0
+        incident.save(update_fields=['infirmations', 'score_confiance'])
+        cache.clear()
+        self.calculer()
         self.assertNotIn('exclude_locations', self.options)
-        self.assertEqual(next(r for r in routes if r['duration'] == 400)['delay_from_reports'], 0)
-
-    def test_confiance_pleine_au_seuil_reduit_pour_auteur_repute(self):
-        # Point 7 : un auteur repute (seuil 2) voit son signalement valide a
-        # score 2 compter pour 1.0, pas 0.75 (division par 1 + seuil, pas par 4).
-        from decimal import Decimal
-
-        repute = creer_utilisateur(email='repute-conf@test.cm', score_reputation=Decimal('3'))
-        incident = self.signaler(T.ACCIDENT, S.CARAMBOLAGE, auteur=repute, score_confiance=2)
-        self.assertAlmostEqual(retards_signalements.confiance(incident), 1.0, places=5)
-        incident_neutre = self.signaler(T.ACCIDENT, S.CARAMBOLAGE, score_confiance=2)
-        self.assertAlmostEqual(retards_signalements.confiance(incident_neutre), 0.75, places=5)
 
     def test_signalement_tout_neuf_compte_moins(self):
         self.signaler(T.ACCIDENT, S.CARAMBOLAGE, score_confiance=0)
@@ -238,11 +250,13 @@ class ValidationParLaModerationTests(RetardsSignalementsTests):
     test_accident_sur_le_direct_fait_passer_le_detour_devant = None
     test_autre_sens_de_circulation_sans_effet = None
     test_police_et_radar_sans_effet = None
-    test_embouteillage_non_publie_est_compte_en_retard = None
-    test_embouteillage_publie_dans_traffic_tar_non_recompte = None
+    test_embouteillage_actif_deja_dans_le_trafic_en_direct_pour_la_voiture = None
+    test_embouteillage_actif_non_publie_compte_en_retard = None
+    test_signalement_conteste_sans_effet = None
+    test_route_barree_levee_par_les_votes_contraires = None
+    test_depart_differe_trafic_prevu_et_signalements_valables_a_l_heure = None
+    test_route_barree_deja_fermee_dans_traffic_tar_pas_exclue_en_point = None
     test_moto = None
     test_route_barree_confirmee_exclue_sinon_ralentissement = None
-    test_fermeture_contestee_nest_plus_exclue = None
-    test_confiance_pleine_au_seuil_reduit_pour_auteur_repute = None
     test_signalement_tout_neuf_compte_moins = None
     test_prevision_enregistree_et_reliee_au_trajet = None

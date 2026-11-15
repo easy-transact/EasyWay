@@ -53,10 +53,60 @@ MARGE_DEPART_ARRIVEE_M = 200
 # Arret plus long que ca (sans avancer) : pause (livraison, panne), pas un
 # bouchon -- l'intervalle est ignore plutot que de compter 0 km/h a tort.
 DUREE_ARRET_MAX_S = 3 * 60
+VEHICULES_MESURANT_LE_TRAFIC = {'VOITURE', 'TAXI'}  # cf. _infos_trajet
 PREFIXE_ACCUMULATEUR = 'trafic:accumulateur'
 ENSEMBLE_BUCKETS_ACTIFS = 'trafic:buckets:actifs'
 TAILLE_BUCKET_S = 5 * 60
 PREFIXE_CHAMP_TRAJET = 't:'
+# Sens de parcours de l'arete sur la voie OSM : avec edge.way_id (deja dans
+# ATTRIBUTS_TRONCON), cle stable d'une generation de tuiles a l'autre.
+# Dans cet ordre : retires depuis la fin si Valhalla les refuse (cf. client_meili).
+# Noeuds OSM de debut/fin d'arete : Valhalla >= 3.6, tuiles construites avec
+# mjolnir.keep_osm_node_ids -- troncon entre deux carrefours, cle la plus fine.
+ATTRIBUTS_CLE_STABLE = ['edge.forward', 'edge.begin_osm_node_id', 'edge.end_osm_node_id']
+
+
+def noeuds_osm(arete):
+    """(noeud OSM de debut, noeud OSM de fin) de l'arete, ou None (Valhalla
+    < 3.6 ou tuiles sans keep_osm_node_ids). Format de trace_attributes :
+    edge.node_id (debut) et edge.end_node.node_id (fin)."""
+    debut = arete.get('node_id')
+    fin = (arete.get('end_node') or {}).get('node_id')
+    if debut is None or fin is None:
+        return None
+    return int(debut), int(fin)
+
+
+def cle_stable(arete):
+    """(way_id, sens_avant) de l'arete, ou None si Valhalla ne les fournit pas."""
+    way_id, avant = arete.get('way_id'), arete.get('forward')
+    if way_id is None or avant is None:
+        return None
+    return int(way_id), bool(avant)
+
+
+def apprendre_correspondances(edges):
+    """Memorise GraphId -> (voie, sens) pour les aretes de ce lot (cf.
+    trips.models.CorrespondanceArete) : une seule requete, upsert."""
+    from django.utils import timezone
+
+    from ..models import CorrespondanceArete
+
+    maintenant = timezone.now()
+    lignes = {}
+    for arete in edges:
+        cle = cle_stable(arete)
+        if cle is not None and arete.get('id') is not None:
+            noeuds = noeuds_osm(arete) or (None, None)
+            lignes[arete['id']] = CorrespondanceArete(
+                graph_id=arete['id'], way_id=cle[0], sens_avant=cle[1],
+                noeud_debut_osm=noeuds[0], noeud_fin_osm=noeuds[1], vu_le=maintenant,
+            )
+    if lignes:
+        CorrespondanceArete.objects.bulk_create(
+            lignes.values(), update_conflicts=True, unique_fields=['graph_id'],
+            update_fields=['way_id', 'sens_avant', 'noeud_debut_osm', 'noeud_fin_osm', 'vu_le'],
+        )
 
 
 class ConsommateurPositions:
@@ -134,16 +184,28 @@ class ConsommateurPositions:
         ]
 
         try:
-            edges, matched_points = tracer(points, attributs=ATTRIBUTS_TRONCON)
+            edges, matched_points = tracer(points, attributs=ATTRIBUTS_TRONCON, attributs_optionnels=ATTRIBUTS_CLE_STABLE)
         except (ErreurMeili, DisjoncteurOuvert) as exc:
             logger.info('Meili indisponible, %d positions laissees en pending: %s', len(ids), exc)
             return []
 
-        extremites, moto = self._infos_trajet(paires[0][1]['trajet_id'])
-        # Une moto remonte les files : sa vitesse dans un bouchon ferait croire
-        # la route fluide aux voitures (traffic.tar est unique, cf. MOTO_TRAFIC_EN_DIRECT).
-        if not moto:
+        extremites, exclu = self._infos_trajet(paires[0][1]['trajet_id'])
+        # Moto, bus, camion, utilitaire : leur vitesse ne represente pas celle
+        # d'une voiture (traffic.tar est unique, cf. MOTO_TRAFIC_EN_DIRECT).
+        if not exclu:
             self._accumuler_vitesses(edges, matched_points, paires, extremites)
+        try:
+            apprendre_correspondances(edges)
+        except Exception:
+            logger.exception('Correspondance GraphId -> voie OSM impossible a enregistrer')
+        # Validation passive des signalements (route barree franchie, bouchon
+        # traverse au pas...) : jamais bloquante pour le trafic.
+        try:
+            from community.validation_passive import observer_passages
+
+            observer_passages(paires[0][1]['trajet_id'], [evt for _id, evt in paires])
+        except Exception:
+            logger.exception('Validation passive des signalements impossible')
         # Etat des routes : passages par tranche de 100 m. Une erreur ici ne
         # doit jamais bloquer le trafic temps reel (messages acquittes quand meme).
         try:
@@ -154,10 +216,12 @@ class ConsommateurPositions:
 
     @staticmethod
     def _infos_trajet(trajet_id):
-        """([(lat, lon)] du depart et de l'arrivee, trajet a moto ?) --
-        ([], False) si le trajet est inconnu."""
-        from accounts.models import TypeVehicule
-
+        """([(lat, lon)] du depart et de l'arrivee, vehicule exclu de la mesure
+        du trafic ?) -- ([], False) si le trajet est inconnu. Seuls VOITURE et
+        TAXI (ou type non renseigne) mesurent le trafic : une moto remonte les
+        files, un bus s'arrete souvent, un camion est lent en cote, un
+        utilitaire de livraison stationne -- avec NB_MIN_CONDUCTEURS = 2, un
+        bus et un camion suffiraient a publier un faux bouchon pour tous."""
         from ..models import Trajet
 
         try:
@@ -170,7 +234,7 @@ class ConsommateurPositions:
             return [], False
         extremites = [(p.y, p.x) for p in (trajet['position_origine'], trajet['position_destination']) if p is not None]
         vehicule = trajet['type_vehicule'] or trajet['utilisateur__type_vehicule']
-        return extremites, vehicule == TypeVehicule.MOTO
+        return extremites, bool(vehicule) and vehicule not in VEHICULES_MESURANT_LE_TRAFIC
 
     @staticmethod
     def _vitesse_max(arete):
@@ -211,9 +275,13 @@ class ConsommateurPositions:
 
             identifiant_arete = edges[index_arete]['id']
             bucket = self._bucket_5min(self._parser_horodatage(paires[i][1]['horodatage']))
-            self._accumuler(identifiant_arete, bucket, distance_km, duree_s, paires[i][1].get('trajet_id'))
+            self._accumuler(
+                identifiant_arete, bucket, distance_km, duree_s, paires[i][1].get('trajet_id'),
+                cle_stable=cle_stable(edges[index_arete]), noeuds=noeuds_osm(edges[index_arete]),
+            )
 
-    def _accumuler(self, identifiant_arete, bucket_epoch, distance_km, duree_s, trajet_id=None):
+    def _accumuler(self, identifiant_arete, bucket_epoch, distance_km, duree_s, trajet_id=None, cle_stable=None,
+                   noeuds=None):
         """Accumule DISTANCE et DUREE (pas une moyenne de vitesses) : la vitesse
         d'une arete sur un bucket est Sigma distance / Sigma duree -- un vehicule
         qui roule 10 s vite puis 60 s au pas donne sa vraie vitesse, pas la
@@ -226,6 +294,11 @@ class ConsommateurPositions:
             pipe.hincrbyfloat(cle, 'distance', distance_km)
             pipe.hincrbyfloat(cle, 'duree', duree_s)
             pipe.hincrby(cle, 'nombre', 1)
+            if cle_stable is not None:
+                # Voie OSM + sens : recopies dans EchantillonVitesse au flush.
+                pipe.hset(cle, mapping={'way': cle_stable[0], 'avant': int(cle_stable[1])})
+            if noeuds is not None:
+                pipe.hset(cle, mapping={'debut': noeuds[0], 'fin': noeuds[1]})
             if trajet_id is not None:
                 pipe.hincrbyfloat(cle, f'{PREFIXE_CHAMP_TRAJET}{trajet_id}:distance', distance_km)
                 pipe.hincrbyfloat(cle, f'{PREFIXE_CHAMP_TRAJET}{trajet_id}:duree', duree_s)

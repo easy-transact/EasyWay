@@ -164,10 +164,9 @@ def _decider(trajet, position, utilisateur, cap, etapes_restantes, eviter, vites
         arrivee=(trajet.position_destination.y, trajet.position_destination.x),
         utilisateur=utilisateur, cap_origine=cap, alternatives=True, etapes=etapes_restantes or [],
         type_vehicule=trajet.type_vehicule or None, eviter=eviter or [],
-        # A l'arret (vitesse < VITESSE_MIN_CAP_KMH) le cap GPS n'est que du bruit :
-        # le service l'ignore. Vitesse inconnue : il verifie le cap contre un
-        # calcul sans cap. Meme regle que le calcul d'itineraire initial.
-        vitesse_origine_kmh=vitesse_kmh, verifier_cap=(cap is not None and vitesse_kmh is None),
+        # Cap GPS aleatoire a l'arret (bouchon) : ignore sous 10 km/h, verifie
+        # contre un calcul sans cap si la vitesse est inconnue (cf. routes/calculate).
+        vitesse_origine_kmh=vitesse_kmh, verifier_cap=vitesse_kmh is None,
     )
     if not candidats:
         return {**resultat, 'reason': NO_ROUTE}
@@ -260,7 +259,9 @@ def chercher_autres(trajet, position, utilisateur, cap=None, etapes_restantes=No
         arrivee=(trajet.position_destination.y, trajet.position_destination.x),
         utilisateur=utilisateur, cap_origine=cap, alternatives=True, etapes=etapes_restantes or [],
         type_vehicule=trajet.type_vehicule or None, eviter=eviter or [],
-        vitesse_origine_kmh=vitesse_kmh, verifier_cap=(cap is not None and vitesse_kmh is None),
+        # Cap GPS aleatoire a l'arret (bouchon) : ignore sous 10 km/h, verifie
+        # contre un calcul sans cap si la vitesse est inconnue (cf. routes/calculate).
+        vitesse_origine_kmh=vitesse_kmh, verifier_cap=vitesse_kmh is None,
     )
     if not candidats:
         return {'reason': NO_ROUTE, 'routes': [], 'current_duration_s': None}

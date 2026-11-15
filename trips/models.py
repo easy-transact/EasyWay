@@ -322,6 +322,18 @@ class EchantillonVitesse(models.Model):
     id = models.BigAutoField(primary_key=True)
 
     identifiant_arete = models.BigIntegerField(help_text='identifiant de segment sur le graphe routier')
+    # Cle STABLE de l'arete : voie OSM + sens de parcours. identifiant_arete
+    # (GraphId Valhalla) change a chaque reconstruction des tuiles ; way_id et
+    # le sens, non -- l'historique reste utilisable apres une mise a jour de
+    # la carte (cf. CorrespondanceArete). Null si Valhalla ne les a pas fournis.
+    way_id = models.BigIntegerField(null=True, blank=True)
+    sens_avant = models.BooleanField(null=True, blank=True)
+    # Cle la plus fine et stable : le TRONCON entre deux carrefours, par ses
+    # noeuds OSM de debut et de fin (l'ordre donne le sens). Fournie par
+    # Valhalla >= 3.6 avec mjolnir.keep_osm_node_ids ; null sinon (la voie +
+    # le sens ci-dessus servent alors de cle).
+    noeud_debut_osm = models.BigIntegerField(null=True, blank=True)
+    noeud_fin_osm = models.BigIntegerField(null=True, blank=True)
     debut_intervalle = models.DateTimeField()
     jour_semaine = models.PositiveSmallIntegerField()
     heure_jour = models.PositiveSmallIntegerField()
@@ -339,10 +351,40 @@ class EchantillonVitesse(models.Model):
             models.Index(fields=['identifiant_arete', '-debut_intervalle']),
             # vitesses_typiques filtre sur (arete, jour, heure) (service_trafic).
             models.Index(fields=['identifiant_arete', 'jour_semaine', 'heure_jour']),
+            # vitesses_typiques_creneau agrege par voie stable sur (jour, heure).
+            models.Index(fields=['jour_semaine', 'heure_jour', 'way_id', 'sens_avant'], name='echantillon_creneau_voie_idx'),
+            models.Index(
+                fields=['jour_semaine', 'heure_jour', 'noeud_debut_osm', 'noeud_fin_osm'], name='echantillon_troncon_idx',
+            ),
         ]
 
     def __str__(self):
         return f"Arete {self.identifiant_arete} @ {self.debut_intervalle}"
+
+
+class CorrespondanceArete(models.Model):
+    """GraphId Valhalla -> voie OSM + sens, appris des positions recalees
+    (ConsommateurPositions). Vaut pour la generation de tuiles en cours :
+    videe quand traffic.tar est remplace (reconstruction, cf.
+    trafic_temps_reel.publier), puis reapprise. Sert a reporter l'historique
+    stable (EchantillonVitesse.way_id/sens_avant) sur les aretes actuelles."""
+
+    graph_id = models.BigIntegerField(primary_key=True)
+    way_id = models.BigIntegerField()
+    sens_avant = models.BooleanField()
+    noeud_debut_osm = models.BigIntegerField(null=True, blank=True)
+    noeud_fin_osm = models.BigIntegerField(null=True, blank=True)
+    vu_le = models.DateTimeField()
+
+    class Meta:
+        db_table = 'correspondance_arete'
+        indexes = [
+            models.Index(fields=['way_id', 'sens_avant'], name='correspondance_voie_idx'),
+            models.Index(fields=['noeud_debut_osm', 'noeud_fin_osm'], name='correspondance_troncon_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.graph_id} -> way {self.way_id} ({'avant' if self.sens_avant else 'arriere'})"
 
     # Pas de niveau_congestion() ici base sur un seuil absolu (ex. >=50km/h) --
     # 25 km/h est rapide en centre-ville et lent sur une penetrante. Le niveau

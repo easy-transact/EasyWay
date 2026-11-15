@@ -6,7 +6,7 @@ from django.conf import settings
 from django.contrib.gis.db import models as gis_models
 from django.contrib.gis.geos import Point
 from django.db import models
-from django.db.models import F
+from django.db.models import F, Q
 from django.utils import timezone
 
 from accounts.models import Utilisateur
@@ -190,6 +190,15 @@ POINTS_PAR_VALIDATION_TIERCE = Decimal('0.25')
 # faux coutent nettement plus cher que les bons ne rapportent. Multiple de
 # 0,1 (score_reputation a une seule decimale).
 MALUS_REPUTATION_SIGNALEMENT_FAUX = Decimal('1.0')
+# Signalement CONTESTE : au moins INFIRMATIONS_MIN_CONTESTE "Plus rien" et un
+# score repasse sous zero. Il n'agit plus sur l'itineraire (fermeture, retard,
+# risque, traffic.tar) mais reste visible pour que d'autres tranchent. Jamais
+# pour un signalement valide par la moderation ou officiel (autorite).
+INFIRMATIONS_MIN_CONTESTE = 2
+Q_CONTESTE = (
+    Q(infirmations__gte=INFIRMATIONS_MIN_CONTESTE, score_confiance__lt=0)
+    & Q(valide_par_staff=False, organisation__isnull=True)
+)
 
 
 class Incident(models.Model):
@@ -230,6 +239,11 @@ class Incident(models.Model):
     # 8h max (DUREE_VIE_BASE_PAR_TYPE) et retombent sur le repli par couloir.
     way_id_osm = models.BigIntegerField(null=True, blank=True)
     forward_osm = models.BooleanField(null=True, blank=True)
+    # Troncon entre deux carrefours (noeuds OSM de debut et de fin, dans le
+    # sens du signalement) : plus precis que la voie entiere. Valhalla >= 3.6
+    # avec mjolnir.keep_osm_node_ids ; null sinon (cf. services._troncon_osm).
+    noeud_debut_osm = models.BigIntegerField(null=True, blank=True)
+    noeud_fin_osm = models.BigIntegerField(null=True, blank=True)
 
     confirmations = models.IntegerField(default=0)
     infirmations = models.IntegerField(default=0)
@@ -333,35 +347,35 @@ class Incident(models.Model):
             return SEUIL_CONFIANCE_VALIDATION_REDUITE
         return SEUIL_CONFIANCE_VALIDATION
 
+    @property
     def est_conteste(self) -> bool:
-        """Contredit par la communaute : le score est retombe sous zero apres
-        au moins deux infirmations. Un signalement conteste ne s'applique plus
-        a l'itineraire (fermeture, retard, risque, trafic) mais reste visible,
-        pour que d'autres conducteurs tranchent."""
-        return self.infirmations >= 2 and self.score_confiance < 0
-
-    def est_confirme_pour_fermeture(self) -> bool:
-        """Seuil unique pour RETIRER une route du graphe de routage pour tous :
-        le meme que pour devenir ACTIF/visible (score >= seuil_validation), ou
-        un signalement officiel (autorite), ou une validation par la
-        moderation. En dessous, une route barree reste un fort ralentissement
-        (effet FERMETURE non confirme : ~10 km/h sur 300 m), jamais une
-        exclusion -- une seule confirmation ne ferme plus une route pour tout
-        le pays (cf. REVUE_CONFIRMATION_SIGNALEMENTS, points 1 et 2)."""
-        if self.est_conteste():
+        """Cf. Q_CONTESTE (meme regle, cote Python)."""
+        if self.valide_par_staff or self.est_officiel:
             return False
-        return (
-            self.valide_par_staff
-            or self.organisation_id is not None
-            or self.score_confiance >= self.seuil_validation()
-        )
+        return self.infirmations >= INFIRMATIONS_MIN_CONTESTE and self.score_confiance < 0
+
+    @property
+    def confirme_pour_fermeture(self) -> bool:
+        """Seuil UNIQUE pour retirer une route du graphe de routage de tous les
+        utilisateurs : le meme score pondere que pour devenir ACTIF
+        (seuil_validation), ou une validation par la moderation, ou un
+        signalement officiel. Le score baisse a chaque "Plus rien" : une
+        fermeture contestee est donc levee sans attendre l'expiration. En
+        dessous, une route barree reste un fort ralentissement (mecanisme
+        FERMETURE non confirme, cf. trips.services.retards_signalements)."""
+        if self.valide_par_staff or self.est_officiel:
+            return True
+        return not self.est_conteste and self.score_confiance >= self.seuil_validation()
 
     def confirmer(self, vote: 'Vote'):
         # F() plutot qu'un += sur vote.votant : l'instance de l'appelant
         # (request.user) n'a pas a etre verrouillee pour ce simple compteur.
-        Utilisateur.objects.filter(pk=vote.votant_id).update(
-            points=F('points') + POINTS_PAR_VALIDATION_TIERCE
-        )
+        # Vote passif (deduit de la telemetrie) : jamais de points, sinon
+        # rouler devant des signalements deviendrait une source de bons carburant.
+        if not vote.passif:
+            Utilisateur.objects.filter(pk=vote.votant_id).update(
+                points=F('points') + POINTS_PAR_VALIDATION_TIERCE
+            )
         self.confirmations += 1
         self.score_confiance += vote.poids
         # Prolongation plafonnee au triple de la duree de base (section 4.5).
@@ -397,6 +411,22 @@ class Incident(models.Model):
         reduction_min = base / REDUCTION_PAR_INFIRMATION_LONGUE if base >= SEUIL_DUREE_LONGUE_MIN else 10
         self.expire_le = self.expire_le - timezone.timedelta(minutes=reduction_min)
         self.save(update_fields=['infirmations', 'score_confiance', 'expire_le'])
+
+    def annuler_vote_passif(self, vote: 'Vote'):
+        """Le conducteur vote a la main apres un vote passif (deduit de sa
+        telemetrie) : son avis explicite remplace la deduction. On retire
+        l'effet du vote passif sur les compteurs et le score (pas sur
+        l'expiration, deja recalculee depuis) puis on le supprime."""
+        if not vote.passif:
+            return
+        if vote.sens == SensVote.CONFIRMATION:
+            self.confirmations = max(0, self.confirmations - 1)
+            self.score_confiance -= vote.poids
+        else:
+            self.infirmations = max(0, self.infirmations - 1)
+            self.score_confiance += vote.poids
+        self.save(update_fields=['confirmations', 'infirmations', 'score_confiance'])
+        vote.delete()
 
     def prolonger(self, duree: timezone.timedelta):
         self.expire_le = self.expire_le + duree
@@ -468,6 +498,10 @@ class Vote(models.Model):
 
     sens = models.CharField(max_length=20, choices=SensVote.choices)
     poids = models.DecimalField(max_digits=4, decimal_places=2)
+    # Vote PASSIF : deduit de la telemetrie (le conducteur est passe sur
+    # l'incident a telle vitesse, cf. community.validation_passive), sans
+    # action de sa part. Poids reduit, jamais de points de recompense.
+    passif = models.BooleanField(default=False)
     cree_le = models.DateTimeField(auto_now_add=True)
 
     class Meta:

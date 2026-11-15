@@ -8,24 +8,27 @@ normalise la reponse (Valhalla ou repli) en une forme stable pour le client.
 import hashlib
 import json
 import logging
+from datetime import timedelta
 
 from django.conf import settings
 from django.core.cache import cache
+from django.utils import timezone
 
 from accounts.models import Parametres, TypeVehicule
 from etat_routes.services import evitement
 from etat_routes.services.score_trajet import completer as completer_etat_route
 
-from ..models import NiveauTrafic, RoadClass
+from ..models import FUSEAU_TRAFIC, NiveauTrafic, RoadClass
 from . import duree_ville, retards_signalements, risque_itineraire, service_trafic
 from .client_corridor_reference import ClientCorridorReference
 from .client_valhalla import NOMBRE_MAX_ITINERAIRES, ClientValhalla
 from .corridors import trouver_corridor
-from .geo import distance_haversine_m
 
 logger = logging.getLogger(__name__)
 
 DUREE_CACHE_S = 180
+# En dessous, un depart "a l'heure dite" est traite comme un depart immediat.
+DELAI_DEPART_DIFFERE = timedelta(minutes=15)
 
 # Valhalla n'a pas de profil par type de vehicule du domaine -- rapprochement
 # le plus proche disponible cote moteur de routage.
@@ -51,26 +54,6 @@ VITESSE_MIN_CAP_KMH = 10
 # Vitesse inconnue (verifier_cap) : si l'itineraire sans cap est plus rapide
 # d'au moins ce delai, le cap a force un detour -- on le laisse tomber.
 GAIN_MIN_SANS_CAP_S = 120
-
-# Un point `avoid` a moins de cette distance du depart, de l'arrivee ou d'une
-# etape ne peut pas etre exclu : Valhalla ne pourrait ni partir ni arriver et
-# echouerait TOUT le calcul ("no path"). On l'ignore en silence plutot que de
-# renvoyer "aucun itineraire" -- un tel point est de toute facon sur le trajet,
-# pas un detour contournable.
-MARGE_EVITEMENT_EXTREMITE_M = 100
-
-
-def _evitements_exploitables(eviter, depart, arrivee, etapes):
-    """Separe les points `avoid` en (gardes, ignores) : ignore ceux a moins de
-    MARGE_EVITEMENT_EXTREMITE_M d'une extremite ou d'une etape (cf. constante)."""
-    reperes = [depart, arrivee, *(etapes or [])]
-    gardes, ignores = [], []
-    for point in eviter:
-        if any(distance_haversine_m(point, repere) < MARGE_EVITEMENT_EXTREMITE_M for repere in reperes):
-            ignores.append(point)
-        else:
-            gardes.append(point)
-    return gardes, ignores
 
 
 def parametres_de(utilisateur):
@@ -100,10 +83,12 @@ def ajouter_reperes_sans_risque(candidat):
 class ServiceItineraire:
     def __init__(self, client=None):
         self.client = client or ClientValhalla()
+        self.eviter_ignores = []  # rempli par calculer() (points avoid trop pres d'une extremite)
+        self.depart_le = None     # depart differe (cf. calculer)
 
     def calculer(
         self, depart, arrivee, utilisateur, eviter=None, cap_origine=None, alternatives=True, etapes=None,
-        type_vehicule=None, vitesse_origine_kmh=None, verifier_cap=False,
+        type_vehicule=None, vitesse_origine_kmh=None, verifier_cap=False, depart_le=None,
     ) -> list[dict]:
         """depart/arrivee : (lat, lon). etapes (optionnel) : arrets
         intermediaires dans l'ordre de passage -- chaque paire consecutive
@@ -126,23 +111,32 @@ class ServiceItineraire:
         vitesse_origine_kmh : sous VITESSE_MIN_CAP_KMH, cap_origine est ignore.
         verifier_cap (vitesse inconnue) : compare a un calcul sans cap et
         garde celui-ci s'il evite un detour (cf. GAIN_MIN_SANS_CAP_S)."""
+        # Depart differe (> DELAI_DEPART_DIFFERE) : Valhalla calcule avec le
+        # trafic PREVU a cette heure (date_time, profils predicted des tuiles),
+        # pas avec le trafic du moment ; idem pour nos corrections ci-dessous.
+        self.depart_le = depart_le if depart_le and depart_le > timezone.now() + DELAI_DEPART_DIFFERE else None
         controle = settings.CONTROLE_CAP_ORIGINE  # cf. settings : False = cap transmis tel quel
         if controle and vitesse_origine_kmh is not None and vitesse_origine_kmh < VITESSE_MIN_CAP_KMH:
             cap_origine = None
         type_vehicule = type_vehicule or utilisateur.type_vehicule
         options = self._options_depuis_parametres(utilisateur, type_vehicule)
         costing = options['costing']
-        # Un point a eviter colle au depart/arrivee/etape ferait echouer tout
-        # le calcul : on l'ecarte avant de parler a Valhalla (cf. constante).
-        eviter, eviter_ignores = _evitements_exploitables(list(eviter or []), depart, arrivee, etapes)
-        if eviter_ignores:
-            logger.info(
-                '%d point(s) a eviter ignore(s) : trop proche(s) du depart, de la destination ou d\'une etape',
-                len(eviter_ignores),
-            )
+        # Points `avoid` de l'appli trop pres du depart, de l'arrivee ou d'une
+        # etape : ignores (sinon "aucun chemin"), et gardes dans
+        # self.eviter_ignores pour que la vue les signale a l'appli.
+        eviter, self.eviter_ignores = retards_signalements.separer_points_a_eviter(eviter, depart, arrivee, etapes)
         # Fermetures confirmees (route barree, inondation) : exclues du calcul,
         # comme un point `avoid` (cf. retards_signalements.fermetures_a_eviter).
-        eviter = eviter + retards_signalements.fermetures_a_eviter(depart, arrivee, etapes, costing)
+        if self.depart_le:
+            # Heure locale du lieu de depart (fuseau de Douala), format Valhalla.
+            options['date_time'] = {
+                'type': 1, 'value': self.depart_le.astimezone(FUSEAU_TRAFIC).strftime('%Y-%m-%dT%H:%M'),
+            }
+        # Le trafic en direct (traffic.tar) ne vaut que pour un depart maintenant.
+        trafic_en_direct = 'current' in options['costing_options'][costing]['speed_types'] and not self.depart_le
+        eviter = eviter + retards_signalements.fermetures_a_eviter(
+            depart, arrivee, etapes, costing, trafic_en_direct=trafic_en_direct, moment=self.depart_le,
+        )
         if eviter:
             # cf. https://valhalla.github.io/valhalla/api/turn-by-turn/api-reference/#exclude-locations
             # -- cle top-level du payload /route, pas une costing_option.
@@ -154,10 +148,8 @@ class ServiceItineraire:
             if direct and direct[0]['summary']['time'] + GAIN_MIN_SANS_CAP_S < trips[0]['summary']['time']:
                 trips = self._trips(depart, arrivee, options, None, alternatives, etapes, eviter) if alternatives else direct
 
-        trafic_en_direct = 'current' in options['costing_options'][costing]['speed_types']
-        incidents_en_trafic = self._incidents_en_trafic() if trafic_en_direct else set()
         penalite = evitement.penalite_appliquee if parametres_de(utilisateur).eviter_routes_degradees else None
-        candidats = self._evaluer(trips, 0, type_vehicule, costing, trafic_en_direct, incidents_en_trafic)
+        candidats = self._evaluer(trips, 0, type_vehicule, costing, trafic_en_direct)
         candidats = risque_itineraire.classer(candidats, penalite)
 
         # La route choisie traverse un danger serieux et confirme (accident...) :
@@ -175,7 +167,7 @@ class ServiceItineraire:
                 connues = {c['geometrie'] for c in candidats}
                 nouveaux = [
                     c for c in self._evaluer(
-                        contournement, len(candidats), type_vehicule, costing, trafic_en_direct, incidents_en_trafic,
+                        contournement, len(candidats), type_vehicule, costing, trafic_en_direct,
                     )
                     if c['geometrie'] not in connues and not c.get('degrade')
                 ]
@@ -183,21 +175,7 @@ class ServiceItineraire:
                     candidats = risque_itineraire.classer(candidats + nouveaux, penalite)
         return candidats[:NOMBRE_MAX_ITINERAIRES] if alternatives else candidats[:1]
 
-    @staticmethod
-    def _incidents_en_trafic() -> set:
-        """Embouteillages signales reellement ecrits dans traffic.tar (point 4).
-        Degrade en ensemble vide si Redis-telemetrie est injoignable -- on
-        comptera alors leur retard, jamais un double comptage silencieux."""
-        from . import trafic_temps_reel
-        from .producteur_evenements import connexion_redis_telemetrie
-
-        try:
-            return trafic_temps_reel.incidents_en_traffic_tar(connexion_redis_telemetrie())
-        except Exception:
-            logger.warning('Ensemble des embouteillages publies indisponible, retards comptes normalement')
-            return set()
-
-    def _evaluer(self, trips, premier_index, type_vehicule, costing, trafic_en_direct, incidents_en_trafic=None):
+    def _evaluer(self, trips, premier_index, type_vehicule, costing, trafic_en_direct):
         """Trips Valhalla -> candidats normalises, avec reperes, retards des
         signalements et risque. Retards et risque recalcules a chaque appel (pas
         mis en cache : un signalement peut apparaitre ou expirer entre deux calculs)."""
@@ -205,7 +183,7 @@ class ServiceItineraire:
         for candidat in candidats:
             candidat['type_vehicule'] = type_vehicule or TypeVehicule.VOITURE
             ajouter_reperes_sans_risque(candidat)
-        candidats = retards_signalements.appliquer(candidats, costing, trafic_en_direct, incidents_en_trafic)
+        candidats = retards_signalements.appliquer(candidats, costing, trafic_en_direct, moment=self.depart_le)
         return risque_itineraire.evaluer(candidats, costing)
 
     def _trips(self, depart, arrivee, options, cap_origine, alternatives, etapes, eviter):
@@ -271,11 +249,19 @@ class ServiceItineraire:
         return {'costing': costing, 'costing_options': {costing: costing_options}}
 
     def _cle_cache(self, depart, arrivee, options, cap_origine, alternatives, etapes=None) -> str:
+        # Fermetures et embouteillages ecrits dans traffic.tar : invisibles
+        # dans les options, mais ils changent la route de Valhalla -- une
+        # nouvelle fermeture invalide le cache tout de suite, pas apres 3 min.
+        publies = None
+        if 'current' in options.get('costing_options', {}).get(options.get('costing'), {}).get('speed_types', []):
+            from .trafic_temps_reel import incidents_publies
+
+            publies = sorted(incidents_publies() or [])
         brut = json.dumps(
             {
                 'depart': depart, 'arrivee': arrivee, 'options': options,
                 'cap_origine': cap_origine, 'alternatives': alternatives,
-                'etapes': etapes or [],
+                'etapes': etapes or [], 'publies': publies,
             },
             sort_keys=True,
         )
@@ -322,7 +308,11 @@ class ServiceItineraire:
                 manoeuvres.append((m, arrivee_etape))
         geometrie = ''.join(leg['shape'] for leg in trip['legs'])
 
-        if trip.get('degrade'):
+        if self.depart_le:
+            # Depart differe : le trafic mesure maintenant ne dit rien de
+            # l'heure du depart -- Valhalla a deja applique le trafic prevu.
+            trafic = {'niveau_trafic': NiveauTrafic.NORMAL, 'duree_avec_trafic': None}
+        elif trip.get('degrade'):
             # Ligne droite haversine (repli du disjoncteur Valhalla, cf.
             # client_valhalla.replier) : pas une geometrie routiere, evaluer
             # son trafic n'aurait aucun sens (et le disjoncteur, deja ouvert
@@ -361,5 +351,5 @@ class ServiceItineraire:
         # Durees Valhalla trop optimistes en ville : correction selon l'heure,
         # sauf pour un corridor de reference (duree deja de confiance).
         if not trip.get('corridor'):
-            duree_ville.corriger(candidat, trafic)
+            duree_ville.corriger(candidat, trafic, moment=self.depart_le)
         return candidat

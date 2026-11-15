@@ -41,6 +41,9 @@ class IncidentSerializer(serializers.ModelSerializer):
     # Signalement officiel (autorite) : l'appli affiche un badge "officiel" et
     # la source. `official_source` = {name, type} ou null.
     official = serializers.BooleanField(source='est_officiel', read_only=True)
+    # Conteste (au moins 2 "Plus rien" et score negatif) : n'agit plus sur les
+    # itineraires, mais reste affiche (badge) pour que d'autres tranchent.
+    contested = serializers.BooleanField(source='est_conteste', read_only=True)
     official_source = serializers.SerializerMethodField()
     starts_at = serializers.DateTimeField(source='debut_le', read_only=True, allow_null=True)
     note = serializers.CharField(read_only=True, allow_blank=True)
@@ -60,6 +63,7 @@ class IncidentSerializer(serializers.ModelSerializer):
             'confirmations', 'disputes', 'confidence_score', 'estimated_impact',
             'status', 'severity', 'expires_at', 'created_at', 'way_id', 'forward',
             'reporter_name', 'reporter_id', 'validations_count', 'official', 'official_source', 'starts_at', 'note',
+            'contested',
         ]
         read_only_fields = fields
 
@@ -264,6 +268,15 @@ class IncidentsSurTrajetSerializer(serializers.Serializer):
 
     geometry = serializers.CharField()
     buffer_m = serializers.IntegerField(required=False, default=BUFFER_M_DEFAUT, min_value=1, max_value=BUFFER_M_MAX)
+    # Position actuelle du conducteur (facultative) : les signalements deja
+    # depasses sont retires, les autres tries par distance restante.
+    lat = serializers.FloatField(required=False, allow_null=True, default=None, min_value=-90, max_value=90)
+    lon = serializers.FloatField(required=False, allow_null=True, default=None, min_value=-180, max_value=180)
+
+    def validate(self, donnees):
+        if (donnees['lat'] is None) != (donnees['lon'] is None):
+            raise serializers.ValidationError("'lat' and 'lon' must be provided together.")
+        return donnees
 
     def validate_geometry(self, valeur):
         try:

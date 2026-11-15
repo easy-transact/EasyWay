@@ -14,17 +14,18 @@ propose des voies bloquees, et la vraie route barree est un sous-type de
 VOIE_BLOQUEE ; SENS_INVERSE existe sous POLICE et sous ACCIDENT.
 """
 
-import math
 from dataclasses import dataclass
 
-from django.contrib.gis.geos import LineString, Point, Polygon
+from django.contrib.gis.geos import Polygon
 
 from django.utils import timezone
 
-from community.models import Incident, SousTypeIncident as S, StatutIncident, TypeIncident as T
+from community.models import Q_CONTESTE, Incident, SousTypeIncident as S, StatutIncident, TypeIncident as T
 
 from ..polyline import decoder_polyline6
+from . import sur_trajet
 from .geo import distance_haversine_m
+from .sur_trajet import Trace, cap_segment
 
 # Valeurs de depart de la spec (section 4), a caler avec les donnees.
 VITESSE = 'vitesse'      # vitesse imposee (km/h) sur `longueur_m`
@@ -86,26 +87,27 @@ def effet_de(incident):
         return EFFETS_SANS_SOUS_TYPE.get(incident.type)
     return EFFETS.get((incident.type, incident.sous_type))
 
-COULOIR_M = 30             # signalement a moins de 30 m de la ligne du trajet
-ECART_CAP_MAX = 45         # degres entre le cap du signalement et le sens du trajet
+# Couloir et sens : regle commune a tout le projet (cf. sur_trajet), reexportee
+# ici pour les modules qui lisaient deja rs.COULOIR_M / rs.ECART_CAP_MAX.
+COULOIR_M = sur_trajet.COULOIR_M
+ECART_CAP_MAX = sur_trajet.ECART_CAP_MAX
 MARGE_EXTREMITES_M = 100   # jamais de fermeture pres du depart ou de l'arrivee
 MARGE_RECHERCHE_DEG = 0.045  # ~5 km autour du rectangle depart-arrivee
 EGALITE_S = 60             # a moins d'1 min d'ecart, departage par nb de signalements puis distance
-SEUIL_CONFIANCE = 3        # cf. community.models.SEUIL_CONFIANCE_VALIDATION
 METRES_PAR_DEGRE = 111_320
 
 
 def confiance(incident):
     """Probabilite (0-1) qu'un signalement soit encore la : confiance des
     votes x usure dans le temps. score_confiance est une SOMME de poids de
-    votes, pas une probabilite : ramenee a [0, 1] en comptant l'auteur pour 1
-    (un signalement tout neuf vaut ~1/4, valide il vaut 1). On divise par
-    1 + seuil_validation() -- et non une constante -- pour qu'un signalement
-    valide (score = seuil) vaille 1, y compris quand l'auteur repute abaisse le
-    seuil a 2 (cf. REVUE_CONFIRMATION_SIGNALEMENTS, point 7)."""
-    if incident.est_conteste():
-        return 0.0  # contredit par la communaute : ne compte plus (retard/risque)
-    votes = min(max((1 + float(incident.score_confiance)) / (1 + float(incident.seuil_validation())), 0.0), 1.0)
+    votes (seuil_validation() = valide), pas une probabilite : ramenee a
+    [0, 1] en comptant l'auteur pour 1 (un signalement tout neuf vaut
+    1/(1+seuil), valide il vaut 1 -- y compris au seuil reduit d'un auteur
+    repute). Un signalement conteste vaut 0."""
+    if incident.est_conteste:
+        return 0.0
+    seuil = float(incident.seuil_validation())
+    votes = min(max((1 + float(incident.score_confiance)) / (1 + seuil), 0.0), 1.0)
     if incident.valide_par_staff:
         votes = 1.0  # valide par la moderation : plus de doute sur sa presence
     maintenant = timezone.now()
@@ -121,29 +123,26 @@ def confiance(incident):
 
 
 def fermeture_confirmee(incident, effet, costing):
-    """Retire une route du graphe pour tous. Seuil aligne sur la visibilite
-    (score >= seuil_validation, signalement officiel, ou validation
-    moderation) -- une seule confirmation ne ferme plus une route pour tout le
-    pays, elle la ralentit fortement (cf. Incident.est_confirme_pour_fermeture
-    et REVUE_CONFIRMATION_SIGNALEMENTS, points 1 et 2). Une inondation ferme la
-    route d'une moto des le premier signalement, sauf si deja conteste."""
+    """Route retiree du graphe : cf. Incident.confirme_pour_fermeture (score
+    au seuil de validation, moderation ou officiel -- meme seuil que pour
+    devenir ACTIF, plus un simple nombre de confirmations). Une inondation
+    ferme la route d'une moto des le premier signalement (sauf contestee)."""
     if effet.mecanisme != FERMETURE:
         return False
-    if incident.est_conteste():
-        return False
     if effet.fermeture_moto_immediate and costing == 'motorcycle':
-        return True
-    return incident.est_confirme_pour_fermeture()
+        return not incident.est_conteste
+    return incident.confirme_pour_fermeture
 
 
 def _incidents_actifs(rectangle):
-    # select_related('auteur') : seuil_validation()/est_confirme_pour_fermeture()
-    # lisent auteur.score_reputation pour chaque incident -- sinon un N+1.
-    return Incident.objects.select_related('auteur').filter(
+    """Signalements qui agissent sur l'itineraire : ACTIF ou EN_ATTENTE, non
+    expires, et non contestes (cf. community.models.Q_CONTESTE). auteur charge
+    d'avance : seuil_validation() le lit pour chaque signalement."""
+    return Incident.objects.filter(
         statut__in=[StatutIncident.ACTIF, StatutIncident.EN_ATTENTE],
         expire_le__gt=timezone.now(),
         position__intersects=rectangle,
-    )
+    ).exclude(Q_CONTESTE).select_related('auteur')
 
 
 def _rectangle(points_latlon):
@@ -157,16 +156,47 @@ def _rectangle(points_latlon):
     return rectangle
 
 
-def fermetures_a_eviter(depart, arrivee, etapes, costing):
+def separer_points_a_eviter(points, depart, arrivee, etapes):
+    """Points `avoid` envoyes par l'appli -> (gardes, ignores). Meme regle que
+    pour les fermetures (fermetures_a_eviter) : un point a moins de
+    MARGE_EXTREMITES_M du depart, de l'arrivee ou d'une etape rendrait le
+    calcul impossible (Valhalla repond "aucun chemin") -- il est ignore, et
+    l'appelant le signale a l'appli plutot que d'echouer."""
+    extremites = [depart, arrivee, *(etapes or [])]
+    gardes, ignores = [], []
+    for point in points or []:
+        if any(distance_haversine_m(point, e) < MARGE_EXTREMITES_M for e in extremites):
+            ignores.append(point)
+        else:
+            gardes.append(point)
+    return gardes, ignores
+
+
+def fermetures_a_eviter(depart, arrivee, etapes, costing, trafic_en_direct=False, moment=None):
     """Positions (lat, lon) des fermetures confirmees a exclure du calcul
     (exclude_locations), jamais a moins de 100 m du depart, de l'arrivee ou
-    d'une etape (le calcul deviendrait impossible)."""
+    d'une etape (le calcul deviendrait impossible).
+
+    trafic_en_direct (le calcul lit traffic.tar) : les fermetures deja
+    marquees fermees dans traffic.tar, sur leur arete et dans leur sens (cf.
+    trafic_temps_reel._fermetures_signalees), ne sont pas exclues en plus
+    comme un point -- plus precis : un point exclut tout ce qui passe pres.
+    moment (depart differe) : seulement les fermetures encore valables a ce moment."""
+    deja_dans_trafic = set()
+    if trafic_en_direct:
+        from .trafic_temps_reel import incidents_publies
+
+        deja_dans_trafic = incidents_publies() or set()
     extremites = [depart, arrivee, *(etapes or [])]
     exclusions = []
     for incident in _incidents_actifs(_rectangle(extremites)):
         effet = effet_de(incident)
         if effet is None or not fermeture_confirmee(incident, effet, costing):
             continue
+        if str(incident.id) in deja_dans_trafic:
+            continue
+        if moment is not None and incident.expire_le <= moment:
+            continue  # aura expire avant le depart
         lat, lon = incident.position.y, incident.position.x
         if any(distance_haversine_m((lat, lon), e) < MARGE_EXTREMITES_M for e in extremites):
             continue
@@ -175,22 +205,12 @@ def fermetures_a_eviter(depart, arrivee, etapes, costing):
 
 
 def _cap(lon1, lat1, lon2, lat2):
-    d_lon = math.radians(lon2 - lon1)
-    p1, p2 = math.radians(lat1), math.radians(lat2)
-    x = math.sin(d_lon) * math.cos(p2)
-    y = math.cos(p1) * math.sin(p2) - math.sin(p1) * math.cos(p2) * math.cos(d_lon)
-    return (math.degrees(math.atan2(x, y)) + 360) % 360
+    return cap_segment(lon1, lat1, lon2, lat2)
 
 
 def _cap_du_trace(points, position):
-    """Sens du trajet au droit de la position : cap du segment le plus proche."""
-    meilleur, distance = None, float('inf')
-    for (lon1, lat1), (lon2, lat2) in zip(points, points[1:]):
-        segment = LineString([(lon1, lat1), (lon2, lat2)], srid=4326)
-        d = segment.distance(position)
-        if d < distance:
-            meilleur, distance = (lon1, lat1, lon2, lat2), d
-    return _cap(*meilleur) if meilleur else None
+    """Sens du trajet au droit de la position (cf. sur_trajet.Trace.cap_au_droit)."""
+    return Trace(points).cap_au_droit(position)
 
 
 # Vitesse de reference pour un retard INDICATIF (affichage back-office) : le
@@ -221,25 +241,35 @@ def _retard_s(effet, vitesse_normale_ms):
     return longueur * (1 / vitesse_imposee - 1 / vitesse_normale_ms)
 
 
-def appliquer(candidats, costing, trafic_en_direct, incidents_en_trafic=None):
+def appliquer(candidats, costing, trafic_en_direct, moment=None):
     """Ajoute a chaque candidat (forme ServiceItineraire._normaliser_trip) :
     delai_signalements (s), signalements_appliques, et ajuste
     duree_avec_trafic = duree (ou duree trafic) + delai. Puis reclasse et
     marque est_recommande sur le premier.
 
-    trafic_en_direct : ce costing utilise les vitesses courantes de traffic.tar.
-    incidents_en_trafic : ids (str) des embouteillages REELLEMENT ecrits dans
-    traffic.tar (cf. trafic_temps_reel.incidents_en_traffic_tar). Un
-    embouteillage n'est exclu du retard que s'il remplit les DEUX conditions --
-    sinon il n'est nulle part dans la duree et doit etre compte ici (point 4)."""
-    incidents_en_trafic = incidents_en_trafic or set()
+    trafic_en_direct : ce costing utilise les vitesses courantes de traffic.tar
+    -- un embouteillage REELLEMENT ecrit dedans (cf.
+    trafic_temps_reel.incidents_publies) n'est pas recompte ici en retard ;
+    sinon il n'est nulle part dans la duree et doit etre compte (point 4).
+    moment : heure d'un depart differe -- un signalement qui aura expire d'ici
+    la ne compte pas."""
     if not candidats:
         return candidats
     toutes_coords = [(lat, lon) for c in candidats for lon, lat in decoder_polyline6(c['geometrie'])[::20]]
+    # Depart differe (moment) : un signalement qui aura expire d'ici la ne compte pas.
     incidents = [
         i for i in _incidents_actifs(_rectangle(toutes_coords))
-        if effet_de(i) is not None
+        if effet_de(i) is not None and (moment is None or i.expire_le > moment)
     ]
+
+    # Embouteillages reellement presents dans traffic.tar, par incident (pas
+    # par requete) : si la publication est arretee ou a echoue pour l'un
+    # d'eux, il est compte en retard ici plutot que de n'avoir aucun effet.
+    deja_dans_trafic = set()
+    if trafic_en_direct:
+        from .trafic_temps_reel import incidents_publies
+
+        deja_dans_trafic = incidents_publies() or set()
 
     for candidat in candidats:
         candidat['delai_signalements'] = 0
@@ -250,29 +280,18 @@ def appliquer(candidats, costing, trafic_en_direct, incidents_en_trafic=None):
         points = decoder_polyline6(candidat['geometrie'])
         if len(points) < 2:
             continue
-        ligne = LineString(points, srid=4326)
+        trace = Trace(points)
         vitesse_normale = max(candidat['distance'] / max(candidat['duree'], 1), 2.0)  # m/s
         total = 0.0
         for incident in incidents:
             effet = effet_de(incident)
-            position = Point(incident.position.x, incident.position.y, srid=4326)
-            if ligne.distance(position) * METRES_PAR_DEGRE > COULOIR_M:
-                continue
-            if incident.cap is not None:
-                cap_trace = _cap_du_trace(points, position)
-                ecart = abs((incident.cap - cap_trace + 180) % 360 - 180) if cap_trace is not None else 0
-                if ecart > ECART_CAP_MAX:
-                    continue  # signale dans l'autre sens de circulation
+            if not trace.contient_incident(incident):
+                continue  # hors couloir, ou signale dans l'autre sens de circulation
             if fermeture_confirmee(incident, effet, costing):
                 continue  # deja exclue du calcul (fermetures_a_eviter)
             moto = costing == 'motorcycle'
-            if (
-                trafic_en_direct
-                and incident.type == T.EMBOUTEILLAGE
-                and incident.statut == StatutIncident.ACTIF
-                and str(incident.id) in incidents_en_trafic
-            ):
-                continue  # deja dans traffic.tar (vitesse ecrite), ne pas recompter
+            if str(incident.id) in deja_dans_trafic:
+                continue  # deja ecrit en vitesses dans traffic.tar
             retard = _retard_s(effet, vitesse_normale) * confiance(incident) * (effet.part_moto if moto else 1.0)
             if retard < 1:
                 continue

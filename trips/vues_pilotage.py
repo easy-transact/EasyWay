@@ -202,6 +202,21 @@ class PropositionsView(APIView):
         })
 
 
+class SanteTraficView(APIView):
+    """GET /api/staff/insights/traffic-health/ : la publication du trafic
+    temps reel tourne-t-elle encore ? (cf. trafic_temps_reel.sante_trafic)"""
+
+    permission_classes = [IsAdminUser]
+
+    @extend_schema(tags=['Staff - Pilotage'], summary='Etat du trafic temps reel')
+    def get(self, request):
+        from .services.producteur_evenements import connexion_redis_telemetrie
+        from .services.trafic_temps_reel import sante_trafic
+
+        etat = sante_trafic(connexion_redis_telemetrie(), int(timezone.now().timestamp()))
+        return Response(etat)
+
+
 class DensiteDonneesView(APIView):
     permission_classes = [IsAdminUser]
 

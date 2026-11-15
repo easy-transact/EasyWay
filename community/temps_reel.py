@@ -57,6 +57,11 @@ def publier_incident(incident, evenement: str) -> None:
     deja masque si l'auteur est en mode invisible."""
     payload = {'type': evenement, 'incident': IncidentSerializer(incident).data}
     _publier_apres_commit(incident.cellule_h3_res8, payload)
+    # Conducteurs dont la route restante passe sur l'incident : prevenus en
+    # direct (route.recheck), sans attendre leur appel periodique a better-route.
+    from trips.services.alertes_itineraire import planifier_alerte
+
+    planifier_alerte(incident.id)
 
 
 def publier_retrait(incident_id, cellule_h3: int, raison: str) -> None:

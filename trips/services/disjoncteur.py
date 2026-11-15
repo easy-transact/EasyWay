@@ -30,22 +30,32 @@ def verifier():
         raise DisjoncteurOuvert()
 
 
+def est_requete_refusee(exc) -> bool:
+    """True pour une reponse 4xx de Valhalla : requete refusee (aucun chemin,
+    point trop loin d'une route, trace impossible a recaler...). C'est un cas
+    NORMAL, pas une panne : il ne doit ni compter pour le disjoncteur, ni etre
+    reessaye (meme requete = meme reponse). Seuls reseau, timeout et 5xx sont
+    des pannes."""
+    reponse = getattr(exc, 'response', None)
+    return reponse is not None and 400 <= reponse.status_code < 500
+
+
 def enregistrer_echec():
-    # Comptage atomique : cache.get + cache.set n'est PAS atomique -- deux
-    # workers qui echouent en meme temps peuvent lire la meme valeur et perdre
-    # un echec, retardant l'ouverture du disjoncteur. cache.incr (INCR Redis)
-    # l'est. add() pose la cle (et sa fenetre) si absente ; sinon on incremente
-    # et on prolonge la fenetre (comptage glissant, comme avant).
+    # Comptage atomique (cache.add + cache.incr) : un get puis un set pouvait
+    # perdre des echecs comptes en meme temps par deux workers. add() pose la
+    # cle et sa fenetre si absente ; sinon incr(), puis touch() prolonge la
+    # fenetre (comptage glissant, comme l'ancien set a timeout).
     if cache.add(CLE_ECHECS, 1, timeout=FENETRE_COMPTAGE_ECHECS_S):
         echecs = 1
     else:
         try:
             echecs = cache.incr(CLE_ECHECS)
-        except ValueError:
-            # la cle a expire entre add et incr -- repartir de 1
+        except ValueError:  # cle expiree entre add et incr
             cache.set(CLE_ECHECS, 1, timeout=FENETRE_COMPTAGE_ECHECS_S)
             echecs = 1
         else:
+            if echecs is None:  # Redis injoignable (IGNORE_EXCEPTIONS) : on ne compte rien
+                return
             cache.touch(CLE_ECHECS, FENETRE_COMPTAGE_ECHECS_S)
     if echecs >= SEUIL_ECHECS:
         cache.set(CLE_OUVERT_JUSQU_A, time.time() + DUREE_OUVERTURE_S, timeout=DUREE_OUVERTURE_S)

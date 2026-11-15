@@ -22,6 +22,7 @@ class ProximiteParametresSerializer(serializers.Serializer):
         min_value=1, max_value=proximite.LIMITE_MAX, required=False, default=proximite.LIMITE_DEFAUT,
     )
     open_now = serializers.BooleanField(required=False, default=False)
+    sort = serializers.ChoiceField(choices=['time', 'distance'], required=False, default='time')
 
     def validate_types(self, brut):
         types = [t.strip().lower() for t in brut.split(',') if t.strip()] or list(proximite.TYPES)
@@ -35,7 +36,7 @@ class ProximiteParametresSerializer(serializers.Serializer):
     tags=['Places'],
     summary='Garages, hopitaux, stations et pharmacies a proximite',
     description=(
-        f'Du plus proche au plus loin, dans radius_m (defaut {proximite.RAYON_DEFAUT_M}, '
+        f'Du plus proche au plus loin (en temps de trajet, cf. sort), dans radius_m (defaut {proximite.RAYON_DEFAUT_M}, '
         f'100 a {proximite.RAYON_MAX_M}). types = garage,hopital,station,pharmacie,recharge (defaut : tous). '
         "Stations et pharmacies : opening_hours (null si inconnus) et is_open_now (null si inconnu) ; "
         'open_now=true ecarte celles fermees maintenant (horaires inconnus gardes). Garages : rating_average, '
@@ -49,6 +50,12 @@ class ProximiteParametresSerializer(serializers.Serializer):
         OpenApiParameter('types', OpenApiTypes.STR, description='Liste separee par des virgules.'),
         OpenApiParameter('limit', OpenApiTypes.INT),
         OpenApiParameter('open_now', OpenApiTypes.BOOL),
+        OpenApiParameter(
+            'sort', OpenApiTypes.STR,
+            description="time (defaut) : par temps de trajet par la route (drive_duration_s, "
+                        "drive_distance_m) ; distance : a vol d'oiseau. Valhalla indisponible : "
+                        "par distance, drive_* a null.",
+        ),
     ],
 )
 class ProximiteView(APIView):
@@ -60,6 +67,7 @@ class ProximiteView(APIView):
         p = serializer.validated_data
         resultats = proximite.a_proximite(
             p['lat'], p['lon'], p['radius_m'], p['types'], p['limit'], proximite.maintenant_local(),
+            par_temps=p['sort'] == 'time',
         )
         if p['open_now']:
             # Les types sans horaires (garages, hopitaux) restent : rien ne dit qu'ils sont fermes.

@@ -8,7 +8,7 @@ verrouillee.
 import h3
 from django.conf import settings
 from django.contrib.gis.db.models.functions import Distance
-from django.contrib.gis.geos import Point
+from django.contrib.gis.geos import LineString, Point
 from django.contrib.gis.measure import D
 from django.db import transaction
 from django.db.models import Q
@@ -40,7 +40,20 @@ def incidents_actifs_par_topologie(points: list[tuple[float, float]]) -> list[In
     trajet", pas un echec. Extrait de IncidentsSurTrajetView pour etre
     reutilisable (cf. trips.serializers.TrajetModerationSerializer, qui
     l'appelle sur la geometrie stockee d'un Trajet plutot que sur une
-    geometrie fournie par le client)."""
+    geometrie fournie par le client).
+
+    Trois cas, tous limites au COULOIR du trace (meme couloir que le calcul
+    d'itineraire, retards_signalements.COULOIR_M) -- une voie OSM peut faire
+    des kilometres, le trajet n'en parcourt souvent qu'une partie :
+      - signalement oriente (cap) : meme voie ET meme sens que le trajet
+        (une contre-allee parallele, autre voie, n'est jamais prise) ;
+      - signalement sans cap : meme voie, dans les deux sens (son sens
+        `forward_osm` a ete devine par Valhalla, il ne veut rien dire) ;
+      - signalement pas encore cale sur une voie (Valhalla indisponible a sa
+        creation, cf. tache recaler_signalements_sans_voie) : couloir + cap,
+        comme le repli historique, plutot que de le perdre."""
+    from trips.services.sur_trajet import COULOIR_M, Trace
+
     try:
         aretes = attributs_trace(points)
     except (ErreurTraceAttributes, DisjoncteurOuvert):
@@ -49,13 +62,38 @@ def incidents_actifs_par_topologie(points: list[tuple[float, float]]) -> list[In
         return None
 
     paires = {(arete['way_id'], arete['forward']) for arete in aretes}
-    q = Q(pk__in=[])
+    voies = {way_id for way_id, _forward in paires}
+    troncons = {arete['noeuds'] for arete in aretes if arete.get('noeuds')}
+    q_oriente = Q(pk__in=[])
     for way_id, forward in paires:
-        q |= Q(way_id_osm=way_id, forward_osm=forward)
-
-    return list(Incident.objects.select_related('auteur').filter(
+        q_oriente |= Q(way_id_osm=way_id, forward_osm=forward)
+    q_troncon = Q(pk__in=[])
+    for debut, fin in troncons:
+        q_troncon |= Q(noeud_debut_osm=debut, noeud_fin_osm=fin)
+    sans_troncon = Q(noeud_debut_osm__isnull=True)
+    q = (
+        # Troncon connu des deux cotes (Valhalla >= 3.6) : le plus precis --
+        # meme troncon entre deux carrefours, dans le meme sens.
+        (Q(noeud_debut_osm__isnull=False) & q_troncon)
+        # Sinon, voie OSM + sens (signalement oriente), ou voie seule (sans cap).
+        | (sans_troncon & Q(cap__isnull=False) & q_oriente)
+        | (sans_troncon & Q(cap__isnull=True, way_id_osm__in=voies))
+        | Q(way_id_osm__isnull=True)
+    )
+    if not troncons:
+        # Trajet sans noeuds (Valhalla < 3.6) : un signalement qui en a se
+        # rabat sur sa voie et son sens.
+        q |= Q(noeud_debut_osm__isnull=False, cap__isnull=False) & q_oriente
+    ligne = LineString(points, srid=4326)
+    candidats = Incident.objects.select_related('auteur').filter(
         q, statut__in=[StatutIncident.ACTIF, StatutIncident.EN_ATTENTE], expire_le__gt=timezone.now(),
-    ))
+        position__distance_lte=(ligne, D(m=COULOIR_M)),
+    )
+
+    trace = Trace(points)
+    # Sans voie : le sens se verifie sur le trace (la voie le donnait sinon).
+    return [i for i in candidats if i.way_id_osm is not None or trace.dans_le_sens(i.cap, i.position)]
+
 
 QUOTA_SIGNALEMENTS_PAR_HEURE = 10
 RAYON_DOUBLON_M = 150
@@ -90,6 +128,7 @@ class ServiceIncident:
             position, way_id_osm, forward_osm = resultat_routier
         else:
             way_id_osm, forward_osm = None, None
+        noeuds = self._troncon_osm(position, cap) if way_id_osm is not None else None
 
         # Geocodage inverse (appel HTTP Nominatim) AVANT la transaction : sinon
         # le verrou select_for_update sur les signalements voisins est tenu
@@ -112,6 +151,7 @@ class ServiceIncident:
                     cap=cap,
                     way_id_osm=way_id_osm,
                     forward_osm=forward_osm,
+                    noeud_debut_osm=noeuds[0] if noeuds else None, noeud_fin_osm=noeuds[1] if noeuds else None,
                     nom_voie=geocodage['label'] if geocodage else '',
                     ville=geocodage['city'] if geocodage else '',
                     ville_normalisee=normaliser(geocodage['city']) if geocodage and geocodage['city'] else '',
@@ -146,6 +186,7 @@ class ServiceIncident:
             position, way_id_osm, forward_osm = resultat_routier
         else:
             way_id_osm, forward_osm = None, None
+        noeuds = self._troncon_osm(position, cap) if way_id_osm is not None else None
 
         maintenant = timezone.now()
         with transaction.atomic():
@@ -159,6 +200,7 @@ class ServiceIncident:
                 cap=cap,
                 way_id_osm=way_id_osm,
                 forward_osm=forward_osm,
+                noeud_debut_osm=noeuds[0] if noeuds else None, noeud_fin_osm=noeuds[1] if noeuds else None,
                 nom_voie=geocodage['label'] if geocodage else '',
                 ville=geocodage['city'] if geocodage else '',
                 ville_normalisee=normaliser(geocodage['city']) if geocodage and geocodage['city'] else '',
@@ -185,6 +227,18 @@ class ServiceIncident:
         recents = Incident.objects.filter(auteur=utilisateur, cree_le__gte=depuis).count()
         if recents >= QUOTA_SIGNALEMENTS_PAR_HEURE:
             raise QuotaDepasse()
+
+    def _troncon_osm(self, position, cap):
+        """Troncon entre deux carrefours (noeuds OSM de debut et de fin, dans
+        le sens du signalement) : plus precis que la voie entiere pour savoir
+        si un trajet passe dessus. Seulement avec un cap (sinon le sens, donc
+        l'ordre des noeuds, serait devine) et Valhalla >= 3.6 avec
+        keep_osm_node_ids ; None sinon -- la voie OSM sert alors."""
+        if cap is None:
+            return None
+        from trips.services.client_trace_attributes import troncon_au_point
+
+        return troncon_au_point(position.y, position.x, cap)
 
     def _verifier_position_routiere(self, position, cap=None):
         """None si la verification est ignoree (Valhalla indisponible, ou

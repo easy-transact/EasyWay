@@ -35,6 +35,7 @@ urlpatterns = [
     path('staff/insights/moderation-queue/', vues_pilotage.FileModerationView.as_view(), name='pilotage-moderation'),
     path('staff/insights/route-proposals/', vues_pilotage.PropositionsView.as_view(), name='pilotage-propositions'),
     path('staff/insights/data-density/', vues_pilotage.DensiteDonneesView.as_view(), name='pilotage-densite'),
+    path('staff/insights/traffic-health/', vues_pilotage.SanteTraficView.as_view(), name='pilotage-sante-trafic'),
     path('staff/insights/live-map/', vues_pilotage.CarteDirectView.as_view(), name='pilotage-direct'),
     path('staff/insights/live-vehicles/', vues_pilotage.VehiculesDirectView.as_view(), name='pilotage-vehicules'),
 ]

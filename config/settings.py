@@ -182,15 +182,15 @@ REST_FRAMEWORK = {
         # essais de l'utilisateur), mais borne pour qu'un seul compte ne sature
         # pas Valhalla. A ajuster avec l'usage reel.
         'calcul-itineraire': '300/hour',
+        # Votes sur les signalements (confirmer / "Plus rien") : chaque
+        # confirmation rapporte des points et pese sur les fermetures de route.
+        'vote-incident': '60/hour',
         # Repond existe / n'existe pas : bloque l'enumeration de comptes en masse.
         'verification-existence': '20/hour',
         # Invitations de membres d'agence : chaque appel envoie un email.
         'invitation': '30/hour',
         # Avis sur les garages (creation/modification).
         'avis-garage': '10/hour',
-        # Votes sur les signalements (confirmer / infirmer) : borne les abus de
-        # vote en masse (cf. REVUE_CONFIRMATION_SIGNALEMENTS, point 3).
-        'vote-incident': '60/hour',
     },
 }
 
@@ -418,6 +418,10 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'community.tasks.activer_programmes',
         'schedule': 60.0,
     },
+    'recaler-signalements-sans-voie': {
+        'task': 'community.tasks.recaler_signalements_sans_voie',
+        'schedule': 300.0,
+    },
     'abandonner-trajets-inactifs': {
         'task': 'trips.tasks.abandonner_trajets_inactifs',
         'schedule': 15 * 60.0,
@@ -444,6 +448,10 @@ CELERY_BEAT_SCHEDULE = {
         # Un bouchon doit influencer le routage en 1-2 min ; le bucket en
         # cours est lu tel quel, pas besoin d'attendre sa fermeture.
         'schedule': 90.0,
+    },
+    'surveiller-trafic-temps-reel': {
+        'task': 'trips.tasks.surveiller_trafic_temps_reel',
+        'schedule': 300.0,
     },
 }
 
