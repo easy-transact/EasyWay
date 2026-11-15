@@ -60,7 +60,8 @@ class EmbouteillageAmontTests(TestCase):
         self.signaler(cap=90, score_confiance=0)
         with patch('trips.services.client_meili.tracer', return_value=([{'id': 1}], [])):
             vitesses = trafic_temps_reel.vitesses_signalements()
-        self.assertAlmostEqual(vitesses[1], 40 - 35 * 0.25, places=1)
+        # _vitesse_ponderee arrondit a 1 decimale : round(40 - 35*0.25, 1) = 31.2.
+        self.assertAlmostEqual(vitesses[1], round(40 - 35 * 0.25, 1), places=2)
 
     def test_signalement_conteste_non_publie(self):
         self.signaler(cap=90, score_confiance=-1, infirmations=2)

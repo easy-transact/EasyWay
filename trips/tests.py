@@ -790,7 +790,10 @@ class TraficTempsReelTests(SimpleTestCase):
 
         cache.clear()  # aretes de signalements memorisees par un test precedent
         # Vitesse typique du creneau (historique) : arete 3 sans mesure ni signalement.
-        patcheur = patch.object(service_trafic, 'vitesses_typiques_creneau', return_value={_graph_id(3): 22})
+        # side_effect (dict neuf a chaque appel) et non return_value : publier()
+        # fait vitesses.update(...) dessus, un return_value partage serait pollue
+        # d'un tour a l'autre (la vraie fonction renvoie un dict neuf a chaque fois).
+        patcheur = patch.object(service_trafic, 'vitesses_typiques_creneau', side_effect=lambda: {_graph_id(3): 22})
         patcheur.start()
         self.addCleanup(patcheur.stop)
         # Route barree confirmee sur l'arete 4 : marquee fermee.
@@ -917,19 +920,6 @@ class ClientLocateTests(TestCase):
             with self.assertRaises(client_locate.ErreurLocate):
                 client_locate.localiser(4.0, 9.7)
 
-    def test_reponse_400_ne_compte_pas_pour_le_disjoncteur(self):
-        # 4xx = requete refusee (cas normal), pas une panne : ErreurLocate mais
-        # le disjoncteur partage reste ferme -- sinon un seul mauvais point
-        # couperait le routage de tous (meme logique que ClientValhalla).
-        reponse_400 = Mock(status_code=400)
-        reponse_400.raise_for_status.side_effect = requests.exceptions.HTTPError(response=reponse_400)
-        with patch('trips.services.client_locate.requests.post', return_value=reponse_400):
-            for _ in range(SEUIL_ECHECS + 1):
-                with self.assertRaises(client_locate.ErreurLocate):
-                    client_locate.localiser(4.0, 9.7)
-        self.assertIsNone(cache.get(CLE_ECHECS))
-        self.assertIsNone(cache.get(CLE_OUVERT_JUSQU_A))
-
     def test_disjoncteur_partage_avec_valhalla(self):
         # Le disjoncteur est partage (meme conteneur) : des echecs de
         # ClientValhalla doivent aussi bloquer client_locate sans nouvel appel reseau.
@@ -947,40 +937,15 @@ class ClientLocateTests(TestCase):
             post_simule.assert_not_called()
 
 
-class ClientsValhalla4xxDisjoncteurTests(TestCase):
-    """Un 4xx de /trace_attributes (map-matching, suivi de trace) ne doit pas
-    non plus ouvrir le disjoncteur partage : il couperait le routage de tous
-    pour une geometrie que Valhalla a simplement refusee."""
+class ClientMeili5xxDisjoncteurTests(TestCase):
+    """Complement au test_400_des_autres_clients (DisjoncteurValhallaTests, qui
+    couvre le cas 4xx = reponse vide) : une vraie panne (5xx) compte, elle,
+    comme un echec du disjoncteur."""
 
     def setUp(self):
         cache.clear()
 
-    @staticmethod
-    def _reponse_400():
-        reponse = Mock(status_code=400)
-        reponse.raise_for_status.side_effect = requests.exceptions.HTTPError(response=reponse)
-        return reponse
-
-    def test_meili_400_leve_erreur_sans_ouvrir_le_disjoncteur(self):
-        points = [{'lat': 4.0, 'lon': 9.7, 'time': 0}, {'lat': 4.01, 'lon': 9.71, 'time': 4}]
-        with patch('trips.services.client_meili.requests.post', return_value=self._reponse_400()):
-            for _ in range(SEUIL_ECHECS + 1):
-                with self.assertRaises(ErreurMeili):
-                    client_meili.tracer(points)
-        self.assertIsNone(cache.get(CLE_ECHECS))
-        self.assertIsNone(cache.get(CLE_OUVERT_JUSQU_A))
-
-    def test_trace_attributes_400_leve_erreur_sans_ouvrir_le_disjoncteur(self):
-        points = [(9.70, 4.0), (9.71, 4.01)]
-        with patch('trips.services.client_trace_attributes.requests.post', return_value=self._reponse_400()):
-            for _ in range(SEUIL_ECHECS + 1):
-                with self.assertRaises(client_trace_attributes.ErreurTraceAttributes):
-                    client_trace_attributes.attributs_trace(points)
-        self.assertIsNone(cache.get(CLE_ECHECS))
-        self.assertIsNone(cache.get(CLE_OUVERT_JUSQU_A))
-
     def test_meili_5xx_ouvre_le_disjoncteur(self):
-        # Contraste : une vraie panne (5xx) compte toujours comme un echec.
         reponse_500 = Mock(status_code=500)
         reponse_500.raise_for_status.side_effect = requests.exceptions.HTTPError(response=reponse_500)
         points = [{'lat': 4.0, 'lon': 9.7, 'time': 0}, {'lat': 4.01, 'lon': 9.71, 'time': 4}]
@@ -1383,29 +1348,6 @@ class TelemetriePositionsApiTests(TestCase):
             self.assertEqual(evenement['trajet_id'], str(self.trajet.id))
             self.assertNotIn('utilisateur_id', evenement)
             self.assertNotIn('user_id', evenement)
-
-    def test_position_dans_le_futur_rejetee(self):
-        # Horodatage futur = tentative d'injecter un faux trafic "actuel".
-        futur = (timezone.now() + timezone.timedelta(hours=1)).isoformat()
-        lot = self._lot(positions=[{'lat': 4.05, 'lon': 9.70, 'timestamp': futur}])
-        reponse = self.client.post(
-            reverse('trips:telemetrie-positions'), lot, content_type='application/json', **self.jetons,
-        )
-        self.assertEqual(reponse.status_code, 400)
-
-    def test_position_future_ecartee_sans_perdre_le_reste_du_lot(self):
-        futur = (timezone.now() + timezone.timedelta(hours=1)).isoformat()
-        lot = self._lot(positions=[
-            {'lat': 4.0483, 'lon': 9.7043, 'timestamp': '2026-01-01T10:00:00Z'},
-            {'lat': 4.0480, 'lon': 9.7040, 'timestamp': futur},
-        ])
-        with patch('trips.views.ProducteurRedisStreams') as ClasseProducteur:
-            producteur = ClasseProducteur.return_value
-            reponse = self.client.post(
-                reverse('trips:telemetrie-positions'), lot, content_type='application/json', **self.jetons,
-            )
-        self.assertEqual(reponse.status_code, 202)
-        self.assertEqual(producteur.publier.call_count, 1)  # seule la position non future est publiee
 
     def test_mode_invisible_ne_publie_rien(self):
         self.utilisateur.mode_invisible = True

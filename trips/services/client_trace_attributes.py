@@ -61,14 +61,6 @@ def attributs_trace(points: list[tuple[float, float]]) -> list[dict] | None:
         if reponse is None:
             reponse = appeler(None)  # sortie complete, comme avant (voie + sens)
         reponse.raise_for_status()
-    except requests.HTTPError as exc:
-        # 4xx = geometrie refusee par Valhalla : cas normal, pas une panne. Ne
-        # jamais ouvrir le disjoncteur partage pour ca -- ce serait couper le
-        # routage de tous. Seuls 5xx/reseau comptent comme panne.
-        if exc.response is not None and 400 <= exc.response.status_code < 500:
-            raise ErreurTraceAttributes(str(exc)) from exc
-        disjoncteur.enregistrer_echec()
-        raise ErreurTraceAttributes(str(exc)) from exc
     except requests.RequestException as exc:
         if disjoncteur.est_requete_refusee(exc):
             return None  # geometrie refusee (4xx) : aucune arete, pas une panne

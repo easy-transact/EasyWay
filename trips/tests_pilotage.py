@@ -187,6 +187,10 @@ class TraceReelleTests(TestCase):
         self.assertEqual(fiche['declared_incidents_avoided'], 3)  # ce que le conducteur a declare
 
     def test_chronometre_reste_ouvert_corrige(self):
+        # Trajet demarre il y a 40 min : les positions a +37 min tombent dans le
+        # passe recent (sinon la borne future de la telemetrie les ecarterait).
+        self.trajet.demarre_le = timezone.now() - timedelta(minutes=40)
+        self.trajet.save(update_fields=['demarre_le'])
         debut = self.trajet.demarre_le
         self.envoyer([(4.05, 9.70), (4.06, 9.71)], debut + timedelta(minutes=37))  # positions jusqu'a ~37 min
         reponse = self.client.patch(

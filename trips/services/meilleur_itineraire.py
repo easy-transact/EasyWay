@@ -230,14 +230,18 @@ def _decider(trajet, position, utilisateur, cap, etapes_restantes, eviter, vites
             if evites and baisse >= BAISSE_MIN_COUT_S and baisse >= BAISSE_MIN_RATIO * risque.cout(actuel):
                 propositions.append((SAFER_FOUND, sure, evites))
 
+    en_attente_une = False
     for raison, route, evites in propositions:
         maintenant, en_attente = _stable(trajet, route, evites)
         if maintenant:
             return {**resultat, 'reason': raison, 'better_route': route, 'new_duration_s': duree_effective(route),
                     'time_saved_s': actuelle - duree_effective(route), 'avoided_hazards': evites}
-        if en_attente:
-            resultat['pending_confirmation'] = True
-            break
+        # Pas de break : une route "plus rapide" en attente de confirmation ne
+        # doit pas empecher une route "plus sure" deja stable d'etre proposee a
+        # cet appel (REVUE_MEILLEUR_ITINERAIRE, point 6).
+        en_attente_une = en_attente_une or en_attente
+    if en_attente_une:
+        resultat['pending_confirmation'] = True
 
     # 3. Rien a proposer (maintenant) : on previent quand meme du danger.
     return {**resultat, 'reason': HAZARD_AHEAD} if devant else resultat

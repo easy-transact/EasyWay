@@ -89,15 +89,6 @@ def tracer(points: list[dict], shape_match: str = 'map_snap', attributs=None,
             # les attributs de base.
             reponse = appeler(ATTRIBUTS_DEFAUT)
         reponse.raise_for_status()
-    except requests.HTTPError as exc:
-        # 4xx = trace refusee par Valhalla (geometrie inexploitable...) : cas
-        # normal, pas une panne. Ne jamais ouvrir le disjoncteur partage pour
-        # ca -- ce serait couper le map-matching ET le routage de tous pour une
-        # seule mauvaise requete. Seuls 5xx/reseau comptent comme panne.
-        if exc.response is not None and 400 <= exc.response.status_code < 500:
-            raise ErreurMeili(str(exc)) from exc
-        disjoncteur.enregistrer_echec()
-        raise ErreurMeili(str(exc)) from exc
     except requests.RequestException as exc:
         if disjoncteur.est_requete_refusee(exc):
             # Valhalla repond 400 quand le recalage echoue completement : meme

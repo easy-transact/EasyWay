@@ -460,9 +460,12 @@ session (real request/response pairs, values may differ slightly by run):
    avoid=[{ "lat": <incident.lat>, "lon": <incident.lon> }]
    -> recommended distance jumps to 1787m with a different geometry —
    this is a genuinely different route, confirmed working end-to-end.
-   (Whether you create a NEW trip for this or just re-route the existing
-   ACTIVE one client-side is a product decision — the backend has no
-   "reroute an existing trip" endpoint; POST trips/ always creates a new row.)
+   To re-route the EXISTING active trip (keep the same row, its id and its
+   started_at), use POST trips/{id}/switch-route/ with the chosen candidate —
+   do NOT POST trips/ again (that always creates a NEW row). During navigation
+   the app normally gets the candidate from better-route / alternative-routes
+   and confirms it with switch-route; routes/calculate here is just the manual
+   "avoid this incident" recompute.
 
 5) Trip finishes. PATCH trips/{id}/
    { "status": "TERMINE", "actual_distance": 1820, "actual_duration": 145 }

@@ -429,7 +429,8 @@ signales, deja pris en compte par le calcul d'itineraire).
     SAFER_FOUND       better_route evite un danger serieux devant
                       (avoided_hazards) : "Accident signale a 1,5 km.
                       Contourner ? +2 min". Jamais deux fois pour le meme
-                      danger (sauf s'il s'aggrave), au plus une fois / 3 min.
+                      danger (sauf s'il s'aggrave). [PERIME : "au plus une fois
+                      / 3 min" -- la valeur reelle est 15 min, cf. section 19.]
     HAZARD_AHEAD      danger serieux devant mais pas de contournement utile
                       (ou trop proche, < 300 m) : alerte seulement
                       ("Accident dans 800 m, ralentissez"), better_route null.

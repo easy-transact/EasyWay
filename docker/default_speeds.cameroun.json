@@ -1,0 +1,53 @@
+{
+  "_README": [
+    "MODELE DE REFERENCE -- ne pas placer tel quel dans custom_files sans verifier.",
+    "Ce fichier porte les VALEURS (km/h) a viser pour le Cameroun : en ville,",
+    "resserrer l'ecart entre axe primaire et rue secondaire (au lieu des 60+ km/h",
+    "implicites de Valhalla), pour que le choix de route ne privilegie plus",
+    "systematiquement les grands axes (revue 1.1, cf. docker/VITESSES_DEFAUT.md).",
+    "",
+    "Le SCHEMA attendu depend de la version de Valhalla / de l'outil default_speeds.",
+    "Avant usage : confirmer la structure contre la doc de la version installee,",
+    "puis copier le fichier dans custom_files et pointer mjolnir.default_speeds_config",
+    "dessus dans custom_files/valhalla.json, et rebuilder les tuiles une passe.",
+    "",
+    "Valeurs de depart, a CALIBRER sur les donnees reelles : PrevisionItineraire",
+    "contre Trajet.duree_reelle, et EchantillonVitesse regroupe par classe de route."
+  ],
+  "CM": {
+    "iso3166-1": "CM",
+    "urban": {
+      "motorway": 70,
+      "trunk": 45,
+      "primary": 40,
+      "secondary": 35,
+      "tertiary": 30,
+      "unclassified": 28,
+      "residential": 25,
+      "service": 18,
+      "living_street": 12
+    },
+    "suburban": {
+      "motorway": 85,
+      "trunk": 60,
+      "primary": 55,
+      "secondary": 45,
+      "tertiary": 40,
+      "unclassified": 35,
+      "residential": 28,
+      "service": 20,
+      "living_street": 12
+    },
+    "rural": {
+      "motorway": 100,
+      "trunk": 80,
+      "primary": 70,
+      "secondary": 60,
+      "tertiary": 50,
+      "unclassified": 40,
+      "residential": 30,
+      "service": 22,
+      "living_street": 12
+    }
+  }
+}
