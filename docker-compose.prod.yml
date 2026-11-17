@@ -229,8 +229,12 @@ services:
       VALHALLA_URL: http://valhalla:8002
       NOMINATIM_URL: http://nominatim:8080
       PHOTON_URL: http://photon:2322
-      TRAFIC_TAR_PATH: /custom_files/traffic.tar
-    # Lecture-ecriture : seul service qui ecrit dans traffic.tar, que Valhalla
+      # Note : l'image gis-ops AJOUTE ".tar" a `traffic_name`, donc
+      # traffic_name=traffic.tar produit le fichier traffic.tar.tar (et
+      # mjolnir.traffic_extract pointe dessus dans valhalla.json). Le worker
+      # doit ecrire exactement ce fichier -- d'ou le double .tar ici.
+      TRAFIC_TAR_PATH: /custom_files/traffic.tar.tar
+    # Lecture-ecriture : seul service qui ecrit dans traffic.tar.tar, que Valhalla
     # relit en mmap a chaque calcul (web garde un montage :ro).
     volumes:
       - ./valhalla/custom_files:/custom_files

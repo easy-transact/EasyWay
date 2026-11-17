@@ -26,7 +26,7 @@ WHAT ALREADY EXISTS IN THE CODEBASE (verified against the code, not assumed)
   less than a high-trust account's.
 - Idempotency-Key prevents double-submission from client retries (not an
   abuse defense, just a reliability one — noted for completeness).
-- 150m/45deg/same-type dedup: a second report of the same jam near an
+- 10m/45deg/same-type dedup: a second report of the same jam near an
   existing one corroborates it rather than creating a duplicate.
 
 ------------------------------------------------------------
@@ -90,7 +90,7 @@ above is 10-25x over even that generous line.
 
 Mechanically: on each new report, look up the author's most recent PRIOR
 report (regardless of type/location), compute distance (haversine, same
-math already used for the 150m dedup radius) and elapsed time since that
+math already used for the 10m dedup radius) and elapsed time since that
 prior report, derive implied km/h. If it exceeds the threshold, the new
 report doesn't get auto-published — same EN_ATTENTE path that already
 exists for low-reputation accounts, not a hard block. This is cheap (one

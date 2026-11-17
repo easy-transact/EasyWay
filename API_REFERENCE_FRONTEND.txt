@@ -827,7 +827,7 @@ Body:
 Success 200 or 201: INCIDENT OBJECT + one extra field:
   "duplicate_of_existing": true | false
   200 = merged into an existing nearby report of the same type (within
-  150m, same-ish direction if heading given on both) instead of creating a
+  10m, same-ish direction if heading given on both) instead of creating a
   new one — that existing incident got a confirmation vote from you.
   201 = genuinely new incident created.
 Position handling (both can reject with 400 before any incident is

@@ -11,7 +11,7 @@ from django.utils import timezone
 
 from accounts.models import Utilisateur
 
-RESOLUTION_H3_FIN = 8  # ~460m de cote -- rayon de recherche des doublons (150m),
+RESOLUTION_H3_FIN = 8  # ~460m de cote -- rayon de recherche des doublons (10m),
 # et depuis le passage de /proches/ en resolution 8, fenetre de requete/cache
 # de cet endpoint aussi (beneficie au passage de l'index cellule_h3_res8+statut).
 RESOLUTION_H3_LARGE = 7  # ~1.2km de cote -- conserve sur Incident mais non
@@ -472,7 +472,7 @@ class Incident(models.Model):
         self.save(update_fields=['statut', 'fusionne_dans'])
 
     def est_doublon_de(self, autre: 'Incident') -> bool:
-        # Rayon de 150 m, meme type (regle de UC-03). Le secteur de 45 degres
+        # Rayon de 10 m, meme type (regle de UC-03). Le secteur de 45 degres
         # (meme sens de circulation) se calcule a partir de `cap` cote service,
         # une comparaison d'angle n'ayant pas sa place dans le modele de donnees.
         # self.position.distance() operant en degres (planaire sur SRID 4326),
@@ -485,7 +485,7 @@ class Incident(models.Model):
         resultat = Incident.objects.filter(pk=self.pk).annotate(
             distance=Distance('position', autre.position)
         ).first()
-        return resultat.distance <= D(m=150)
+        return resultat.distance <= D(m=10)
 
     def impact_estime(self) -> int:
         return self.confirmations - self.infirmations

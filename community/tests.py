@@ -172,7 +172,7 @@ class ServiceIncidentSignalerTests(TestCase):
         auteur2 = creer_utilisateur('b@easyway.local')
 
         incident, doublon = ServiceIncident().signaler(
-            auteur2, TypeIncident.EMBOUTEILLAGE, self._point(0.0005, 0.0005)
+            auteur2, TypeIncident.EMBOUTEILLAGE, self._point(0.00005, 0.00005)
         )
         self.assertTrue(doublon)
         self.assertEqual(incident.id, existant.id)
@@ -185,7 +185,7 @@ class ServiceIncidentSignalerTests(TestCase):
         auteur = creer_utilisateur('auteur@easyway.local')
         existant = creer_incident(auteur, type_incident=TypeIncident.VOIE_BLOQUEE)
         incident, doublon = ServiceIncident().signaler(
-            auteur, TypeIncident.VOIE_BLOQUEE, self._point(0.0005, 0.0005)
+            auteur, TypeIncident.VOIE_BLOQUEE, self._point(0.00005, 0.00005)
         )
         self.assertTrue(doublon)
         self.assertEqual(incident.id, existant.id)
@@ -206,7 +206,7 @@ class ServiceIncidentSignalerTests(TestCase):
             expire_le=timezone.now() - timezone.timedelta(minutes=5),
         )
         incident, doublon = ServiceIncident().signaler(
-            creer_utilisateur('b@easyway.local'), TypeIncident.EMBOUTEILLAGE, self._point(0.0005, 0.0005)
+            creer_utilisateur('b@easyway.local'), TypeIncident.EMBOUTEILLAGE, self._point(0.00005, 0.00005)
         )
         self.assertFalse(doublon)
         self.assertNotEqual(incident.id, perime.id)

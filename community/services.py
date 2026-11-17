@@ -96,7 +96,7 @@ def incidents_actifs_par_topologie(points: list[tuple[float, float]]) -> list[In
 
 
 QUOTA_SIGNALEMENTS_PAR_HEURE = 10
-RAYON_DOUBLON_M = 150
+RAYON_DOUBLON_M = 10
 SECTEUR_DOUBLON_DEGRES = 45
 # Au-dela, on considere que la position n'est sur/pres d'aucune route connue
 # de Valhalla -- pas mesure sur donnees reelles (derive GPS, imprecision
