@@ -65,13 +65,15 @@ ATTRIBUTS_CLE_STABLE = ['edge.forward']
 
 def noeuds_osm(arete):
     """(noeud OSM de debut, noeud OSM de fin) de l'arete, ou None (Valhalla
-    < 3.6 ou tuiles sans keep_osm_node_ids). Format de trace_attributes :
-    edge.node_id (debut) et edge.end_node.node_id (fin)."""
-    debut = arete.get('node_id')
-    fin = (arete.get('end_node') or {}).get('node_id')
+    sans keep_osm_node_ids dans les tuiles). Supporte node_id et begin/end_osm_node_id."""
+    debut = arete.get('node_id') or arete.get('begin_osm_node_id')
+    fin = (arete.get('end_node') or {}).get('node_id') or arete.get('end_osm_node_id')
     if debut is None or fin is None:
         return None
-    return int(debut), int(fin)
+    try:
+        return int(debut), int(fin)
+    except (ValueError, TypeError):
+        return None
 
 
 def cle_stable(arete):

@@ -29,6 +29,18 @@ class ErreurTraceAttributes(Exception):
     laisser cette exception remonter, meme principe que ClientLocate."""
 
 
+def extraire_noeuds(arete: dict) -> tuple[int, int] | None:
+    """Extrait (noeud_debut, noeud_fin) que Valhalla les nomme node_id ou begin/end_osm_node_id."""
+    debut = arete.get('node_id') or arete.get('begin_osm_node_id')
+    fin = (arete.get('end_node') or {}).get('node_id') or arete.get('end_osm_node_id')
+    if debut is None or fin is None:
+        return None
+    try:
+        return int(debut), int(fin)
+    except (ValueError, TypeError):
+        return None
+
+
 def attributs_trace(points: list[tuple[float, float]]) -> list[dict] | None:
     """`points` : liste de (lon, lat), meme forme que decoder_polyline6().
     Retourne la liste ordonnee des aretes traversees par le trajet --
@@ -73,12 +85,8 @@ def attributs_trace(points: list[tuple[float, float]]) -> list[dict] | None:
     return [
         {
             'way_id': arete['way_id'], 'forward': arete['forward'],
-            # (debut, fin) du troncon, ou None (Valhalla < 3.6, tuiles sans noeuds).
-            'noeuds': (
-                (int(arete['node_id']), int(arete['end_node']['node_id']))
-                if arete.get('node_id') is not None and (arete.get('end_node') or {}).get('node_id') is not None
-                else None
-            ),
+            # (debut, fin) du troncon, ou None (Valhalla sans keep_osm_node_ids).
+            'noeuds': extraire_noeuds(arete),
         }
         for arete in aretes
     ]
@@ -133,9 +141,8 @@ def troncon_au_point(lat: float, lon: float, cap: int) -> tuple[int, int] | None
     index = points[1].get('edge_index') if len(points) > 1 else None
     if index is None or not 0 <= index < len(aretes):
         return None
-    debut = aretes[index].get('node_id')
-    fin = (aretes[index].get('end_node') or {}).get('node_id')
-    if debut is None or fin is None:
-        cache.set(CLE_NOEUDS_INDISPONIBLES, True, timeout=3600)  # Valhalla < 3.6 ou tuiles sans noeuds
+    noeuds = extraire_noeuds(aretes[index])
+    if noeuds is None:
+        cache.set(CLE_NOEUDS_INDISPONIBLES, True, timeout=3600)  # Valhalla sans keep_osm_node_ids dans les tuiles
         return None
-    return int(debut), int(fin)
+    return noeuds

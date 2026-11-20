@@ -4,7 +4,7 @@ Script de diagnostic pour tester les attributs retournes et acceptes par Valhall
 Usage:
     python test_valhalla_attributes.py [VALHALLA_URL]
     # Ou dans le conteneur web:
-    docker compose exec web python test_valhalla_attributes.py
+    docker compose -f docker-compose.prod.yml exec web python test_valhalla_attributes.py
 """
 
 import json
@@ -33,17 +33,27 @@ ATTRIBUTS_A_TESTER = [
     "edge.toll",
     "edge.traffic_signal",
     "node.type",
-    "node.traffic_signal",       # Devrait etre rejete (attribut sur edge)
-    "edge.begin_osm_node_id",    # Devrait etre rejete (non supporte en filtre)
-    "edge.end_osm_node_id",      # Devrait etre rejete (non supporte en filtre)
+    "node.traffic_signal",
+    "edge.begin_osm_node_id",
+    "edge.end_osm_node_id",
     "matched.point",
     "matched.edge_index",
     "matched.distance_along_edge",
 ]
 
 
+def tester_version():
+    print(f"=== 0. Version de Valhalla ({VALHALLA_URL}/status) ===")
+    try:
+        resp = requests.get(f"{VALHALLA_URL}/status", timeout=5)
+        print(f"Status: {resp.status_code}")
+        print(f"Response: {resp.text}")
+    except Exception as exc:
+        print(f"Erreur status: {exc}")
+
+
 def tester_trace_complete():
-    print(f"=== 1. Test /trace_attributes complet (sans filtre) sur {VALHALLA_URL} ===")
+    print(f"\n=== 1. Test /trace_attributes complet (sans filtre) sur {VALHALLA_URL} ===")
     payload = {
         "shape": POINTS_TEST,
         "costing": "auto",
@@ -82,40 +92,51 @@ def tester_trace_complete():
             print(f"  - traffic_signal (sur end_node): {(end_node or {}).get('traffic_signal')}")
             print(f"  - node_id (debut arete): {premiere.get('node_id')}")
             print(f"  - node_id (fin arete/end_node): {(end_node or {}).get('node_id')}")
+            print(f"  - begin_osm_node_id: {premiere.get('begin_osm_node_id')}")
+            print(f"  - end_osm_node_id: {premiere.get('end_osm_node_id')}")
         return data
     except Exception as exc:
         print(f"Echec connexion Valhalla: {exc}")
         return None
 
 
-def tester_filtres_individuels():
-    print(f"\n=== 2. Test des filtres d'attributs individuels sur {VALHALLA_URL} ===")
-    acceptes = []
-    rejetes = []
-    for attr in ATTRIBUTS_A_TESTER:
+def tester_filtres_specifiques():
+    print(f"\n=== 2. Contenu exact retourne selon les filtres demandes ===")
+    groupes_filtres = [
+        ("Filtre noeuds OSM", ["edge.begin_osm_node_id", "edge.end_osm_node_id"]),
+        ("Filtre node.traffic_signal", ["node.traffic_signal"]),
+        ("Filtre edge.traffic_signal", ["edge.traffic_signal"]),
+        ("Filtre ATTRIBUTS_TRONCON actuel", [
+            'edge.id', 'edge.length', 'edge.speed', 'edge.way_id', 'edge.road_class', 'edge.names',
+            'edge.roundabout', 'edge.toll', 'edge.traffic_signal', 'node.type',
+            'matched.point', 'matched.type', 'matched.edge_index', 'matched.distance_along_edge',
+        ]),
+    ]
+    for nom, attrs in groupes_filtres:
         payload = {
             "shape": POINTS_TEST,
             "costing": "auto",
             "shape_match": "map_snap",
-            "filters": {"attributes": [attr], "action": "include"},
+            "filters": {"attributes": attrs, "action": "include"},
         }
         try:
             resp = requests.post(f"{VALHALLA_URL}/trace_attributes", json=payload, timeout=5)
             if resp.status_code == 200:
-                print(f"  [OK 200]  {attr}")
-                acceptes.append(attr)
+                data = resp.json()
+                edges = data.get("edges", [])
+                print(f"\n* {nom} (HTTP 200) -> {len(edges)} aretes")
+                if edges:
+                    print(f"  Cles edge[0]: {list(edges[0].keys())}")
+                    if "end_node" in edges[0]:
+                        print(f"  Cles edge[0]['end_node']: {list(edges[0]['end_node'].keys())}")
+                    print(f"  Valeurs edge[0]: {json.dumps(edges[0], indent=2)}")
             else:
-                msg = resp.json().get("error", resp.text) if resp.headers.get("content-type") == "application/json" else resp.text
-                print(f"  [REFUSE {resp.status_code}] {attr} -> {msg}")
-                rejetes.append((attr, resp.status_code, msg))
+                print(f"\n* {nom} (HTTP {resp.status_code}) -> {resp.text}")
         except Exception as exc:
-            print(f"  [ERREUR]  {attr} -> {exc}")
-
-    print("\n--- Bilan des filtres ---")
-    print(f"Acceptes ({len(acceptes)}): {', '.join(acceptes)}")
-    print(f"Rejetes ({len(rejetes)}): {', '.join([r[0] for r in rejetes])}")
+            print(f"\n* {nom} -> Erreur: {exc}")
 
 
 if __name__ == "__main__":
+    tester_version()
     tester_trace_complete()
-    tester_filtres_individuels()
+    tester_filtres_specifiques()
