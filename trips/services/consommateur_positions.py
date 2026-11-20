@@ -60,10 +60,7 @@ TAILLE_BUCKET_S = 5 * 60
 PREFIXE_CHAMP_TRAJET = 't:'
 # Sens de parcours de l'arete sur la voie OSM : avec edge.way_id (deja dans
 # ATTRIBUTS_TRONCON), cle stable d'une generation de tuiles a l'autre.
-# Dans cet ordre : retires depuis la fin si Valhalla les refuse (cf. client_meili).
-# Noeuds OSM de debut/fin d'arete : Valhalla >= 3.6, tuiles construites avec
-# mjolnir.keep_osm_node_ids -- troncon entre deux carrefours, cle la plus fine.
-ATTRIBUTS_CLE_STABLE = ['edge.forward', 'edge.begin_osm_node_id', 'edge.end_osm_node_id']
+ATTRIBUTS_CLE_STABLE = ['edge.forward']
 
 
 def noeuds_osm(arete):

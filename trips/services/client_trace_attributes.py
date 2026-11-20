@@ -20,7 +20,7 @@ from . import disjoncteur
 TIMEOUT_S = 5
 
 
-ATTRIBUTS_AVEC_NOEUDS = ['edge.way_id', 'edge.forward', 'edge.begin_osm_node_id', 'edge.end_osm_node_id']
+ATTRIBUTS_MINIMAUX = ['edge.way_id', 'edge.forward']
 
 
 class ErreurTraceAttributes(Exception):
@@ -51,15 +51,12 @@ def attributs_trace(points: list[tuple[float, float]]) -> list[dict] | None:
         return requests.post(f'{settings.VALHALLA_URL}/trace_attributes', json=corps, timeout=TIMEOUT_S)
 
     try:
-        reponse = None
-        if not cache.get(CLE_NOEUDS_INDISPONIBLES):
-            # Noeuds OSM (troncon) en plus de la voie et du sens : demandes
-            # explicitement (filtre), sinon Valhalla ne les renvoie pas.
-            reponse = appeler(ATTRIBUTS_AVEC_NOEUDS)
-            if reponse.status_code == 400:
-                reponse = None
-        if reponse is None:
-            reponse = appeler(None)  # sortie complete, comme avant (voie + sens)
+        # Sans filtre pour recuperer tous les attributs (dont les noeuds si presents).
+        # Si deja connu comme indisponible dans le cache, on filtre au minimum (voie + sens).
+        if cache.get(CLE_NOEUDS_INDISPONIBLES):
+            reponse = appeler(ATTRIBUTS_MINIMAUX)
+        else:
+            reponse = appeler(None)
         reponse.raise_for_status()
     except requests.RequestException as exc:
         if disjoncteur.est_requete_refusee(exc):
@@ -121,11 +118,9 @@ def troncon_au_point(lat: float, lon: float, cap: int) -> tuple[int, int] | None
         reponse = requests.post(
             f'{settings.VALHALLA_URL}/trace_attributes',
             json={
-                'shape': forme, 'costing': 'auto', 'shape_match': 'map_snap',
-                'filters': {
-                    'attributes': ['edge.begin_osm_node_id', 'edge.end_osm_node_id', 'matched.edge_index'],
-                    'action': 'include',
-                },
+                'shape': forme,
+                'costing': 'auto',
+                'shape_match': 'map_snap',
             },
             timeout=TIMEOUT_S,
         )

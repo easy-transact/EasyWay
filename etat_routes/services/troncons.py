@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 # Attributs demandes a trace_attributes (cf. trips/services/client_meili.py).
 ATTRIBUTS_TRONCON = [
     'edge.id', 'edge.length', 'edge.speed', 'edge.way_id', 'edge.road_class', 'edge.names',
-    'edge.roundabout', 'edge.toll', 'node.traffic_signal', 'node.type',
+    'edge.roundabout', 'edge.toll', 'edge.traffic_signal', 'node.type',
     'matched.point', 'matched.type', 'matched.edge_index', 'matched.distance_along_edge',
 ]
 
@@ -54,7 +54,13 @@ def classe_attendue(classe_route):
 
 def _ralentissement_normal(arete):
     noeud = arete.get('end_node') or {}
-    return bool(arete.get('roundabout') or arete.get('toll') or noeud.get('traffic_signal') or noeud.get('type') == 'toll_booth')
+    return bool(
+        arete.get('roundabout')
+        or arete.get('toll')
+        or arete.get('traffic_signal')
+        or noeud.get('traffic_signal')
+        or noeud.get('type') == 'toll_booth'
+    )
 
 
 def empreinte_conducteur(utilisateur_id):
