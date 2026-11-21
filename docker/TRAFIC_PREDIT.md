@@ -45,6 +45,12 @@ profil ; ce n'est pas un problème, les autres gardent les vitesses de Valhalla.
    prévu : la publication du trafic détecte le nouveau fichier, réapprend les
    correspondances d'arêtes et garde l'historique par voie OSM.
 
+   > ⚠️ **Après tout rebuild**, le fichier est recréé par Valhalla en `root:root`
+   > et le worker Celery (utilisateur `django`) ne peut plus l'écrire → « Trafic
+   > temps réel en panne » dans le BO. Le rendre inscriptible (nom réel
+   > `traffic.tar.tar`) : `chmod 666 valhalla/custom_files/traffic.tar.tar`.
+   > Détail complet dans `VITESSES_DEFAUT.md`.
+
 ## À vérifier la première fois
 
 Les commandes des étapes 2 et 3 suivent la documentation de Valhalla 3.5.1 et

@@ -29,7 +29,7 @@ from datetime import datetime
 import redis
 
 from etat_routes.services.reglages import reglages
-from etat_routes.services.troncons import ATTRIBUTS_TRONCON, enregistrer_passages
+from etat_routes.services.troncons import ATTRIBUTS_TRONCON, ATTRIBUTS_TRONCON_OPTIONNELS, enregistrer_passages
 
 from .client_meili import ErreurMeili, tracer
 from .disjoncteur import DisjoncteurOuvert
@@ -183,7 +183,12 @@ class ConsommateurPositions:
         ]
 
         try:
-            edges, matched_points = tracer(points, attributs=ATTRIBUTS_TRONCON, attributs_optionnels=ATTRIBUTS_CLE_STABLE)
+            edges, matched_points = tracer(
+                points, attributs=ATTRIBUTS_TRONCON,
+                # edge.forward en premier (cle stable, a garder) ; les feux en
+                # dernier, abandonnes d'abord si Valhalla < 3.6 les refuse.
+                attributs_optionnels=ATTRIBUTS_CLE_STABLE + ATTRIBUTS_TRONCON_OPTIONNELS,
+            )
         except (ErreurMeili, DisjoncteurOuvert) as exc:
             logger.info('Meili indisponible, %d positions laissees en pending: %s', len(ids), exc)
             return []

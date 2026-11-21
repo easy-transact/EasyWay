@@ -24,9 +24,16 @@ logger = logging.getLogger(__name__)
 # Attributs demandes a trace_attributes (cf. trips/services/client_meili.py).
 ATTRIBUTS_TRONCON = [
     'edge.id', 'edge.length', 'edge.speed', 'edge.way_id', 'edge.road_class', 'edge.names',
-    'edge.roundabout', 'edge.toll', 'edge.traffic_signal', 'node.traffic_signal', 'node.type',
+    'edge.roundabout', 'edge.toll', 'node.type',
     'matched.point', 'matched.type', 'matched.edge_index', 'matched.distance_along_edge',
 ]
+# Feux de circulation : attributs refuses par Valhalla < 3.6 ("Invalid filter
+# attribute", cf. serveur en 3.5.1). Passes en OPTIONNELS (cf.
+# client_meili.tracer) : tentes une seule fois par process, puis abandonnes
+# proprement si la version ne les connait pas -- sans faire retomber toute la
+# requete sur les attributs de base (on garde way_id, road_class, noms...).
+# Repris automatiquement le jour ou Valhalla passe en >= 3.6.
+ATTRIBUTS_TRONCON_OPTIONNELS = ['edge.traffic_signal', 'node.traffic_signal']
 
 VITESSE_MAX_PLAUSIBLE_KMH = 180
 MARGE_DEPART_ARRIVEE_M = 200  # depart, stationnement : on y roule au pas quelle que soit la route
@@ -220,7 +227,7 @@ def rattacher_signalement(incident):
     try:
         edges, matched = tracer(
             [{'lat': lat, 'lon': lon, 'time': 0}, {'lat': suivant[0], 'lon': suivant[1], 'time': 2}],
-            attributs=ATTRIBUTS_TRONCON,
+            attributs=ATTRIBUTS_TRONCON, attributs_optionnels=ATTRIBUTS_TRONCON_OPTIONNELS,
         )
     except (ErreurMeili, DisjoncteurOuvert) as exc:
         logger.info('Rattachement du signalement %s reporte : %s', incident.id, exc)

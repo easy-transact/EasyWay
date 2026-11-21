@@ -60,6 +60,24 @@ La publication du trafic (`trips.tasks.publier_trafic_temps_reel`) détecte le
 nouveau fichier, réapprend les correspondances d'arêtes et garde l'historique
 par voie OSM (cf. `TRAFIC_PREDIT.md`).
 
+> ⚠️ **Permissions après un rebuild — à ne pas oublier.** Le conteneur Valhalla
+> tourne en **root** : il (re)crée `traffic.tar` en `root:root` mode 664. Or le
+> worker Celery tourne en utilisateur **`django`** (non-root, cf. `Dockerfile`)
+> et doit **écrire** ce fichier toutes les 90 s. Sans droit d'écriture, la
+> publication échoue (`[Errno 13] Permission denied`) et le BO lève « Trafic
+> temps réel en panne ». Après **chaque** rebuild des tuiles, rendre le fichier
+> inscriptible (le nom réel est `traffic.tar.tar`, l'image gis-ops ajoutant
+> `.tar` à `traffic_name`) :
+>
+> ```bash
+> chmod 666 valhalla/custom_files/traffic.tar.tar
+> ```
+>
+> Le mode tient ensuite (le worker réécrit le fichier sur place), jusqu'au
+> prochain rebuild. Vérifier : `docker compose -f docker-compose.prod.yml logs
+> --since 3m celery_worker | grep -i publi` doit montrer `succeeded ...
+> {'ecrites': N}` sans `Permission denied`.
+
 ## Étape 2 — si l'étape 1 ne suffit pas : valeurs calibrées Cameroun
 
 Si après l'étape 1 les axes principaux restent trop favorisés, fournir un
